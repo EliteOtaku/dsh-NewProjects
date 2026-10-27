@@ -30,6 +30,8 @@ export interface ProjectPaths {
   instructionsPath: string;
   /** Rendered shared-memory mirror, refreshed on every memory write. */
   memoryMirrorPath: string;
+  /** Parent directory for per-thread worktrees. */
+  worktreeRoot: string;
 }
 
 export function projectPaths(rootDir: string): ProjectPaths {
@@ -40,11 +42,21 @@ export function projectPaths(rootDir: string): ProjectPaths {
     manifestPath: join(projectDir, MANIFEST_FILE),
     instructionsPath: join(projectDir, INSTRUCTIONS_FILE),
     memoryMirrorPath: join(projectDir, 'SHARED_MEMORY.md'),
+    worktreeRoot: join(projectDir, 'worktrees'),
   };
 }
 
 /** Content written to `.dsh-project/.gitignore` so local state stays untracked. */
-const PROJECT_GITIGNORE = ['manifest.json', 'manifest.json.tmp', 'SHARED_MEMORY.md', '*.log', ''].join('\n');
+const PROJECT_GITIGNORE = [
+  'manifest.json',
+  'manifest.json.tmp',
+  'SHARED_MEMORY.md',
+  // Thread worktrees live inside the project directory so one cleanup removes them, and
+  // git must never see a checkout nested in its own repository.
+  'worktrees/',
+  '*.log',
+  '',
+].join('\n');
 
 /** A mutation result paired with the manifest it produced. */
 export interface MutationOutcome<R> {

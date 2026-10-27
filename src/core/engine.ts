@@ -20,7 +20,7 @@ import { describeError, isProjectError, ProjectError } from './errors.js';
 import { CommandError } from './exec.js';
 import type { CommandRunner } from './exec.js';
 import { decideHealAction, mergeSnapshot, toCheckStates, toReviewComments, type HealAction } from './healing.js';
-import { ManifestStore, INSTRUCTIONS_FILE, type ProjectPaths } from './manifest.js';
+import { ManifestStore, INSTRUCTIONS_FILE, projectPaths, type ProjectPaths } from './manifest.js';
 import {
   COORDINATOR_AUTHOR,
   markSeen,
@@ -468,6 +468,7 @@ export class ProjectEngine {
       repo,
       namespace,
       scopeOnly: options.scopeOnly === true,
+      threadId,
     });
 
     const now = this.clock.now();
@@ -533,25 +534,36 @@ export class ProjectEngine {
     repo: RepoFacts;
     namespace: string;
     scopeOnly: boolean;
+    threadId: string;
   }): Promise<{ branch?: string; baseCommit?: string; worktreePath?: string }> {
-    const { manifest, task, ordinal, repo, namespace, scopeOnly } = input;
+    const { manifest, task, ordinal, repo, namespace, scopeOnly, threadId } = input;
     if (scopeOnly || !repo.isRepo) return {};
     const branch = branchNameFor(namespace, task, ordinal);
     const base = repo.headCommit;
     if (base === undefined) return {};
     try {
-      // Branch only: the parent checkout must never move, so no worktree is created
-      // here. Threads that need a private checkout get one via `worktreePath`.
+      // Every thread gets its own checkout. Sharing the parent's told each concurrent thread
+      // to write into the same working tree: their `git status` would see each other's edits,
+      // and a commit would land on whatever branch the parent had checked out instead of the
+      // thread's own. A branch ref alone is not isolation.
+      const worktreePath = join(projectPaths(manifest.rootDir).worktreeRoot, threadId);
       const created = await createBranch(this.runner, {
         repoRoot: repo.repositoryRoot ?? manifest.rootDir,
         branch,
         from: base,
+        worktreePath,
       });
-      return { branch: created.branch, ...(created.baseCommit === undefined ? {} : { baseCommit: created.baseCommit }) };
+      return {
+        branch: created.branch,
+        ...(created.baseCommit === undefined ? {} : { baseCommit: created.baseCommit }),
+        ...(created.worktreePath === undefined ? {} : { worktreePath: created.worktreePath }),
+      };
     } catch (error) {
       if (error instanceof CommandError) {
-        // Non-fatal: the thread still runs, isolated by scope discipline.
-        return {};
+        // A checkout could not be created (nested repo, read-only mount, existing directory).
+        // The thread still runs, isolated by scope discipline, and says so in its status
+        // rather than silently sharing the parent's tree.
+        return { branch, baseCommit: base };
       }
       throw error;
     }

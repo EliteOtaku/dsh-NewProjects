@@ -83,7 +83,7 @@ test/integration/  真实 git 集成：真仓库、真 worktree、真 push（无
 test/commands|tools|index.test.ts  适配层与插件入口
 ```
 
-共 **198 项测试**（`node:test`）。除集成测试外全部跑在内存 fake 上，不需要 git 或真实子会话。
+共 **199 项测试**（`node:test`）。除集成测试外全部跑在内存 fake 上，不需要 git 或真实子会话。
 
 `src/core/` **不 import 任何 `@deepseek-ai/dsh-*`**：外部插件解析不到 Host 内部包。
 Git 与 `gh` 一律经 `CommandRunner` 端口调用，因此 SSH / 容器部署时命令在正确机器上执行。
@@ -99,10 +99,12 @@ npm test           # 只跑测试
 ## 设计取舍
 
 - **拆解不调模型**：`planTasks` 是确定性文本分析。协调必须在委派模型不可用时仍能工作，必须可单测，且不得凭空发明用户没要求的工作。
-- **默认只建分支、不建 worktree**：`worktrees.create` 会把父会话当前目录切走，属副作用。私有 checkout 只在明确需要时创建。
+- **每个线程一个私有 worktree**：只建分支不算隔离——线程仍在父检出里跑，并发时互相看见对方的改动，提交还会落到父会话当前分支上。worktree 建在 `.dsh-project/worktrees/<threadId>`（已 gitignore），父检出永不移动。建不出来时降级为纯 scope 隔离并在状态里说明，而不是假装隔离了。
+- **一律走 `CommandRunner` 而非 `node:child_process`**：命令必须落在 Host 所在的机器上，SSH / 容器部署时后者会在错误的主机上执行。
 - **一轮结束 ≠ 已交付**：线程收尾消息里没有 PR 链接时进入 `needs_feedback`，而不是给一个声称产物存在的 `completed` 徽章。
 - **广播只推正在跑的线程**：给 idle 子会话发消息会新起一轮，把所有已完成线程都唤醒会白烧 token。
 - **未知 CI 状态算 `pending`，不算通过**：假绿是自愈器绝不能产生的输出。
+- **`subprocess` 是唯一硬依赖**：其余能力（tools / commands / systemPrompt / timer + subagents）全部走 `ctx.inject` 延迟注册。`ctx.get` 只在激活那一刻采样注册表，晚挂载的服务会永久错过。
 
 ## 许可证
 

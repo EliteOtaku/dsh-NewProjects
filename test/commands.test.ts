@@ -67,6 +67,8 @@ function repoReady(runner: FakeRunner): void {
   runner.on('gh --version', { stdout: 'gh version 2.40.0\n' });
   runner.on('gh auth status', { stdout: 'Logged in to github.com\n' });
   runner.on('git branch', { exitCode: 0 });
+  // Threads get their own checkout now, so the worktree command must be routed too.
+  runner.on('git worktree', { exitCode: 0 });
 }
 
 describe('/project verb routing', () => {
