@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Projects (Beta)",
+    "description": "Coordinate parallel agent threads with git isolation, shared project memory, and CI self-healing."
+  }
+}

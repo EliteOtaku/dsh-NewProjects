@@ -7,8 +7,10 @@ vendor/
 .pnpm-store/
 
 # 构建产物
-dist/
+# 注意：lib/ 是**故意提交**的 —— 插件从 git 安装时没有构建步骤，必须能直接加载。
+# 这里只忽略编译中间物与测试输出。
 build/
+dist/
 out/
 target/
 *.tsbuildinfo

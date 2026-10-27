@@ -1,0 +1,12 @@
+# 源码统一用 LF：插件在 Windows / Linux / macOS 上加载同一份 lib/，
+# 行尾漂移会让 "构建产物是否最新" 变得无法判断。
+* text=auto eol=lf
+
+# 明确二进制，避免 git 尝试做行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary

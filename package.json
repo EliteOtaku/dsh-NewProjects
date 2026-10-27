@@ -1,0 +1,40 @@
+{
+  "name": "dsh-project-beta",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude Code Projects (Beta) style dynamic AI coordination hub for DeepSeek Harness: coordinator, parallel git-branch threads, cross-thread shared memory, CI/PR self-healing, overview panel.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "./lib/src/index.js",
+  "exports": {
+    ".": "./lib/src/index.js",
+    "./package.json": "./package.json",
+    "./icon": "./icon.svg",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "lib/src",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "pretest": "tsc -p tsconfig.test.json",
+    "test": "node --test \"build/test/**/*.test.js\"",
+    "verify": "npm run typecheck && npm run build && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^5.9.3"
+  }
+}
