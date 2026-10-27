@@ -15,7 +15,7 @@
  *   workspace is only the default. One engine per root also means one turn-end
  *   subscription per root instead of one per call.
  *
- * @module dsh-project-beta
+ * @module dsh-newprojects
  */
 
 import { isAbsolute, resolve } from 'node:path';
@@ -136,7 +136,7 @@ export function apply(ctx: HostContext, config: ProjectBetaConfig = {}): void {
   if (subprocess === undefined) {
     // `inject` should have held activation back, so reaching here means the Host resolved
     // the dependency but did not expose it. Failing loudly beats coordinating blind.
-    throw new Error('dsh-project-beta needs the "subprocess" service to run git and gh');
+    throw new Error('dsh-newprojects needs the "subprocess" service to run git and gh');
   }
 
   const pollIntervalMs = normalisePollInterval(

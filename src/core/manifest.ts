@@ -32,6 +32,8 @@ export interface ProjectPaths {
   memoryMirrorPath: string;
   /** Parent directory for per-thread worktrees. */
   worktreeRoot: string;
+  /** Retrieval index over the bound knowledge paths. */
+  knowledgeIndexPath: string;
 }
 
 export function projectPaths(rootDir: string): ProjectPaths {
@@ -43,6 +45,7 @@ export function projectPaths(rootDir: string): ProjectPaths {
     instructionsPath: join(projectDir, INSTRUCTIONS_FILE),
     memoryMirrorPath: join(projectDir, 'SHARED_MEMORY.md'),
     worktreeRoot: join(projectDir, 'worktrees'),
+    knowledgeIndexPath: join(projectDir, 'KNOWLEDGE_INDEX.json'),
   };
 }
 
@@ -51,6 +54,9 @@ const PROJECT_GITIGNORE = [
   'manifest.json',
   'manifest.json.tmp',
   'SHARED_MEMORY.md',
+  // Rebuildable from the bound files, so it is derived state rather than a project artefact.
+  'KNOWLEDGE_INDEX.json',
+  'KNOWLEDGE_INDEX.json.tmp',
   // Thread worktrees live inside the project directory so one cleanup removes them, and
   // git must never see a checkout nested in its own repository.
   'worktrees/',

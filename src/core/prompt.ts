@@ -15,6 +15,12 @@
  */
 
 import { renderMemoryPrefix } from './memory.js';
+import {
+  renderKnowledgeContextSection,
+  renderKnowledgeRagNotice,
+  type KnowledgeIndex,
+  type KnowledgeState,
+} from './knowledge.js';
 import type { ProjectManifest, ProjectThreadDescriptor } from '../types.js';
 
 /** Read-only facts the charter needs about the project. */
@@ -24,6 +30,14 @@ export interface CharterInput {
   instructions?: string;
   /** Absolute paths of bound knowledge files/folders that exist. */
   knowledgePaths: readonly string[];
+  /**
+   * The built knowledge index, when one exists.
+   *
+   * Present so the charter can render knowledge either in full or as a retrieval notice.
+   * Absent means "never indexed" — which is not the same as "no knowledge": the paths are
+   * still listed so a thread can read them by hand.
+   */
+  knowledge?: { index: KnowledgeIndex; state: KnowledgeState };
 }
 
 /**
@@ -53,7 +67,20 @@ export function renderProjectCharter(input: CharterInput): string {
     blocks.push('');
   }
 
-  if (input.knowledgePaths.length > 0) {
+  if (input.knowledge !== undefined && input.knowledge.index.docs.length > 0) {
+    // Mode is derived from size on every render, so a project that outgrows its budget
+    // switches to retrieval without anyone flipping a flag — and switches back if it shrinks.
+    if (input.knowledge.state.mode === 'context') {
+      const section = renderKnowledgeContextSection(input.knowledge.index, input.knowledge.state);
+      if (section.length > 0) {
+        blocks.push(section);
+        blocks.push('');
+      }
+    } else {
+      blocks.push(renderKnowledgeRagNotice(input.knowledge.state));
+      blocks.push('');
+    }
+  } else if (input.knowledgePaths.length > 0) {
     blocks.push('## Bound project knowledge');
     blocks.push('');
     blocks.push('Read these before making design decisions. They are the authoritative context for this project:');

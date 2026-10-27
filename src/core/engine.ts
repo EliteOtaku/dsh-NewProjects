@@ -20,6 +20,19 @@ import { describeError, isProjectError, ProjectError } from './errors.js';
 import { CommandError } from './exec.js';
 import type { CommandRunner } from './exec.js';
 import { decideHealAction, mergeSnapshot, toCheckStates, toReviewComments, type HealAction } from './healing.js';
+import {
+  buildIndex,
+  DEFAULT_CONTEXT_BUDGET_CHARS,
+  emptyIndex,
+  knowledgeCapacity,
+  describeKnowledge,
+  resolveKnowledgeState,
+  searchKnowledge,
+  type KnowledgeHit,
+  type KnowledgeIndex,
+  type KnowledgeState,
+} from './knowledge.js';
+import { collectKnowledge, readIndexFile, writeIndexFile } from './knowledgeSource.js';
 import { ManifestStore, INSTRUCTIONS_FILE, projectPaths, type ProjectPaths } from './manifest.js';
 import {
   COORDINATOR_AUTHOR,
@@ -125,6 +138,13 @@ export class ProjectEngine {
   private detachOutcomes: (() => void) | undefined;
   /** Last rendered charter text; see {@link cachedCharter}. */
   private charterCache = '';
+  /**
+   * Retrieval index plus the state derived from it.
+   *
+   * Cached because the panel and the prompt both ask for it and neither may re-read the
+   * index file on every render. Invalidated by every knowledge mutation.
+   */
+  private knowledgeCache: { index: KnowledgeIndex; state: KnowledgeState } | undefined;
 
   constructor(
     readonly rootDir: string,
@@ -340,10 +360,14 @@ export class ProjectEngine {
   async renderCharter(): Promise<{ text: string; fingerprintSource: string }> {
     const manifest = await this.requireManifest();
     const instructions = await readFile(manifest.instructionsPath, 'utf8').catch(() => undefined);
+    // Knowledge is part of the prefix, so its mode (full vs retrieval notice) has to be
+    // decided here, at render time, from the size on disk.
+    const knowledge = await this.knowledgeState().catch(() => undefined);
     const text = renderProjectCharter({
       manifest,
       ...(instructions === undefined ? {} : { instructions }),
       knowledgePaths: manifest.knowledgePaths,
+      ...(knowledge === undefined ? {} : { knowledge }),
     });
     this.charterCache = text;
     return { text, fingerprintSource: text };
@@ -858,6 +882,128 @@ export class ProjectEngine {
   // Overview
   // ---------------------------------------------------------------------------
 
+  // ---------------------------------------------------------------------------
+  // Project knowledge (RAG)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Rebuild the retrieval index from the bound knowledge paths.
+   *
+   * The index is derived state: it is rewritten from the files every time and never edited by
+   * hand. `mode` is not stored — {@link ProjectEngine.knowledgeState} derives it from the
+   * current size, so a project that grows past its budget flips to retrieval and one that
+   * shrinks flips back, without anyone (or any earlier run) leaving a flag behind.
+   */
+  async buildKnowledge(options: { budgetChars?: number; signal?: AbortSignal } = {}): Promise<KnowledgeState> {
+    const manifest = await this.requireManifest();
+    const budget = options.budgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS;
+    const capacity = knowledgeCapacity(budget);
+
+    const collected = await collectKnowledge(manifest.knowledgePaths, {
+      rootDir: manifest.rootDir,
+      maxChars: capacity,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
+
+    const index = buildIndex(collected.documents, manifest.knowledgePaths, this.clock.now());
+    const warnings = [...collected.warnings];
+    if (index.docs.length === 0 && manifest.knowledgePaths.length > 0) {
+      warnings.push(
+        'no readable text was found under the bound knowledge paths; if they are folders, check that the files are text and not excluded build output',
+      );
+    }
+    await writeIndexFile(this.store.paths.knowledgeIndexPath, index);
+    this.knowledgeCache = { index, state: resolveKnowledgeState(index, budget, warnings) };
+    // The charter embeds knowledge in context mode, so a rebuild must change the prefix.
+    await this.renderCharter().catch(() => undefined);
+    return this.knowledgeCache.state;
+  }
+
+  /** Read the built index from disk without collecting files. */
+  async loadKnowledge(budgetChars?: number): Promise<KnowledgeState> {
+    const budget = budgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS;
+    const stored = await readIndexFile(this.store.paths.knowledgeIndexPath);
+    const index = stored ?? emptyIndex([], this.clock.now());
+    const state = resolveKnowledgeState(index, budget);
+    this.knowledgeCache = { index, state };
+    return state;
+  }
+
+  /**
+   * Current knowledge state, loading from disk once per engine instance.
+   *
+   * Cheap enough to call on every overview render: after the first call it is memory-only.
+   */
+  async knowledgeState(budgetChars?: number): Promise<{ index: KnowledgeIndex; state: KnowledgeState }> {
+    if (this.knowledgeCache !== undefined && budgetChars === undefined) return this.knowledgeCache;
+    const budget = budgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS;
+    const stored = await readIndexFile(this.store.paths.knowledgeIndexPath);
+    const index = stored ?? emptyIndex([], this.clock.now());
+    const state = resolveKnowledgeState(index, budget);
+    this.knowledgeCache = { index, state };
+    return this.knowledgeCache;
+  }
+
+  /** Retrieve the passages most relevant to `query`. */
+  async searchProjectKnowledge(
+    query: string,
+    options: { limit?: number; budgetChars?: number } = {},
+  ): Promise<{ hits: KnowledgeHit[]; state: KnowledgeState }> {
+    const trimmed = query.trim();
+    if (trimmed.length === 0) {
+      throw new ProjectError('INVALID_INPUT', 'query must not be empty');
+    }
+    const { index, state } = await this.knowledgeState(options.budgetChars);
+    const hits = searchKnowledge(index, trimmed, {
+      ...(options.limit === undefined ? {} : { limit: options.limit }),
+    });
+    return { hits, state };
+  }
+
+  /** Replace the bound knowledge paths and rebuild. */
+  async setKnowledgePaths(paths: readonly string[]): Promise<KnowledgeState> {
+    const normalised: string[] = [];
+    for (const path of paths) {
+      const trimmed = path.trim();
+      if (trimmed.length === 0) continue;
+      if (!normalised.includes(trimmed)) normalised.push(trimmed);
+    }
+    await this.store.update((draft) => {
+      draft.knowledgePaths = normalised;
+      return { manifest: draft, result: undefined };
+    });
+    this.knowledgeCache = undefined;
+    return this.buildKnowledge();
+  }
+
+  /** Add paths to the bound set and rebuild. Returns the paths actually added. */
+  async addKnowledgePaths(paths: readonly string[]): Promise<{ added: string[]; state: KnowledgeState }> {
+    const manifest = await this.requireManifest();
+    const added: string[] = [];
+    for (const path of paths) {
+      const trimmed = path.trim();
+      if (trimmed.length === 0) continue;
+      if (manifest.knowledgePaths.includes(trimmed) || added.includes(trimmed)) continue;
+      added.push(trimmed);
+    }
+    if (added.length === 0) {
+      return { added, state: await this.loadKnowledge() };
+    }
+    const next = [...manifest.knowledgePaths, ...added];
+    return { added, state: await this.setKnowledgePaths(next) };
+  }
+
+  /** Remove paths from the bound set and rebuild. Returns the paths actually removed. */
+  async removeKnowledgePaths(paths: readonly string[]): Promise<{ removed: string[]; state: KnowledgeState }> {
+    const manifest = await this.requireManifest();
+    const removed = manifest.knowledgePaths.filter((path) => paths.some((p) => p.trim() === path));
+    if (removed.length === 0) {
+      return { removed, state: await this.loadKnowledge() };
+    }
+    const next = manifest.knowledgePaths.filter((path) => !removed.includes(path));
+    return { removed, state: await this.setKnowledgePaths(next) };
+  }
+
   /** Structured overview for the tool result. */
   async overview(warnings: string[] = []): Promise<ProjectOverview> {
     const manifest = await this.requireManifest();
@@ -876,6 +1022,7 @@ export class ProjectEngine {
   /** Buckets plus thread descriptors as a plain JSON value (tool output). */
   async overviewJson(): Promise<Record<string, unknown>> {
     const overview = await this.overview();
+    const knowledge = await this.knowledgeState().catch(() => undefined);
     const buckets: Partial<Record<OverviewBucket, ProjectThreadDescriptor[]>> = overview.buckets;
     return {
       projectId: overview.projectId,
@@ -887,6 +1034,16 @@ export class ProjectEngine {
       prefixFingerprint: overview.prefixFingerprint,
       warnings: overview.warnings,
       memories: overview.memories,
+      knowledge: knowledge === undefined ? undefined : {
+        mode: knowledge.state.mode,
+        docs: knowledge.state.docs,
+        chunks: knowledge.state.chunks,
+        totalChars: knowledge.state.totalChars,
+        budgetChars: knowledge.state.budgetChars,
+        capacityChars: knowledge.state.capacityChars,
+        sources: knowledge.state.sources,
+        summary: describeKnowledge(knowledge.state),
+      },
       buckets,
     };
   }

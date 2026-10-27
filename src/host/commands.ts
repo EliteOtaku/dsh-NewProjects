@@ -10,6 +10,7 @@
 import type { ProjectEngine } from '../core/engine.js';
 import { describeThread } from '../core/engine.js';
 import { describeError, isProjectError } from '../core/errors.js';
+import { describeKnowledge } from '../core/knowledge.js';
 import { renderOverviewMarkdown } from '../core/overview.js';
 import type { HostCommandDefinition, HostCommandDefinition as CommandDef } from './hostTypes.js';
 
@@ -33,6 +34,10 @@ export const PROJECT_USAGE = [
   '- `/project memory rm <key>` — delete one decision',
   '- `/project threads` — every thread with its status',
   '- `/project thread <id> [steer|respond|retry|interrupt|close|deliver] <text>` — act on one thread',
+  '- `/project knowledge` — what is indexed and whether it is in context or retrieval mode',
+  '- `/project knowledge add <path...>` — bind files or folders and reindex',
+  '- `/project knowledge rm <path...>` — unbind paths and reindex',
+  '- `/project knowledge rebuild` — re-read every bound file and rebuild the index',
   '- `/project heal` — poll CI and review comments once and act on what is found',
   '- `/project coordinate <goal>` — split a goal and start threads (deterministic; prefer the `project_coordinate` tool)',
 ].join('\n');
@@ -55,6 +60,86 @@ function parseAssignment(rest: string): { key: string; decision: string } | unde
   if (key.length === 0 || decision.length === 0) return undefined;
   return { key, decision };
 }
+
+/**
+ * The `/project knowledge` verb family.
+ *
+ * Split out because it needs the engine's knowledge surface rather than the thread surface,
+ * and because a rebuild can fail on I/O in ways worth reporting one by one.
+ */
+async function runKnowledge(engine: ProjectEngine, rest: string): Promise<Result> {
+  const trimmed = rest.trim();
+  const spaceAt = trimmed.search(/\s/);
+  const verb = (spaceAt < 0 ? trimmed : trimmed.slice(0, spaceAt)).toLowerCase();
+  const tail = spaceAt < 0 ? '' : trimmed.slice(spaceAt + 1).trim();
+
+  if (verb.length === 0 || verb === 'list') {
+    const { state } = await engine.knowledgeState();
+    const manifest = await engine.requireManifest();
+    const lines = [describeKnowledge(state), ''];
+    if (manifest.knowledgePaths.length === 0) {
+      lines.push('No bound paths yet. Bind a file or folder with `/project knowledge add <path>`.');
+    } else {
+      lines.push('Bound paths:');
+      for (const path of manifest.knowledgePaths) lines.push(`- \`${path}\``);
+    }
+    if (state.warnings.length > 0) {
+      lines.push('', 'Warnings:');
+      for (const warning of state.warnings) lines.push(`- ${warning}`);
+    }
+    return success(lines.join('\n'));
+  }
+
+  if (verb === 'rebuild') {
+    const state = await engine.buildKnowledge();
+    const lines = [describeKnowledge(state)];
+    if (state.warnings.length > 0) {
+      lines.push('', 'Warnings:');
+      for (const warning of state.warnings) lines.push(`- ${warning}`);
+    }
+    return success(lines.join('\n'));
+  }
+
+  if (verb === 'add' || verb === 'rm' || verb === 'remove') {
+    const paths = tail.split(/\s+/).map((part) => part.trim()).filter((part) => part.length > 0);
+    if (paths.length === 0) {
+      return { kind: 'error', text: `usage: /project knowledge ${verb} <path> [path...]` };
+    }
+    if (verb === 'add') {
+      const result = await engine.addKnowledgePaths(paths);
+      const lines = [
+        result.added.length === 0
+          ? 'Nothing new to add; those paths were already bound.'
+          : `Added ${String(result.added.length)} path(s): ${result.added.join(', ')}`,
+        describeKnowledge(result.state),
+      ];
+      if (result.state.warnings.length > 0) {
+        lines.push('', 'Warnings:');
+        for (const warning of result.state.warnings) lines.push(`- ${warning}`);
+      }
+      return success(lines.join('\n'));
+    }
+    const result = await engine.removeKnowledgePaths(paths);
+    const lines = [
+      result.removed.length === 0
+        ? 'None of those paths were bound.'
+        : `Removed ${String(result.removed.length)} path(s): ${result.removed.join(', ')}`,
+      describeKnowledge(result.state),
+    ];
+    return success(lines.join('\n'));
+  }
+
+  return { kind: 'error', text: `unknown knowledge verb "${verb}"\n${KNOWLEDGE_USAGE}` };
+}
+
+/** Usage for the knowledge verb family. */
+const KNOWLEDGE_USAGE = [
+  '`/project knowledge` verbs:',
+  '- `/project knowledge` — what is indexed and which mode it is in',
+  '- `/project knowledge add <path...>` — bind and index',
+  '- `/project knowledge rm <path...>` — unbind and reindex',
+  '- `/project knowledge rebuild` — re-read every bound file',
+].join('\n');
 
 /** Build the `/project` command. */
 export function buildProjectCommand(source: CommandContextSource): CommandDef {
@@ -145,6 +230,11 @@ export function buildProjectCommand(source: CommandContextSource): CommandDef {
               invocation.signal,
             );
             return { kind: 'success', text: `${outcome.message}\n${describeThread(outcome.thread)}` };
+          }
+          case 'knowledge': {
+            const engine = await source.engineFor(invocation.agent, undefined);
+            await requireReady(engine);
+            return await runKnowledge(engine, rest);
           }
           case 'heal': {
             const engine = await source.engineFor(invocation.agent, undefined);

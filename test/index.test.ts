@@ -154,7 +154,7 @@ describe('apply', () => {
     assert.throws(() => apply(ctx.asContext()), /needs the "subprocess" service/);
   });
 
-  it('registers the four tools and the one command', async () => {
+  it('registers every tool and the one command', async () => {
     const tools: HostToolDefinition[] = [];
     const commands: HostCommandDefinition[] = [];
     const ctx = new FakeContext({
@@ -168,6 +168,8 @@ describe('apply', () => {
       'project_memory_sync',
       'project_thread_manage',
       'project_overview',
+      'project_knowledge_search',
+      'project_knowledge',
     ]);
     assert.deepEqual(commands.map((command) => command.name), ['project']);
   });
@@ -221,7 +223,7 @@ describe('apply', () => {
       commands: fakeCommands(commands),
     });
     apply(ctx.asContext());
-    assert.equal(tools.length, 4);
+    assert.equal(tools.length, 6);
     assert.equal(commands.length, 1);
   });
 
@@ -269,7 +271,7 @@ describe('apply', () => {
       systemPrompt: fakeSystemPrompt(sections),
     });
     apply(ctx.asContext());
-    assert.equal(tools.length, 4);
+    assert.equal(tools.length, 6);
     ctx.dispose();
     assert.deepEqual(tools, []);
     assert.deepEqual(commands, []);

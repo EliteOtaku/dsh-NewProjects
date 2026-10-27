@@ -13,6 +13,7 @@
 import type { ProjectEngine } from '../core/engine.js';
 import { describeThread } from '../core/engine.js';
 import { isProjectError, ProjectError, describeError } from '../core/errors.js';
+import { describeKnowledge, renderHits } from '../core/knowledge.js';
 import { renderOverviewMarkdown } from '../core/overview.js';
 import type { ContentBlock, HostToolDefinition, HostToolRunContext } from './hostTypes.js';
 
@@ -300,7 +301,123 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
     },
   };
 
-  return [coordinate, memory, manage, overview];
+
+  /**
+   * `project_knowledge_search` — the retrieval half of Projects' RAG mode.
+   *
+   * Only meaningful in retrieval mode, but always registered: a project can cross the budget
+   * between two turns, and a tool that appears and disappears depending on size would make
+   * the model's tool list unstable (and break prefix caching) for no benefit.
+   */
+  const knowledgeSearch: HostToolDefinition = {
+    name: 'project_knowledge_search',
+    description:
+      'Search the project knowledge base and return the most relevant passages. Use this before answering questions about project documentation, specifications, or design decisions when the project charter says knowledge is in retrieval mode.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'What to find. Use meaning-bearing words, not just a file name.' },
+        limit: { type: 'integer', description: 'Maximum passages to return (1-20, default 5).' },
+        rootDir: { type: 'string', description: 'Project root. Defaults to the current workspace.' },
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+    output: OBJECT_OUTPUT,
+    async execute(args: unknown, exec: HostToolRunContext): Promise<unknown> {
+      try {
+        const engine = await source.engineFor(readString(args, 'rootDir'));
+        // A search does not mutate anything, but honouring the cancellation signal keeps a
+        // cancelled turn from finishing a scan of a large index for no reader.
+        if (exec.signal.aborted) return asToolResult(new Error('the turn was cancelled'));
+        const query = readString(args, 'query');
+        if (query === undefined || query.trim().length === 0) {
+          return { ok: false, code: 'INVALID_INPUT', message: 'query must not be empty' };
+        }
+        const limit = readInt(args, 'limit');
+        const result = await engine.searchProjectKnowledge(query, limit === undefined ? {} : { limit });
+        return {
+          ok: true,
+          query,
+          mode: result.state.mode,
+          hits: result.hits,
+          text: renderHits(result.hits),
+          ...(result.state.mode === 'context'
+            ? { hint: 'This project is small enough that its knowledge is already in the prompt; a search is only needed if the passage above is not enough.' }
+            : {}),
+        };
+      } catch (error) {
+        return asToolResult(error);
+      }
+    },
+  };
+
+  /** `project_knowledge` — bind, list, rebuild, or drop the knowledge base. */
+  const knowledgeManage: HostToolDefinition = {
+    name: 'project_knowledge',
+    description:
+      'Manage the project knowledge base: list what is indexed and which mode it is in, add or remove bound files/folders, or rebuild the index after the files changed.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'add', 'remove', 'rebuild'],
+          description: 'list (default), add, remove, or rebuild the index.',
+        },
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Files or folders to add/remove, relative to the project root or absolute.',
+        },
+        rootDir: { type: 'string', description: 'Project root. Defaults to the current workspace.' },
+      },
+      additionalProperties: false,
+    },
+    output: OBJECT_OUTPUT,
+    async execute(args: unknown, exec: HostToolRunContext): Promise<unknown> {
+      try {
+        const engine = await source.engineFor(readString(args, 'rootDir'));
+        await requireInit(engine);
+        const action = readString(args, 'action') ?? 'list';
+        const paths = readStringArray(args, 'paths');
+
+        if (action === 'list') {
+          const { state } = await engine.knowledgeState();
+          const manifest = await engine.requireManifest();
+          return {
+            ok: true,
+            paths: manifest.knowledgePaths,
+            state,
+            summary: describeKnowledge(state),
+          };
+        }
+        if (action === 'add') {
+          if (paths.length === 0) {
+            return { ok: false, code: 'INVALID_INPUT', message: 'add needs at least one path' };
+          }
+          const result = await engine.addKnowledgePaths(paths);
+          return { ok: true, added: result.added, state: result.state, summary: describeKnowledge(result.state) };
+        }
+        if (action === 'remove') {
+          if (paths.length === 0) {
+            return { ok: false, code: 'INVALID_INPUT', message: 'remove needs at least one path' };
+          }
+          const result = await engine.removeKnowledgePaths(paths);
+          return { ok: true, removed: result.removed, state: result.state, summary: describeKnowledge(result.state) };
+        }
+        if (action === 'rebuild') {
+          const state = await engine.buildKnowledge({ signal: exec.signal });
+          return { ok: true, state, summary: describeKnowledge(state) };
+        }
+        return { ok: false, code: 'INVALID_INPUT', message: `unknown action "${action}"` };
+      } catch (error) {
+        return asToolResult(error);
+      }
+    },
+  };
+
+  return [coordinate, memory, manage, overview, knowledgeSearch, knowledgeManage];
 }
 
 /** Throw the standard uninitialised error, used by command handlers. */

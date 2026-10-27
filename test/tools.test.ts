@@ -1,5 +1,5 @@
 /**
- * The four model-facing tools, exercised through their real `execute`.
+ * The model-facing tools, exercised through their real `execute`.
  *
  * Two properties matter more than any single payload: a tool must never throw for an
  * expected state (a thrown error ends the turn, and "no project yet" is not an error the
@@ -75,11 +75,18 @@ function repoReady(runner: FakeRunner): void {
 }
 
 describe('tool registration', () => {
-  it('exposes exactly the four documented tools', () => {
+  it('exposes exactly the documented tools', () => {
     const source = { engineFor: () => Promise.reject(new Error('unused')), parentOf: () => PARENT };
     assert.deepEqual(
       buildTools(source).map((definition) => definition.name),
-      ['project_coordinate', 'project_memory_sync', 'project_thread_manage', 'project_overview'],
+      [
+        'project_coordinate',
+        'project_memory_sync',
+        'project_thread_manage',
+        'project_overview',
+        'project_knowledge_search',
+        'project_knowledge',
+      ],
     );
   });
 

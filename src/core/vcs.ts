@@ -315,7 +315,7 @@ export async function ensureGitIdentity(runner: CommandRunner, repoRoot: string)
   const name = await runProbe(runner, { argv: ['git', 'config', 'user.name'], cwd: repoRoot });
   if (name.exitCode === 0 && name.stdout.trim().length > 0) return;
   assertOk(
-    { argv: ['git', 'config', 'user.name', 'dsh-project-beta'], cwd: repoRoot },
-    await runner.run({ argv: ['git', 'config', 'user.name', 'dsh-project-beta'], cwd: repoRoot }),
+    { argv: ['git', 'config', 'user.name', 'dsh-newprojects'], cwd: repoRoot },
+    await runner.run({ argv: ['git', 'config', 'user.name', 'dsh-newprojects'], cwd: repoRoot }),
   );
 }
