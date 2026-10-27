@@ -1,0 +1,43 @@
+# DSH 运行时产物（会话面板等本地数据，不入库）
+.dsh-ops/
+
+# 依赖
+node_modules/
+vendor/
+.pnpm-store/
+
+# 构建产物
+dist/
+build/
+out/
+target/
+*.tsbuildinfo
+
+# 缓存与日志
+.cache/
+*.log
+logs/
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+
+# 环境与密钥
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
