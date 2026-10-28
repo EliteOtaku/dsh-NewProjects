@@ -9,6 +9,8 @@ Claude Code **Projects (Beta)** 式的动态协作中枢，作为 DeepSeek Harne
 > **不是**重建云产品：不做云端沙箱、GitHub App、账号 connectors、cloud environment、跨设备续跑。
 > 云端 sandbox 换成本地 git worktree、云端持久化会话换成 DSH 子会话、GitHub App 换成 `gh` CLI —— 这些差异是**载体差异，不是功能缺口**。
 > 判断「缺不缺」看的是**用户能不能做到这件事**，不是云端用哪个载体做的。详见 [`docs/GAPS.md`](docs/GAPS.md) 的「复刻的是什么，不是什么」。
+>
+> 宿主能力以 **DSH 源码**为准：[github.com/deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)。
 
 ```
                  ┌──────────── 共享记忆（.dsh-project/manifest.json）────────────┐

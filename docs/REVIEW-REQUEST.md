@@ -24,6 +24,24 @@
 >
 > 如果你需要抓 `.md` 版本（比网页版更易引用与 diff）：<https://code.claude.com/docs/en/claude-projects.md>
 
+> ### 另一份必读：DSH 宿主源码
+>
+> **DeepSeek Harness 源码：<https://github.com/deepseek-ai/deepseek-harness>**
+>
+> 本文有一半的判断不是关于「官方做了什么」，而是关于「**在这个宿主上能不能做到**」。这类判断只能对着 DSH 的源码与 API 契约验证，光读 Claude 的文档验证不了。
+>
+> 三份材料的读法：
+>
+> | 材料 | 用来判断 | 对应本文 |
+> | --- | --- | --- |
+> | **Claude 官方文档** | 官方有什么能力、语义是什么 | 判断 G、H、J、L、M 的全部理由；判断 K 的「官方是线程内阻塞」这一半 |
+> | **DSH 源码**（上面那个链接） | 在 DSH 上能不能照做、照做的代价 | 判断 I（worktree 的文件可见性）、判断 K（子线程能否问人）、判断 M（`automation_create` 是什么）、`BOUND` 全部 |
+> | **本仓库源码** | 我们做成什么样、证据在哪 | 每条 `GAP-*` 的「现状」与行号 |
+>
+> 如果你只读 Claude 文档而不读 DSH 源码，**判断 K 与判断 I 无法评价** —— 它们的前提都在 DSH 侧。我把这两条依赖什么写在了各自的「可验证点」里。
+>
+> DSH 是 Cordis 插件框架 + Host 服务的架构。本文引用的 Host 服务（`subagents`、`userQuestions`、`approval`、`worktrees`、`sessionProjections`、`automation` 等）都在源码里，搜服务名即可。
+
 ## 0. 先澄清一件事：我们复刻的是什么
 
 第一轮我们没把这一点写在显眼位置，导致复核者从「Claude Code 产品经理」的角度评判，而我们的目标是工程复刻。这次先说清楚。
@@ -107,6 +125,14 @@
 
 **我们补验过**：知识路径本身是相对项目 root 解析的（`knowledgeSource.ts` 的 `resolve(options.rootDir, bound)`），根 `.gitignore` 也没有排除 `.dsh-project/` —— 所以知识库可以放在受版本控制的路径下，paths-first 不会因 gitignore 失效。
 
+**可验证点（对着 DSH 源码与本仓库核对）**：
+
+1. **DSH 侧**：`worktrees.create` 建出来的目录是不是一次独立的 `git worktree add`（搜 `worktrees` 服务）。如果是，它内容 = 某个 commit 的冻结快照，未提交改动不可见。这是判断 I 的全部前提。
+2. **本仓库侧**：`src/core/engine.ts` 里线程启动时的 `cwd` 取自 `thread.worktreePath ?? manifest.rootDir` —— 说明线程确实不在项目根里跑。
+3. **知识路径解析**：`src/core/knowledgeSource.ts` 的 `collectKnowledge(paths, { rootDir })` 用的是项目 root，不是线程 cwd。
+
+三点都对上，判断 I 成立。**如果第 1 点不成立**（比如 DSH 的 worktree 其实是软链或共享工作区），这条判断作废。
+
 **❓ 请复核**：官方的 `/mnt/project-files` 与线程自己的仓库 checkout 是**两套独立路径**（项目文件在挂载点，代码仓库单独 clone）。我们的做法是「让线程去读项目根的绝对路径」，这等价吗？还是应该把知识**复制/软链到每个 worktree** 里，让 `cat .dsh-project/knowledge/x.md` 这种相对读取也能工作？后者的代价是每线程一份副本（磁盘）与同步问题。
 
 ### 判断 J：拆解应「模型优先 + 正则兜底」，且 `Suggested threads` 必须同批
@@ -146,6 +172,13 @@
 **语义等价**（球在人手上、线程等着），**落点不同**（官方的「线程内阻塞」→ 我们的「线程结束 + 根会话代问」）。
 
 **本地的额外优势**：官方云线程**不读** `.claude/settings.json` 的权限规则（`OFFICIAL` 第 357 行："Not applied"），只能靠 auto mode + 线程内逐次批准。我们**可以**接 DSH 自己的权限体系（`approval.setPolicy` / `tools.guard`）。
+
+**可验证点（对着 DSH 源码核对）**：这两个约束不是我们读文档猜的，是读 Host 源码的 docstring。搜 `userQuestions` 与 `approval` 两个服务，看：
+
+- `ask()` 的抛错条件里有没有 `DELEGATED_CALLER`（以及它的触发条件是不是「agent 被另一个 agent 拥有」）；
+- `request()` 是否要求 `toolName` 必填、是否要求 open turn。
+
+如果这两条里任何一条在较新的 DSH 版本里变了（比如 `ask()` 开始允许 owned agent 转交到根），**判断 K 的改译就不必要了**，应该回到官方的线程内阻塞。这是我们最希望被推翻的一条，也是唯一一条会被宿主版本变化直接作废的判断。
 
 **❓ 请复核**：这个改译会不会丢掉官方设计里的某个关键性质？我们能看到的是「线程内提示能带上下文（文件、命令预览）」，而「结束本轮 + 根会话代问」会**丢失线程的现场**。官方是否因为这个原因才把 prompt 放在线程内？
 
@@ -282,9 +315,11 @@
 
 | 代号 | 来源 | 覆盖范围 | 本轮地位 |
 | --- | --- | --- | --- |
-| `OFFICIAL` | https://code.claude.com/docs/en/claude-projects | 线程模型、路由、Overview 六分组、卡片动作、设置项、Pause/Archive/Delete、goal、仓库约定、限制、云端环境 | **唯一规格来源** |
+| `OFFICIAL` | <https://code.claude.com/docs/en/claude-projects>（[`.md`](https://code.claude.com/docs/en/claude-projects.md)） | 线程模型、路由、Overview 六分组、卡片动作、设置项、Pause/Archive/Delete、goal、仓库约定、限制、云端环境 | **唯一功能规格来源** |
+| `DSH` | <https://github.com/deepseek-ai/deepseek-harness> | Host 服务契约：`subagents`、`userQuestions`、`approval`、`worktrees`、`sessionProjections`、`automation`、`systemPrompt`、`tools` | **唯一宿主能力来源**。判断 I、K、M 与 `BOUND` 全部靠它 |
 | `RAG` | https://support.claude.com/…-rag-for-projects | 知识模式触发条件、10 倍容量、检索工具 | ❌ **已除名**，讲的是另一个产品，见判断 H |
 | `SPEC` | 本项目 `PROJECT_BETA_SPEC.md` | 五模块定义 | 内部文档，与 `OFFICIAL` 冲突时以 `OFFICIAL` 为准 |
+| `REPO` | 本仓库 https://github.com/EliteOtaku/dsh-NewProjects | 我们的实现与证据行号 | 每条 `GAP-*` 的「现状」出处 |
 
 本文档中所有引号内的英文均为逐字引用，可用上表链接核对。若发现引文与原文不符，请指出 —— 那说明我们的取证有误，应该先修取证再谈判断。
 

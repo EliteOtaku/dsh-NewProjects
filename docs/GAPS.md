@@ -20,7 +20,11 @@
 
 > **官方规格原文（动手前先读）**：<https://code.claude.com/docs/en/claude-projects>　·　[`.md` 版](https://code.claude.com/docs/en/claude-projects.md)
 >
+> **DSH 宿主源码**：<https://github.com/deepseek-ai/deepseek-harness>
+>
 > 本文件所有「官方说了什么」都是转述。有疑问时以原文为准 —— 第一轮就是因为只读转述、没读原文，把知识层抄成了另一个产品。
+>
+> 同理，凡是「在 DSH 上做不到 / 代价很高」的判断（`BOUND` 段、`GAP-18` 的审批改译），依据是 **DSH 源码里的服务契约**，不是官方文档。这类条目的「现状」里都写了对应的服务名与文件，按服务名去源码里搜。
 
 ## 怎么用
 
@@ -35,6 +39,7 @@
 | --- | --- | --- |
 | `SPEC` | `PROJECT_BETA_SPEC.md` | 本项目内部规格，五模块定义。**功能语义以 `OFFICIAL` 为准**，本文件写于官方文档细化之前。 |
 | `OFFICIAL` | <https://code.claude.com/docs/en/claude-projects>（[`.md` 版](https://code.claude.com/docs/en/claude-projects.md)） | 官方 Code Projects 文档，2026-10 拉取。**这是本项目的唯一功能规格来源。** 判断「官方有没有」时直接读原文，本文件的转述可能错。 |
+| `DSH` | <https://github.com/deepseek-ai/deepseek-harness> | **宿主源码**。判断「在 DSH 上能不能做到」时的唯一依据。`BOUND` 段全部、`GAP-18`（子线程问人）、`GAP-A*`（载体差异）都靠它验证。 |
 | `RAG` | https://support.claude.com/en/articles/11473015-…-rag-for-projects | ❌ **不是本项目的规格来源，见下。** 仅作历史记录保留。 |
 
 ### `RAG` 那篇为什么被除名（2026-10-28 第一轮复核确认）

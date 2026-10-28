@@ -39,6 +39,8 @@ npm run build      # 只编译到 lib/
 
 本项目**复刻的是 Claude Code 新版 Projects (Beta) 这个功能本身**（概念、行为、状态语义、交互契约），交付形态是 **DSH 本地插件**。规格来源只有 <https://code.claude.com/docs/en/claude-projects> 一份（[`.md` 版](https://code.claude.com/docs/en/claude-projects.md)）。
 
+宿主能力以 **DSH 源码**为准：<https://github.com/deepseek-ai/deepseek-harness>。「在 DSH 上做不到」这类判断（`BOUND` 段、审批改译）的依据在那里，不在官方文档里。
+
 **不是**重建 Anthropic 的云产品。云端 sandbox、GitHub App、账号 connectors、cloud environment、跨设备续跑都不做。
 
 判断一项「缺不缺」看的是**功能语义有没有**（用户能不能做到这件事），不是**云端的实现载体有没有**。凡是「官方用 A 载体实现 X，我们用 B 载体实现了 X」的（云端 sandbox → 本地 worktree、云端持久化会话 → DSH 子会话、GitHub App → `gh` CLI），记在登记簿的 `ARCH` 段，**不是缺陷、不排期**。
