@@ -78,13 +78,13 @@
   | **Idle** | "finished and **aren't waiting on anything**" | 缺（`GAP-04`） |
   | **Resolved** | "marked done… or **automatically after a week with no activity**"，**可 reopen** | 缺（`GAP-05`） |
 
-  **分组是 state 的投影，不是两层模型。** `bucketOf(status)` 就是那个派生函数；加 `landing` / `idle` / `resolved` 只改它的 case，不需要重构状态枚举，也不需要升 `stateVersion`。
+  **分组是 state 的投影，不是两层模型。** `bucketOf(status)` 就是那个派生函数；加 `landing` / `idle` / `resolved` 只改它的 case，不需要重构状态枚举，也不需要升 `stateVersion`。**2026-10-29 已按此落地**（六组齐全，`bucketOf` 带优先级）。
 - **`failed` 不单独成组**：官方把它并入 `Waiting on you`（"or that failed"）。分开列会让用户在两个地方找同一件事。
 - **配额展示**：当日配额消耗（X / 200），注意口径是**跨项目**（`GAP-01`）。
 
 > *实现注记（2026-10）*：
 > - `sessionProjections` **尚未接入**，目前只有 `project_overview` 工具与 `/project` 命令两种主动拉取表面。见 `GAP-03`。
->   - **它不再被状态模型阻塞**：投影暴露的是**桶**不是枚举，`bucketOf` 已解耦，两者可同批实现（原判断的串行约束不成立）。
+>   - **它不再被状态模型阻塞**：投影暴露的是**桶**不是枚举，`bucketOf` 已解耦，两者可同批实现（原判断的串行约束不成立）。**2026-10-29 已实现**：`project-beta/state` 事件 + `projectBeta` 投影键，写入后自动发布。
 > - Overview 另有三个标签页官方有而我们无：**Library**（`GAP-10`）、**Pull requests**（`GAP-11`）、**Scheduled tasks**（未列为差距，见下方第 4 节）。
 
 ## 3. 暴露接口要求

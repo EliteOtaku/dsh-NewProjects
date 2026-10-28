@@ -33,7 +33,7 @@ Claude Code **Projects (Beta)** 式的动态协作中枢，作为 DeepSeek Harne
 | **跨线程共享记忆** | `project_memory_sync` 写入决策后广播到所有**正在运行**的线程；新线程启动前缀自动带上全量记忆。记忆渲染成字节稳定的 system prompt 段，命中 provider 端 prefix cache。 |
 | **项目知识（挂载式）** | 绑定文件或目录后，charter 渲染**索引**（每份文档一行：路径 + 字符数）并给出 **`Project root`**，线程按需从项目根读盘，正文永不进 prompt（对照官方的 `/mnt/project-files` 挂载 + 开局读 `MEMORY.md` 索引）。路径锚定项目根而非线程自己的 worktree，因为 worktree 只含分支切点前已提交的文件。BM25 检索是便利工具。**不是 RAG 模式切换**——那是 chat Projects 的机制，Code Projects 没有。 |
 | **自动执行与 CI/PR 自愈** | 线程自己跑测试、commit、push、开 PR。`/project heal` 与后台巡检读 `gh pr checks` / review comments，判定 `heal` / `wait` / `escalate` / `transition`。修复预算按**同一组检查连续失败**计（3 次后升级，出现进展即归零）；`gh` 失败分「终局」与「可重试」——终局（PR/分支已不存在）不记 error，改为重读 PR 终态并自动退订，可重试（网络/限流/认证）记 error 且不退订；`/project thread <id> unwatch\|watch` 可手动退订与恢复。 |
-| **Overview 面板** | `project_overview` 工具与 `/project` 命令输出状态桶 + 当日配额 + 知识状态。**尚未接入会话投影**，面板不会随会话事件自动刷新——见 [`docs/GAPS.md`](docs/GAPS.md) 的 `GAP-03`。**桶目前是五类，官方是六组**——见 `GAP-04`。 |
+| **Overview 面板** | 官方六分组（`Ready for review` / `Waiting on you` / `Working` / `Landing` / `Idle` / `Resolved`）+ 当日配额 + 知识状态；写入后自动把快照 append 进协调者会话，面板是**事件折叠**而非轮询。`project_overview` 工具与 `/project` 命令提供同样的数据。 |
 
 ## 安装
 
@@ -136,7 +136,7 @@ docs/              GAPS.md（差距登记簿）· REVIEW-REQUEST.md ·
                    REVIEW-RESPONSE.md / REVIEW-RESPONSE-2.md（外部复核，两轮）
 ```
 
-共 **318 项测试**（`node:test`）。除集成测试外全部跑在内存 fake 上，不需要 git 或真实子会话。
+共 **341 项测试**（`node:test`）。除集成测试外全部跑在内存 fake 上，不需要 git 或真实子会话。
 
 `src/core/` **不 import 任何 `@deepseek-ai/dsh-*`**：外部插件解析不到 Host 内部包。
 Git 与 `gh` 一律经 `CommandRunner` 端口调用，因此 SSH / 容器部署时命令在正确机器上执行。
@@ -165,7 +165,7 @@ npm test           # 只跑测试
 
 ## 已知未实现部分
 
-相对官方 Claude Code Projects 还有若干未实现的能力（会话投影、六分组 Overview、goal 持久化、Library、PR 聚合、Pause/Archive、审批等）与若干有意为之的边界（重启后后台自愈停摆、云端 sandbox 差异等）。
+相对官方 Claude Code Projects 还有若干未实现的能力（goal 持久化、Library、PR 聚合、Pause/Archive、审批改译等）与若干有意为之的边界（重启后后台自愈停摆、云端 sandbox 差异等）。
 
 完整清单、代码证据、依据来源与验收标准见 **[docs/GAPS.md](./docs/GAPS.md)**，按批次推进。那份文档是判断「某个能力到底有没有」的唯一依据——不要凭本文件的段落推断。
 

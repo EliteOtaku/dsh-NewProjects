@@ -310,7 +310,14 @@ describe('project_overview', () => {
     )) as Record<string, unknown>;
     assert.equal(result['ok'], true);
     const buckets = result['buckets'] as Record<string, unknown>;
-    assert.deepEqual(Object.keys(buckets).sort(), ['awaiting_review', 'completed', 'failed', 'running', 'waiting_for_feedback']);
+    assert.deepEqual(Object.keys(buckets).sort(), [
+      'idle',
+      'landing',
+      'ready_for_review',
+      'resolved',
+      'waiting_on_you',
+      'working',
+    ]);
     assert.equal((result['quota'] as Record<string, unknown>)['max'], 200);
   });
 

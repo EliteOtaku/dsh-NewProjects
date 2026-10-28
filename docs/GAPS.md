@@ -71,7 +71,7 @@
 | --- | --- | --- |
 | **P0** | 违背规格或官方原文 | ~~`GAP-01`~~ ✅ 已关闭 2026-10-27 |
 | **P1** | 会静默产出错误结果 | ~~`GAP-23`~~ ✅ ~~`GAP-24`~~ ✅（`GAP-22` / `GAP-22a` 已关闭）—— **P1 已清空** |
-| **P2** | 官方有、我们无，且多个其他能力依赖它 | `GAP-03` `GAP-04` `GAP-05` |
+| **P2** | 官方有、我们无，且多个其他能力依赖它 | ~~`GAP-03`~~ ✅ ~~`GAP-04`~~ ✅ ~~`GAP-05`~~ ✅（2026-10-29 关闭） |
 | **P3** | 官方有、我们无，独立功能 | `GAP-06` `GAP-09` ~ `GAP-13` `GAP-29` |
 | **P4** | 项目管理类，缺了不能「管起来」 | `GAP-14` `GAP-15` `GAP-17` `GAP-18` `GAP-25` `GAP-28` |
 | **P5** | 磁盘、性能与健壮性，不出错 | `GAP-19` `GAP-20` `GAP-27` |
@@ -212,7 +212,7 @@
 
 ## P2 — 官方有且被多项依赖（3 项）
 
-### GAP-03 没有会话投影（sessionProjections）
+### GAP-03 没有会话投影（sessionProjections）✅ 已做
 
 - **依据**：`SPEC` 模块 E「基于 DSH 的 `ctx.projection` 与 `/project` 命令平面」；`OFFICIAL` 的 Overview 面板与线程卡片要求随会话实时更新。
 - **现状**：`sessionProjections.register` **一行都没写**（`grep -rn projection src/index.ts src/host/*.ts` 返回空）。目前只有 `project_overview` 工具与 `/project` 命令这两种**主动拉取**的表面。
@@ -227,7 +227,16 @@
   3. 插件 dispose 后该 projection key 消失（无残留）；
   4. 单测覆盖 `apply` 的纯函数性质（同事件序列产出同状态）。
 
-### GAP-04 Overview 只有五桶，官方是六组
+- **实际做法（2026-10-29 落地）**：
+  1. 新事件类型 `PROJECT_STATE_EVENT = 'project-beta/state'`，载荷 `{ snapshot }`；一次写入一条完整快照（不做增量 diff —— 快照小，diff 会让 reducer 承担合并逻辑，而合并逻辑恰恰是要测的那部分）。
+  2. `src/core/projectState.ts` 是纯逻辑：`buildProjectState(overview, at, extra?)` 是**唯一生产者**，`applyProjectState(state, event)` 是**纯全函数**——不是本事件类型就**返回同一个对象**（Host 给每个事件缓存 reducer 输出，每次 turn 事件都新分配会让面板缓存持续失效）。
+  3. `src/host/projections.ts` 用 `zod` 写 schema 并返回 `ProjectionDefinition`；`src/index.ts` 在 `ctx.inject(['sessionProjections','sessions'])` 里注册，并把 `runtime.setPublisher` 接到 `sessions.get(id)?.append(...)`。卸载时**先注销投影、再清空 publisher**：向没有投影的会话追加事件会留下永远读不掉的会话事件。
+  4. 写入点收敛在 `updateThread`（所有 descriptor 变更的唯一漏斗）末尾 `void this.publishState()`；`noteCaller(parent)` 在 `coordinate` / `startSuggested` / `manageThread` / `healSweep` / `setMemory` 首行记录协调者会话。发布是 fire-and-forget：面板更新失败绝不能把产生它的写入一起失败。
+  5. 快照按桶截断到 `MAX_THREADS_PER_BUCKET = 20` 并把溢出数记在 `truncated` —— 面板显示「19 个线程」而实际有 40 个，比显示 20/40 更糟。
+  6. 新依赖 `zod`（Host 自带的在 asar 内，外部插件必须自带）。
+- **验收（全部有测试）**：注册后无需敲命令即可在会话快照里看到线程摘要（`test/unit/projectState.test.ts` 的 `buildProjectState` 组）；turn 结束后状态随之改变（`test/engine.test.ts` 的 `state publishing` 组）；`apply` 纯函数性（同事件序列同状态 + 非本类事件返回同一引用）；dispose 后 key 消失（`src/index.ts` 的 effect 清理；实机探针确认 `registered projection keys` 含 `projectBeta`）。
+
+### GAP-04 Overview 只有五桶，官方是六组 ✅ 已做
 
 - **依据**：`OFFICIAL`「The pane's **Threads** tab **groups threads by state**」+ 六分组表：**Ready for review**（PR open awaiting review）/ **Waiting on you**（"need your reply or approval, **or that failed**"）/ **Working**（"still running"）/ **Landing**（"approved or **queued to merge**"）/ **Idle**（"finished and **aren't waiting on anything**"）/ **Resolved**（"marked done: by you, by Claude once you've taken the last step, or **automatically after a week with no activity**"，可 reopen）。
 - **现状**：`OverviewBucket`（`src/types.ts:23`）= `completed | awaiting_review | waiting_for_feedback | running | failed`（5 项）；`bucketOf`（`src/core/overview.ts:41`）把 `queued|running|ci_fixing` 归 `running`、`completed` 归 `completed`、`failed` 归 `failed`（单独一桶）。
@@ -263,7 +272,16 @@
   5. `Resolved` 的线程不再进入 `healSweep` 候选，且可被重新打开；
   6. 旧的五桶断言全部更新，不允许留双重语义。
 
-### GAP-05 线程没有终态与归档
+- **实际做法（2026-10-29 落地）**：
+  1. `ThreadStatus` 增 `landing` 与 `resolved`；`completed` 保留为 Idle 的名字（已在磁盘上，改名没有收益，只改标签）。
+  2. `OverviewBucket` 换成官方六个键：`ready_for_review | waiting_on_you | working | landing | idle | resolved`；`BUCKET_ORDER` 按官方顺序。
+  3. `bucketOf` 写成**带优先级**的 switch：`needs_feedback | failed → waiting_on_you` > `landing → landing` > `awaiting_review → ready_for_review` > `queued | running | ci_fixing → working` > `completed → idle` > `resolved → resolved`。注释里写明「`landing > ready_for_review` 是我们的裁定」。
+  4. `totals` 改为 `{threads, active, waitingOnYou, resolved, needsAttention}`；`needsAttention` 就是 Overview 那个「有你的事」的点，定义是 `waiting_on_you` 非空。
+  5. `isActiveStatus` 保持只认 `queued | running | ci_fixing`（`landing` 球已踢出，`resolved` 终态），但 `healSweep` 候选集**加入** `landing` —— 只有持续看才能发现「排队合并」完成。
+  6. 实际改动量：`src/types.ts` + `src/core/overview.ts` + `src/core/engine.ts` + 三处 host 适配 + 两处测试，**约 120 行**（原估「二十行以内」偏乐观：把它当纯映射，漏算了 totals、隐藏逻辑与 healSweep 联动）。
+- **验收（全部有测试）**：六组一对一（`test/unit/overview.test.ts` 的 `follows the official six names one-to-one`）；互斥性（`puts every thread in exactly one bucket`，含 7 个状态）；`failed` 并入 `waiting_on_you`（`puts a failure in Waiting on you`）；人阻塞优先于 PR 生命周期（`gives the human-blocking group priority over the PR lifecycle`）；`resolved` 不进 `healSweep` 且可重开（`test/engine.test.ts`）；旧五桶断言已全部替换（无双重语义）。
+
+### GAP-05 线程没有终态与归档 ✅ 已做
 
 - **依据**：`OFFICIAL`「**Resolved**: …marked done: by you from the thread's menu, by Claude once you've taken the last step, such as merging its pull request, or automatically after a week with no activity. **You can reopen one from the same menu**」。
 - **现状**：`manifest.threads` **只增不减**，`grep "delete draft.threads"` 返回空。没有任何状态表达「这个线程结束了，别再管它」，因此 `healSweep` 只能靠「状态不在候选集」隐式停止。
@@ -282,6 +300,14 @@
   2. 默认 overview 不显示已 resolved 线程，但数据仍在 manifest 里；
   3. 已 resolved 的线程不被 `healSweep` 唤醒，可手动 reopen；
   4. 三个入口都有测试。
+
+- **实际做法（2026-10-29 落地）**：
+  1. 复用 `resolved`，不新造 `archivedAt`；`close` 改为写 `resolved`（原来写 `completed` —— 用户关掉的线程不是「做完了」）。
+  2. 新增 `reopen`：有 PR 回 `awaiting_review`，否则回 `completed`（没有 PR 就没有 reviewer 可等）。
+  3. 一周无活动：`RESOLVE_AFTER_MS = 7 天` + `dueForResolve(thread, nowMs)`（`resolved` 自身返回 false）；由 `healSweep` 开头调 `autoResolveIdle(now)`，`note` 写明「resolved automatically after N day(s) without activity」，`HealSweepResult.resolved` 报数量。
+  4. `buildOverview(..., { includeResolved })` 默认隐藏 `resolved`，但 `totals.resolved` 统计全部；markdown 追加「N hidden；`/project threads --all`」。
+  5. `/project threads --all` 与 `/project reopen <id>` 已接；`project_thread_manage` 的 action 白名单补 `reopen`（顺带修掉 `watch` / `unwatch` 在 enum 里却没接进分派的真实缺陷）。
+- **三个入口都有测试**：人工 close（`closes a thread without pretending it succeeded`）；PR 合并自动（`test/unit/healing.test.ts` 的 merged 分支 + `test/integration/flow.test.ts` 全链路）；一周无活动（`resolves a silent thread after a week and says why`）。另有 `hides resolved threads by default and shows them on request` 与 `says how many resolved threads it is hiding`。
 
 ---
 
@@ -659,7 +685,7 @@
 | --- | --- | --- | --- |
 | **第一批 让输出可信** | `GAP-01` 全局配额 ✅ + `GAP-22` 知识 paths-first ✅ | 无 | 2026-10-27 `9c7ef10`：`GAP-01` 关闭，`GAP-22` 的减法做完（确实净减）；2026-10-29：`GAP-22a`（路径锚定项目根）关闭 —— **第一批完成** |
 | **第二批 让拆解可信** | `GAP-26` 模型优先拆解 + Suggested threads ✅ | 无（可与一批并行） | 后者是前者的保险，必须同批。2026-10-29 关闭 —— **第二批完成** |
-| **第三批 让报回可用** | `GAP-03` 投影 + `GAP-04` 六分组 + `GAP-05` 终态 + `GAP-10` Library + `GAP-11` PR 聚合 | 03 与 04 **可同批**（原判断的串行约束不成立） | 状态部分是加法，不是重构 |
+| **第三批 让报回可用** | `GAP-03` 投影 ✅ + `GAP-04` 六分组 ✅ + `GAP-05` 终态 ✅ + `GAP-10` Library + `GAP-11` PR 聚合 | 03 与 04 **可同批**（原判断的串行约束不成立） | 状态三件 2026-10-29 关闭；Library 与 PR 聚合仍在本批 |
 | **第四批 让裁定可用** | `GAP-12` 卡片动作 + `GAP-18` 审批 + `GAP-14` Pause + `GAP-19` worktree 回收 + `GAP-25` 禁令 | 19 依赖 10（先有清单再删目录） | **不可逆动作（19）与它的防护同批**，不推到最后。~~`GAP-24` 退订~~ ✅ 已于 2026-10-29 提前做完 |
 | **第五批 减少重复交代** | `GAP-06` goal + `GAP-09` 仓库约定 + `GAP-29` 三件套 | 无 | |
 | **第六批 卫生** | `GAP-13` Usage + `GAP-15` Archive + `GAP-17` 超时 + `GAP-20` purge + `GAP-27` 锁重试 | 无 | |

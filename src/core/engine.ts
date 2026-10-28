@@ -43,7 +43,8 @@ import {
   sortedMemories,
   upsertMemory,
 } from './memory.js';
-import { buildOverview } from './overview.js';
+import { buildOverview, dueForResolve } from './overview.js';
+import { buildProjectState, type ProjectStateSnapshot } from './projectState.js';
 import { branchNameFor, normaliseTasks, planTasks, PLAN_TTL_MS } from './planner.js';
 import { renderFeedbackAnswer, renderProjectCharter, renderThreadTask } from './prompt.js';
 import { normaliseQuotaMax, quotaState, quotaWarning, releaseQuota, reserveQuota, rolloverQuota } from './quota.js';
@@ -163,6 +164,8 @@ export interface PendingPlan {
 /** Result of one self-healing sweep. */
 export interface HealSweepResult {
   observed: number;
+  /** Threads marked resolved because they had been silent for a week. */
+  resolved: number;
   healed: ProjectThreadDescriptor[];
   escalated: ProjectThreadDescriptor[];
   settled: ProjectThreadDescriptor[];
@@ -171,7 +174,16 @@ export interface HealSweepResult {
 }
 
 /** Thread-management verbs exposed to the model and the `/project` command. */
-export type ThreadAction = 'inspect' | 'steer' | 'respond' | 'interrupt' | 'retry' | 'close' | 'watch' | 'unwatch';
+export type ThreadAction =
+  | 'inspect'
+  | 'steer'
+  | 'respond'
+  | 'interrupt'
+  | 'retry'
+  | 'close'
+  | 'reopen'
+  | 'watch'
+  | 'unwatch';
 
 /** The orchestration core. */
 export class ProjectEngine {
@@ -196,6 +208,17 @@ export class ProjectEngine {
   private knowledgeCache: { index: KnowledgeIndex; state: KnowledgeState } | undefined;
   /** The user-wide daily thread ledger; the enforced cap lives here, not in the manifest. */
   private readonly ledger: QuotaLedger;
+  /**
+   * Sessions that have driven this project, in call order.
+   *
+   * The projection that feeds the panel is per-session, so a state change has to be appended
+   * to the sessions a human is actually looking at. We learn those ids from the callers of
+   * the public methods rather than from a registry: a project can be driven from more than
+   * one session, and the ones that matter are exactly the ones that issued a command.
+   */
+  private readonly coordinators: string[] = [];
+  /** Sink for state snapshots; installed by the plugin so `core/` stays Host-free. */
+  private statePublisher: ((sessionId: string, snapshot: ProjectStateSnapshot) => void) | undefined;
 
   constructor(
     readonly rootDir: string,
@@ -208,6 +231,53 @@ export class ProjectEngine {
     this.watermarks = deps.memoryWatermarks ?? new Map();
     this.store = new ManifestStore(rootDir, this.clock);
     this.ledger = new QuotaLedger(deps.quotaLedgerPath ?? defaultQuotaLedgerPath());
+  }
+
+  /**
+   * Remember that this session drives the project, and remember it from a plain object.
+   *
+   * `parent` is opaque in this layer on purpose (no Host types). If the caller exposes a
+   * string `id` we keep it; if it does not, the project still works — the panel just has no
+   * session to fold the snapshot into.
+   */
+  noteCaller(parent: unknown): void {
+    const id = (parent as { id?: unknown } | undefined)?.id;
+    if (typeof id !== 'string' || id.length === 0) return;
+    if (this.coordinators.includes(id)) return;
+    this.coordinators.push(id);
+  }
+
+  /** Install the snapshot sink. Called once by the plugin; absent in tests that do not care. */
+  setStatePublisher(publisher: (sessionId: string, snapshot: ProjectStateSnapshot) => void): void {
+    this.statePublisher = publisher;
+  }
+
+  /** Sessions known to drive this project. */
+  coordinatorSessions(): readonly string[] {
+    return this.coordinators;
+  }
+
+  /**
+   * Publish the current state to every coordinator session.
+   *
+   * Fire-and-forget: a panel that fails to update must never fail the write that produced
+   * it. Called only after a mutation, never from a renderer, so an idle project pays nothing.
+   */
+  private async publishState(): Promise<void> {
+    const publisher = this.statePublisher;
+    if (publisher === undefined || this.coordinators.length === 0) return;
+    const manifest = await this.store.tryRead();
+    if (manifest === undefined) return;
+    const overview = buildOverview(manifest.manifest, this.clock.now());
+    const snapshot = buildProjectState(overview, this.clock.now());
+    for (const sessionId of this.coordinators) {
+      try {
+        publisher(sessionId, snapshot);
+      } catch {
+        // A closed or disposed session is not an error worth reporting: the next write
+        // republishes to whoever is still there.
+      }
+    }
   }
 
   /** Today's user-wide ledger reading for this project. */
@@ -315,6 +385,7 @@ export class ProjectEngine {
       author?: string;
     },
   ): Promise<{ entry: ProjectMemoryEntry; broadcast: BroadcastOutcome }> {
+    this.noteCaller(parent);
     const entry = await this.store.update((draft) => {
       const written = upsertMemory(
         draft,
@@ -461,6 +532,7 @@ export class ProjectEngine {
     options: CoordinateOptions = {},
     signal: AbortSignal = AbortSignal.timeout(120_000),
   ): Promise<CoordinateResult> {
+    this.noteCaller(parent);
     const opening = await this.requireManifest();
     const plan = this.resolvePlan(goal, options);
     const planned = plan.tasks;
@@ -631,6 +703,7 @@ export class ProjectEngine {
     options: SuggestStartOptions = {},
     signal: AbortSignal = AbortSignal.timeout(120_000),
   ): Promise<SuggestStartResult> {
+    this.noteCaller(parent);
     const manifest = await this.requireManifest();
     const plan = manifest.plan;
     if (plan === undefined) {
@@ -955,6 +1028,7 @@ export class ProjectEngine {
     payload: string | undefined,
     signal: AbortSignal = AbortSignal.timeout(60_000),
   ): Promise<{ thread: ProjectThreadDescriptor; message: string }> {
+    this.noteCaller(parent);
     const thread = await this.requireThread(threadId);
     switch (action) {
       case 'inspect': {
@@ -1015,12 +1089,27 @@ export class ProjectEngine {
         return { thread: updated, message: `retried ${threadId}` };
       }
       case 'close': {
+        // Marking done is `resolved`, not `completed`: `completed` means "the thread
+        // finished and nothing is pending", which is exactly what the user is overriding
+        // when they close a thread that still has a PR open. `resolved` is the state that
+        // says a human made the call, and it is the one that can be reopened.
         const updated = await this.updateThread(threadId, (draft) => {
-          draft.status = 'completed';
-          draft.note = payload ?? 'closed by user';
+          draft.status = 'resolved';
+          draft.note = payload ?? 'resolved by user';
           draft.updatedAt = this.clock.now();
         });
-        return { thread: updated, message: `closed ${threadId}` };
+        return { thread: updated, message: `resolved ${threadId}` };
+      }
+      case 'reopen': {
+        const updated = await this.updateThread(threadId, (draft) => {
+          // Back to what the thread's own evidence supports: a PR means it is awaiting
+          // review again; otherwise the work is simply finished and idle. Guessing a live
+          // state would make a reopened thread look like it is running.
+          draft.status = draft.prOrDeliverableRef === undefined ? 'completed' : 'awaiting_review';
+          draft.note = payload ?? 'reopened by user';
+          draft.updatedAt = this.clock.now();
+        });
+        return { thread: updated, message: `reopened ${threadId}` };
       }
       case 'unwatch': {
         // Polling is the only thing this stops: the branch, the PR and the descriptor all
@@ -1056,13 +1145,32 @@ export class ProjectEngine {
    * request forever is how a watcher turns into a source of noise and rate limits.
    */
   async healSweep(parent: object, signal: AbortSignal = AbortSignal.timeout(120_000)): Promise<HealSweepResult> {
+    this.noteCaller(parent);
     const manifest = await this.requireManifest();
-    const result: HealSweepResult = { observed: 0, healed: [], escalated: [], settled: [], waiting: [], errors: [] };
+    const result: HealSweepResult = {
+    observed: 0,
+    resolved: 0,
+    healed: [],
+    escalated: [],
+    settled: [],
+    waiting: [],
+    errors: [],
+  };
+    // The week-of-silence rule runs before the poll selection, so a thread that just went
+    // quiet is resolved instead of being polled one last time. It is a write, so it belongs
+    // here rather than in `buildOverview` — a panel render must never mutate the record.
+    result.resolved = await this.autoResolveIdle(this.clock.now());
     const candidates = Object.values(manifest.threads).filter(
       (thread) =>
         thread.unwatchAt === undefined &&
         thread.branch !== undefined &&
-        (thread.status === 'awaiting_review' || thread.status === 'ci_fixing' || thread.status === 'running'),
+        // `landing` stays in the set: the only way to learn that a queued merge finished is
+        // to keep looking. `resolved` is excluded — it is done, and polling it forever is
+        // how a watcher turns into noise.
+        (thread.status === 'awaiting_review' ||
+          thread.status === 'ci_fixing' ||
+          thread.status === 'running' ||
+          thread.status === 'landing'),
     );
 
     for (const thread of candidates) {
@@ -1383,7 +1491,7 @@ export class ProjectEngine {
   }
 
   /** Structured overview for the tool result. */
-  async overview(warnings: string[] = []): Promise<ProjectOverview> {
+  async overview(warnings: string[] = [], options: { includeResolved?: boolean } = {}): Promise<ProjectOverview> {
     const manifest = await this.requireManifest();
     const collected = [...warnings];
     if (!this.threads.available()) {
@@ -1403,14 +1511,14 @@ export class ProjectEngine {
       );
       if (globalWarning !== undefined) collected.push(globalWarning);
     }
-    const overview = buildOverview(manifest, this.clock.now(), collected);
+    const overview = buildOverview(manifest, this.clock.now(), collected, options);
     if (global === undefined) return overview;
     return { ...overview, quota: { ...overview.quota, global: { created: global.created, max: global.max } } };
   }
 
   /** Buckets plus thread descriptors as a plain JSON value (tool output). */
-  async overviewJson(): Promise<Record<string, unknown>> {
-    const overview = await this.overview();
+  async overviewJson(options: { includeResolved?: boolean } = {}): Promise<Record<string, unknown>> {
+    const overview = await this.overview([], options);
     const knowledge = await this.knowledgeState().catch(() => undefined);
     const buckets: Partial<Record<OverviewBucket, ProjectThreadDescriptor[]>> = overview.buckets;
     return {
@@ -1439,12 +1547,40 @@ export class ProjectEngine {
   // Internals
   // ---------------------------------------------------------------------------
 
+  /**
+   * Mark threads that have been silent for a week as resolved.
+   *
+   * Official: resolved happens "automatically after a week with no activity". Activity is
+   * anything that writes `updatedAt` — a turn, a heal round, a new review comment — so the
+   * rule needs no per-state special cases. Returns how many threads moved.
+   *
+   * Deliberately not part of `buildOverview`: the panel is a reader, and a render that
+   * silently bumps `revision` would fight every other writer.
+   */
+  private async autoResolveIdle(nowMs: number): Promise<number> {
+    const manifest = await this.requireManifest();
+    const due = Object.values(manifest.threads).filter((thread) => dueForResolve(thread, nowMs));
+    if (due.length === 0) return 0;
+    await this.store.update((draft) => {
+      for (const stale of due) {
+        const thread = draft.threads[stale.threadId];
+        if (thread === undefined) continue;
+        const days = Math.floor((nowMs - thread.updatedAt) / 86_400_000);
+        thread.status = 'resolved';
+        thread.note = `resolved automatically after ${days} day(s) without activity`;
+        thread.updatedAt = nowMs;
+      }
+      return { manifest: draft, result: due.length };
+    });
+    return due.length;
+  }
+
   /** Read-modify-write one thread descriptor under the CAS guard. */
   private async updateThread(
     threadId: string,
     mutate: (thread: ProjectThreadDescriptor) => void,
   ): Promise<ProjectThreadDescriptor> {
-    return this.store.update((draft) => {
+    const updated = await this.store.update((draft) => {
       const thread = draft.threads[threadId];
       if (thread === undefined) {
         throw new ProjectError('THREAD_NOT_FOUND', `unknown thread "${threadId}"`, { threadId });
@@ -1452,6 +1588,10 @@ export class ProjectEngine {
       mutate(thread);
       return { manifest: draft, result: thread };
     });
+    // One funnel for every descriptor change, so the panel cannot miss a transition even if
+    // a future action forgets to publish explicitly.
+    void this.publishState();
+    return updated;
   }
 
   /** Commit and push one thread's work, then open a PR. */

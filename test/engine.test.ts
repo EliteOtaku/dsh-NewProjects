@@ -552,7 +552,76 @@ describe('manageThread', () => {
     const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     const id = result.started[0]?.threadId ?? '';
     const closed = await engine.manageThread(PARENT, id, 'close', undefined);
-    assert.equal(closed.thread.status, 'completed');
+    // `completed` means the work is done and nothing is pending; a thread the user closed
+    // is out of the way, which is what `resolved` says. Reusing `completed` would also
+    // leave it in the Idle bucket forever instead of hiding it.
+    assert.equal(closed.thread.status, 'resolved');
+    const closedOverview = await engine.overview();
+    assert.equal(closedOverview.buckets.resolved.length, 0, 'resolved threads are hidden by default');
+    assert.equal(closedOverview.totals.resolved, 1);
+  });
+  it('reopens a resolved thread into the bucket its evidence supports', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const result = await engine.coordinate(PARENT, '- one', { planOnly: false });
+    const id = result.started[0]?.threadId ?? '';
+    await engine.manageThread(PARENT, id, 'close', undefined);
+    const reopened = await engine.manageThread(PARENT, id, 'reopen', undefined);
+    // No pull request was ever recorded, so there is nothing for a reviewer to look at:
+    // the thread goes back to Idle rather than claiming it is awaiting review.
+    assert.equal(reopened.thread.status, 'completed');
+  });
+
+  it('resolves a silent thread after a week and says why', async () => {
+    const { engine, runner, clock } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    await engine.coordinate(PARENT, '- one', { planOnly: false });
+    runner.on('gh pr view', { exitCode: 1, stderr: 'no pull requests found' });
+    clock.advance(8 * 24 * 60 * 60 * 1000);
+    const swept = await engine.healSweep(PARENT, new AbortController().signal);
+    assert.equal(swept.resolved, 1);
+    assert.equal((await engine.overview()).totals.resolved, 1);
+  });
+});
+
+describe('state publishing', () => {
+  it('publishes a snapshot to the session that drove the project', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const published: Array<{ sessionId: string; revision: number }> = [];
+    engine.setStatePublisher((sessionId, snapshot) => {
+      published.push({ sessionId, revision: snapshot.revision });
+    });
+    await engine.coordinate(PARENT, '- one', { planOnly: false });
+    // Publishing is fire-and-forget behind the write it describes, so wait for it rather
+    // than asserting synchronously: a synchronous assertion would test the timer, not the
+    // wiring.
+    await eventually(async () => (published.length > 0 ? published : undefined));
+    assert.equal(published[0]?.sessionId, (PARENT as { id: string }).id);
+    assert.ok((published[0]?.revision ?? 0) > 0);
+  });
+
+  it('records the caller as a coordinator, and only once', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    await engine.coordinate(PARENT, '- one', { planOnly: false });
+    await engine.overview();
+    await engine.coordinate(PARENT, '- two', { planOnly: false });
+    assert.deepEqual([...engine.coordinatorSessions()], [(PARENT as { id: string }).id]);
+  });
+
+  it('publishes nothing when no publisher is installed', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    // The point is that the write path does not depend on a panel: a project driven by a
+    // headless session must behave identically.
+    const result = await engine.coordinate(PARENT, '- one', { planOnly: false });
+    assert.equal(result.started.length, 1);
   });
 });
 
@@ -565,7 +634,7 @@ describe('overview / charter', () => {
     const overview = await engine.overview();
     assert.equal(overview.name, 'demo');
     assert.equal(overview.totals.threads, 2);
-    assert.equal(overview.buckets.running.length, 2);
+    assert.equal(overview.buckets.working.length, 2);
   });
 
   it('exposes the same overview as a plain JSON tool payload', async () => {

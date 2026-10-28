@@ -209,3 +209,34 @@ export interface HostContext {
   /** Optional child-context scope used for agent-scoped registrations. */
   emit?(event: string, ...args: unknown[]): void;
 }
+
+/** Minimal shape of the Zod schema the Host expects for projection state. */
+export interface HostZodSchema {
+  parse(value: unknown): unknown;
+}
+
+/** One session projection definition, as `sessionProjections.register` accepts it. */
+export interface HostProjectionDefinition<S> {
+  key: string;
+  stateSchema: HostZodSchema;
+  init(header: unknown, inheritedEventCount: number): S;
+  apply(state: S, event: { type: string; data?: unknown }): S;
+  wire?: { viewSchema: HostZodSchema; view(state: S): unknown };
+  stateVersion: number;
+}
+
+/** The subset of the `sessionProjections` service this plugin calls. */
+export interface HostSessionProjections {
+  register<S>(definition: HostProjectionDefinition<S>): () => void;
+}
+
+/** The subset of the `sessions` service this plugin calls. */
+export interface HostSessions {
+  get(id: string): HostSession | undefined;
+}
+
+/** The subset of a live `Session` this plugin appends to. */
+export interface HostSession {
+  readonly id: string;
+  append(type: string, data: unknown): unknown;
+}

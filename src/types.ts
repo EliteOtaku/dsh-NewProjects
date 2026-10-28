@@ -6,26 +6,40 @@
  * no class instances, no functions, no `undefined` holes in stored objects.
  */
 
-/** Lifecycle of one parallel thread. */
+/**
+ * Lifecycle of one parallel thread.
+ *
+ * `completed` is kept as the name of the "finished, nothing pending" state rather than
+ * being renamed to `idle`: it is already on disk in every existing manifest, and the
+ * rename would buy nothing a comment does not. It maps to the panel's `idle` bucket.
+ */
 export type ThreadStatus =
   | 'queued'
   | 'running'
   | 'awaiting_review'
   | 'needs_feedback'
   | 'ci_fixing'
+  /** PR approved or queued to merge: the last step belongs to the host, not to us. */
+  | 'landing'
   | 'completed'
-  | 'failed';
+  | 'failed'
+  /** Marked done by the user, by a merged PR, or automatically after a week of silence. */
+  | 'resolved';
 
 /**
  * Which bucket a thread belongs to on the overview panel. Kept as a derived
  * mapping (not stored) so the panel can never disagree with `status`.
+ *
+ * The six names are the official panel's six groups, one-to-one. That is deliberate:
+ * a bucket that only exists here is a bucket our users have to learn twice.
  */
 export type OverviewBucket =
-  | 'completed'
-  | 'awaiting_review'
-  | 'waiting_for_feedback'
-  | 'running'
-  | 'failed';
+  | 'ready_for_review'
+  | 'waiting_on_you'
+  | 'working'
+  | 'landing'
+  | 'idle'
+  | 'resolved';
 
 /** One project-level decision that every thread must know about. */
 export interface ProjectMemoryEntry {
@@ -285,9 +299,13 @@ export interface ProjectOverview {
   suggested?: SuggestedPlanView;
   totals: {
     threads: number;
+    /** Threads still owned by us right now (queued / running / ci_fixing). */
     active: number;
-    completed: number;
-    failed: number;
+    /** Threads whose next move is the user's, however that happened. */
+    waitingOnYou: number;
+    resolved: number;
+    /** True when at least one thread is waiting on you — the panel's dot. */
+    needsAttention: boolean;
   };
   /** Non-fatal diagnostics worth surfacing to the user. */
   warnings: string[];

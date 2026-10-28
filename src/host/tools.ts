@@ -260,7 +260,7 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
         threadId: { type: 'string', description: 'Target thread id. Omit to list every thread.' },
         action: {
           type: 'string',
-          enum: ['list', 'inspect', 'steer', 'respond', 'retry', 'interrupt', 'close', 'deliver', 'heal', 'start', 'drop', 'watch', 'unwatch'],
+          enum: ['list', 'inspect', 'steer', 'respond', 'retry', 'interrupt', 'close', 'reopen', 'deliver', 'heal', 'start', 'drop', 'watch', 'unwatch'],
           description: 'What to do. Defaults to list.',
         },
         message: { type: 'string', description: 'The message for steer/respond, or the PR body/title text for deliver.' },
@@ -327,7 +327,7 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
           const delivered = await engine.deliverThread(threadId, message === undefined ? {} : { body: message });
           return { ok: true, prRef: delivered.prRef, message: delivered.message, thread: delivered.thread };
         }
-        if (action === 'inspect' || action === 'steer' || action === 'respond' || action === 'retry' || action === 'interrupt' || action === 'close') {
+        if (action === 'inspect' || action === 'steer' || action === 'respond' || action === 'retry' || action === 'interrupt' || action === 'close' || action === 'reopen' || action === 'watch' || action === 'unwatch') {
           const outcome = await engine.manageThread(source.parentOf(exec), threadId, action, message, exec.signal);
           return { ok: true, message: outcome.message, thread: outcome.thread };
         }
@@ -348,6 +348,10 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
       properties: {
         rootDir: { type: 'string', description: 'Project root. Defaults to the current workspace.' },
         markdown: { type: 'boolean', description: 'Also return a rendered Markdown summary.' },
+        includeResolved: {
+          type: 'boolean',
+          description: 'Also list threads that are resolved. They are hidden by default.',
+        },
       },
       additionalProperties: false,
     },
@@ -356,9 +360,10 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
       void exec;
       try {
         const engine = await source.engineFor(readString(args, 'rootDir'));
-        const json = await engine.overviewJson();
+        const options = { includeResolved: readBool(args, 'includeResolved') === true };
+        const json = await engine.overviewJson(options);
         if (readBool(args, 'markdown') === true) {
-          const structured = await engine.overview();
+          const structured = await engine.overview([], options);
           return { ok: true, ...json, markdown: renderOverviewMarkdown(structured) };
         }
         return { ok: true, ...json };

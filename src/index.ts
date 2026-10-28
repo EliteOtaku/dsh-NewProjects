@@ -26,15 +26,19 @@ import {
   ProjectEngine,
   normalisePollInterval,
 } from './core/engine.js';
+import { PROJECT_STATE_EVENT, type ProjectStateSnapshot } from './core/projectState.js';
 import { SwappableThreadRuntime, UnavailableThreadRuntime, type ThreadRuntime } from './core/threads.js';
 import { createCommandRunner } from './host/commandRunner.js';
 import { buildCommands, type CommandContextSource } from './host/commands.js';
 import { SubagentThreadRuntime } from './host/subagents.js';
+import { buildProjectStateProjection } from './host/projections.js';
 import { buildTools, type ToolContextSource } from './host/tools.js';
 import type {
   HostCommands,
   HostContext,
   HostSubagents,
+  HostSessionProjections,
+  HostSessions,
   HostSubprocess,
   HostSystemPrompt,
   HostTimer,
@@ -89,6 +93,8 @@ interface Runtime {
   engineFor(rootDir: string | undefined): ProjectEngine;
   /** Every engine created so far, in creation order. */
   engines(): Iterable<ProjectEngine>;
+  /** Install (or replace) the snapshot sink, including on engines already created. */
+  setPublisher(publisher: (sessionId: string, snapshot: ProjectStateSnapshot) => void): void;
   /** Drop every cached engine and turn-end subscription. */
   dispose(): void;
 }
@@ -98,9 +104,15 @@ function createRuntime(options: {
   runner: ReturnType<typeof createCommandRunner>;
   threads: ThreadRuntime;
   quotaLedgerPath?: string;
+  /**
+   * Where to send state snapshots. Supplied once `sessions` is available; absent until then
+   * and in tests, which is why publishing is a no-op rather than an error.
+   */
+  publisher?: (sessionId: string, snapshot: ProjectStateSnapshot) => void;
 }): Runtime {
   const engines = new Map<string, ProjectEngine>();
   const detaches = new Map<string, () => void>();
+  let publisher = options.publisher;
 
   const resolveRoot = (rootDir: string | undefined): string => {
     const chosen = rootDir ?? options.root();
@@ -116,6 +128,7 @@ function createRuntime(options: {
       threads: options.threads,
       ...(options.quotaLedgerPath === undefined ? {} : { quotaLedgerPath: options.quotaLedgerPath }),
     });
+    if (publisher !== undefined) engine.setStatePublisher(publisher);
     engines.set(root, engine);
     // Attach once per root, here, so exactly one listener exists no matter how many tool
     // calls touch the same project.
@@ -126,6 +139,10 @@ function createRuntime(options: {
   return {
     engineFor,
     engines: () => engines.values(),
+    setPublisher(next) {
+      publisher = next;
+      for (const engine of engines.values()) engine.setStatePublisher(next);
+    },
     dispose: () => {
       for (const detach of detaches.values()) detach();
       detaches.clear();
@@ -178,6 +195,28 @@ export function apply(ctx: HostContext, config: ProjectBetaConfig = {}): void {
     ...(config.quotaLedgerPath === undefined ? {} : { quotaLedgerPath: config.quotaLedgerPath }),
   });
   ctx.effect(() => runtime.dispose);
+
+  // The panel is a fold over session events, so the snapshot has to land in the sessions a
+  // human is looking at. Registered only once both services exist: a projection without a
+  // session to append to would render nothing, and appending without a projection would be
+  // an unreadable event.
+  ctx.inject(['sessionProjections', 'sessions'], (scoped) => {
+    const projections = scoped.get('sessionProjections') as HostSessionProjections | undefined;
+    const sessions = scoped.get('sessions') as HostSessions | undefined;
+    if (projections === undefined || sessions === undefined) return;
+    scoped.effect(() => {
+      const disposeProjection = projections.register(buildProjectStateProjection());
+      runtime.setPublisher((sessionId, snapshot) => {
+        sessions.get(sessionId)?.append(PROJECT_STATE_EVENT, { snapshot });
+      });
+      return () => {
+        disposeProjection();
+        // Stop publishing on unload: an event appended with no projection registered is a
+        // permanent session event that nothing can read.
+        runtime.setPublisher(() => undefined);
+      };
+    });
+  });
 
   ctx.inject(['tools'], (scoped) => {
     const tools = scoped.get('tools') as HostTools | undefined;

@@ -17,48 +17,94 @@ import type {
   ThreadStatus,
 } from '../types.js';
 
-/** The display order of buckets on the panel. */
+/**
+ * The display order of buckets on the panel, matching the official Threads tab:
+ * Ready for review / Waiting on you / Working / Landing / Idle / Resolved.
+ */
 export const BUCKET_ORDER: readonly OverviewBucket[] = [
-  'running',
-  'awaiting_review',
-  'waiting_for_feedback',
-  'completed',
-  'failed',
+  'ready_for_review',
+  'waiting_on_you',
+  'working',
+  'landing',
+  'idle',
+  'resolved',
 ];
 
 /** Bucket titles used by the panel and the tool renderer. */
 export const BUCKET_LABELS: Record<OverviewBucket, string> = {
-  running: 'Running / CI fixing',
-  awaiting_review: 'Awaiting review',
-  waiting_for_feedback: 'Waiting for your input',
-  completed: 'Completed',
-  failed: 'Failed',
+  ready_for_review: 'Ready for review',
+  waiting_on_you: 'Waiting on you',
+  working: 'Working',
+  landing: 'Landing',
+  idle: 'Idle',
+  resolved: 'Resolved',
 };
 
 /** Statuses that count as "still working" (keeps the thread alive in the panel). */
 const ACTIVE_STATUSES: readonly ThreadStatus[] = ['queued', 'running', 'ci_fixing'];
 
-/** Map one thread status onto its panel bucket. */
+/**
+ * Map one thread status onto its panel bucket.
+ *
+ * Written as an ordered decision rather than a flat lookup, because two of the official
+ * definitions can be true of the same thread and the panel has to break the tie:
+ *
+ *   1. human-blocking (`needs_feedback`, `failed`) — the user must act, so the panel's
+ *      attention dot must light up. The official `Waiting on you` definition explicitly
+ *      includes "or that failed", and the dot is defined as "shows a dot when a thread is
+ *      waiting on you". A thread stuck on an approval inside its thread can also have a PR
+ *      open; if it were filed under `Ready for review` nothing would point at the thing
+ *      that is actually stuck, and in-thread approvals cannot be answered from the project
+ *      conversation.
+ *   2. PR lifecycle (`landing` > `ready_for_review`).
+ *   3. running work.
+ *   4. terminal states (`idle` > `resolved`).
+ *
+ * The `landing` > `ready_for_review` tie (one reviewer approved, another has not) is our
+ * call, not the official text: the thread has left our hands either way.
+ */
 export function bucketOf(status: ThreadStatus): OverviewBucket {
   switch (status) {
+    // 1. Human-blocking first.
+    case 'needs_feedback':
+    case 'failed':
+      return 'waiting_on_you';
+    // 2. PR lifecycle.
+    case 'landing':
+      return 'landing';
+    case 'awaiting_review':
+      return 'ready_for_review';
+    // 3. Work in flight.
     case 'queued':
     case 'running':
     case 'ci_fixing':
-      return 'running';
-    case 'awaiting_review':
-      return 'awaiting_review';
-    case 'needs_feedback':
-      return 'waiting_for_feedback';
+      return 'working';
+    // 4. Terminal states.
     case 'completed':
-      return 'completed';
-    case 'failed':
-      return 'failed';
+      return 'idle';
+    case 'resolved':
+      return 'resolved';
   }
 }
 
 /** Whether a status means the thread still owns live work. */
 export function isActiveStatus(status: ThreadStatus): boolean {
   return ACTIVE_STATUSES.includes(status);
+}
+
+/**
+ * A week without a single recorded event, after which a thread is marked done.
+ *
+ * Every turn counts as activity, and so does a PR event (a failing check or a new comment
+ * wakes the thread for a turn). So no special case is needed for "PR still open": a pull
+ * request nobody has touched for a week is exactly what this is for.
+ */
+export const RESOLVE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Whether this thread has been silent long enough to be resolved automatically. */
+export function dueForResolve(thread: ProjectThreadDescriptor, nowMs: number): boolean {
+  if (thread.status === 'resolved') return false;
+  return nowMs - thread.updatedAt >= RESOLVE_AFTER_MS;
 }
 
 /** Sort threads newest-first within a bucket, so the panel shows recent work. */
@@ -71,15 +117,21 @@ export function buildOverview(
   manifest: ProjectManifest,
   nowMs: number,
   warnings: string[] = [],
+  options: { includeResolved?: boolean } = {},
 ): ProjectOverview {
   const buckets: Record<OverviewBucket, ProjectThreadDescriptor[]> = {
-    running: [],
-    awaiting_review: [],
-    waiting_for_feedback: [],
-    completed: [],
-    failed: [],
+    ready_for_review: [],
+    waiting_on_you: [],
+    working: [],
+    landing: [],
+    idle: [],
+    resolved: [],
   };
-  const threads = Object.values(manifest.threads);
+  const all = Object.values(manifest.threads);
+  // Resolved threads stay in the manifest — they are the record of what happened — but a
+  // panel that lists every thread ever finished is a log, not an overview. `/project threads
+  // --all` and the `includeResolved` option are the way back to the full list.
+  const threads = options.includeResolved === true ? all : all.filter((thread) => thread.status !== 'resolved');
   for (const thread of threads) buckets[bucketOf(thread.status)].push(thread);
   for (const bucket of BUCKET_ORDER) buckets[bucket].sort(byRecency);
 
@@ -108,8 +160,11 @@ export function buildOverview(
     totals: {
       threads: threads.length,
       active: threads.filter((thread) => isActiveStatus(thread.status)).length,
-      completed: buckets.completed.length,
-      failed: buckets.failed.length,
+      waitingOnYou: buckets.waiting_on_you.length,
+      // Counted over every thread, including the ones the panel is hiding: the number is
+      // what `/project threads` reports as hidden, so it must match the store, not the view.
+      resolved: all.filter((thread) => thread.status === 'resolved').length,
+      needsAttention: buckets.waiting_on_you.length > 0,
     },
     warnings,
   };
@@ -130,7 +185,14 @@ export function renderOverviewMarkdown(overview: ProjectOverview): string {
     lines.push(`- quota (enforced, all projects): ${overview.quota.global.created}/${overview.quota.global.max}`);
   }
   lines.push(`- memory: ${overview.memories.length} decisions, prefix \`${overview.prefixFingerprint}\``);
-  lines.push(`- threads: ${overview.totals.threads} total, ${overview.totals.active} active`);
+  lines.push(
+    `- threads: ${overview.totals.threads} shown, ${overview.totals.active} active, ` +
+      `${overview.totals.waitingOnYou} waiting on you`,
+  );
+  if (overview.totals.resolved > 0) {
+    const hidden = overview.totals.resolved - overview.buckets.resolved.length;
+    if (hidden > 0) lines.push(`- resolved: ${overview.totals.resolved} (${hidden} hidden; \`/project threads --all\`)`);
+  }
   for (const warning of overview.warnings) lines.push(`- WARNING: ${warning}`);
   const suggested = overview.suggested;
   if (suggested !== undefined) {
