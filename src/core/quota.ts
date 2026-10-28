@@ -1,10 +1,14 @@
 /**
  * Daily thread quota.
  *
- * Mirrors the Projects Beta guard rail: at most `dailyThreadQuotaMax` new threads
- * across all projects per local calendar day, default 200. The ledger lives inside
- * each project record; `rollover` resets it when the local day changes, so a stale
- * record can never block a new day.
+ * This is the *per-project* counter, which the official wording makes a preference rather
+ * than a cap: "a limit you ask for is a preference rather than a cap". The enforced figure —
+ * "200 new threads per day across your projects" — cannot live here, because this record is
+ * one per project and three of them would allow three budgets; it lives in
+ * {@link ../quotaLedger.QuotaLedger}, outside any project directory.
+ *
+ * `rollover` resets the counter when the local day changes, so a stale record can never
+ * block a new day.
  */
 
 import { ProjectError } from './errors.js';
@@ -82,10 +86,21 @@ export function releaseQuota(manifest: ProjectManifest, count: number, nowMs: nu
   manifest.dailyThreadsCreated = Math.max(0, manifest.dailyThreadsCreated - count);
 }
 
-/** Warn when the ledger is close to the ceiling (`>= 80%`). */
-export function quotaWarning(state: ProjectQuotaState): string | undefined {
+/**
+ * Warn when a counter is close to its ceiling (`>= 80%`).
+ *
+ * Takes the numbers rather than a manifest because there are two counters to warn on and
+ * they are different kinds of thing: this project's own preference, and the user-wide cap
+ * the ledger enforces. `label` is what tells the user which one they are reading — a project
+ * sitting at 3/200 of its own preference can still be unable to start a thread, and a
+ * warning that does not say which budget is full leaves that unexplainable.
+ */
+export function quotaWarning(
+  state: ProjectQuotaState,
+  label = 'daily thread quota',
+): string | undefined {
   if (state.max <= 0) return undefined;
   const ratio = state.created / state.max;
   if (ratio < 0.8) return undefined;
-  return `daily thread quota at ${state.created}/${state.max} (${Math.round(ratio * 100)}%) for ${state.day}`;
+  return `${label} at ${state.created}/${state.max} (${Math.round(ratio * 100)}%) for ${state.day}`;
 }

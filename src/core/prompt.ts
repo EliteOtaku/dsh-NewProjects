@@ -16,12 +16,30 @@
 
 import { renderMemoryPrefix } from './memory.js';
 import {
-  renderKnowledgeContextSection,
-  renderKnowledgeRagNotice,
+  emptyIndex,
+  renderKnowledgeIndexSection,
+  resolveKnowledgeState,
   type KnowledgeIndex,
   type KnowledgeState,
 } from './knowledge.js';
 import type { ProjectManifest, ProjectThreadDescriptor } from '../types.js';
+
+/**
+ * Budget for project instructions, in characters.
+ *
+ * The one figure Projects documents for standing prompt text: instructions are "Text sent to
+ * each new thread and to Claude in the project conversation, up to 16,000 characters". It is
+ * enforced as a *warning*, never a truncation — silently dropping the tail of a user's brief
+ * would replace one quiet failure (stale knowledge) with another, which is the opposite of
+ * what this batch is for.
+ */
+export const MAX_INSTRUCTIONS_CHARS = 16_000;
+
+/** Whether `instructions` exceeds the documented budget, and by how much. */
+export function instructionsOverBudget(instructions: string | undefined): number {
+  if (instructions === undefined) return 0;
+  return Math.max(0, instructions.trim().length - MAX_INSTRUCTIONS_CHARS);
+}
 
 /** Read-only facts the charter needs about the project. */
 export interface CharterInput {
@@ -33,9 +51,9 @@ export interface CharterInput {
   /**
    * The built knowledge index, when one exists.
    *
-   * Present so the charter can render knowledge either in full or as a retrieval notice.
-   * Absent means "never indexed" — which is not the same as "no knowledge": the paths are
-   * still listed so a thread can read them by hand.
+   * Supplies the catalogue the charter lists — document paths and sizes, never bodies.
+   * Absent means "never indexed", which is not the same as "no knowledge": the bound paths
+   * are still listed so a thread can read them by hand.
    */
   knowledge?: { index: KnowledgeIndex; state: KnowledgeState };
 }
@@ -67,24 +85,13 @@ export function renderProjectCharter(input: CharterInput): string {
     blocks.push('');
   }
 
-  if (input.knowledge !== undefined && input.knowledge.index.docs.length > 0) {
-    // Mode is derived from size on every render, so a project that outgrows its budget
-    // switches to retrieval without anyone flipping a flag — and switches back if it shrinks.
-    if (input.knowledge.state.mode === 'context') {
-      const section = renderKnowledgeContextSection(input.knowledge.index, input.knowledge.state);
-      if (section.length > 0) {
-        blocks.push(section);
-        blocks.push('');
-      }
-    } else {
-      blocks.push(renderKnowledgeRagNotice(input.knowledge.state));
-      blocks.push('');
-    }
-  } else if (input.knowledgePaths.length > 0) {
-    blocks.push('## Bound project knowledge');
-    blocks.push('');
-    blocks.push('Read these before making design decisions. They are the authoritative context for this project:');
-    for (const path of input.knowledgePaths) blocks.push(`- \`${path}\``);
+  // Paths-first: the charter carries the catalogue, the thread reads the bodies off disk.
+  // Nothing here varies with the model's context window, because no document body is in the
+  // prefix at all — which is also why a file edited after the last rebuild cannot produce a
+  // stale answer.
+  const knowledge = renderKnowledge(input);
+  if (knowledge.length > 0) {
+    blocks.push(knowledge);
     blocks.push('');
   }
 
@@ -95,6 +102,22 @@ export function renderProjectCharter(input: CharterInput): string {
   blocks.push('- Never revert or overwrite changes that another thread made unless the task explicitly requires it.');
   blocks.push('- When you finish, summarize what you changed and what you verified.');
   return blocks.join('\n');
+}
+
+/**
+ * The knowledge block, or an empty string when the project has no knowledge bound.
+ *
+ * An index, when one was built, is strictly better than the bare path list: it tells the
+ * thread which documents exist and how large each is, so choosing what to read is one
+ * decision instead of a directory walk. The bare list is the fallback for "bound but never
+ * indexed", which is not the same as "no knowledge".
+ */
+function renderKnowledge(input: CharterInput): string {
+  // One renderer for both cases, so "bound but never indexed" and "indexed but empty" cannot
+  // drift into two differently worded sections saying the same thing.
+  const index = input.knowledge?.index ?? emptyIndex(input.knowledgePaths);
+  const state = input.knowledge?.state ?? resolveKnowledgeState(index);
+  return renderKnowledgeIndexSection(index, state, { boundPaths: input.knowledgePaths });
 }
 
 /** Per-thread task block, injected as the child's first user message. */

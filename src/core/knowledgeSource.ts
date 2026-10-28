@@ -53,6 +53,12 @@ const BINARY_EXTENSIONS = new Set([
   '.sqlite', '.db', '.bin', '.dat', '.pyc', '.node', '.asar',
 ]);
 
+/** Remaining room in a collection run: characters and file slots. */
+interface CollectBudget {
+  remaining: number;
+  files: number;
+}
+
 /** One document read from disk, ready to index. */
 export interface CollectedDocument {
   /** Path as the caller bound it when relative, otherwise absolute; used for citation. */
@@ -76,6 +82,14 @@ export interface CollectOptions {
   rootDir: string;
   /** Hard ceiling on total characters; collection stops once it is exceeded. */
   maxChars: number;
+  /**
+   * Hard ceiling on indexed files; collection stops once it is reached.
+   *
+   * The official limit is phrased this way — a folder contributes "its first 100 files" —
+   * and a file count is the bound that actually protects the walk: one directory of ten
+   * thousand small files passes any character budget while still taking minutes to read.
+   */
+  maxFiles?: number;
   /** Per-file byte cap. */
   maxFileBytes?: number;
   signal?: AbortSignal;
@@ -109,7 +123,7 @@ function isBinaryName(name: string): boolean {
 async function collectPath(
   bound: string,
   options: CollectOptions,
-  budget: { remaining: number },
+  budget: CollectBudget,
   result: CollectResult,
   signal: AbortSignal | undefined,
 ): Promise<void> {
@@ -155,7 +169,7 @@ async function collectPath(
       }
       if (!entry.isFile()) continue;
       if (isBinaryName(entry.name)) continue;
-      if (budget.remaining <= 0) {
+      if (budget.remaining <= 0 || budget.files <= 0) {
         result.truncated = true;
         return;
       }
@@ -174,7 +188,7 @@ async function readOne(
   absolute: string,
   display: string,
   options: CollectOptions,
-  budget: { remaining: number },
+  budget: CollectBudget,
   result: CollectResult,
 ): Promise<void> {
   const maxBytes = options.maxFileBytes ?? MAX_KNOWLEDGE_FILE_BYTES;
@@ -198,6 +212,7 @@ async function readOne(
   if (text.trim().length === 0) return;
 
   budget.remaining -= text.length;
+  budget.files -= 1;
   result.documents.push({ path: display, text });
   result.totalChars += text.length;
 }
@@ -208,11 +223,23 @@ export async function collectKnowledge(
   options: CollectOptions,
 ): Promise<CollectResult> {
   const result: CollectResult = { documents: [], warnings: [], totalChars: 0, truncated: false };
-  const budget = { remaining: Math.max(1, options.maxChars) };
+  const budget: CollectBudget = {
+    remaining: Math.max(1, options.maxChars),
+    files: options.maxFiles === undefined ? Number.POSITIVE_INFINITY : Math.max(1, options.maxFiles),
+  };
   for (const bound of paths) {
     const trimmed = bound.trim();
     if (trimmed.length === 0) continue;
     await collectPath(trimmed, options, budget, result, options.signal);
+    // Both ceilings are reported by name. "Collection stopped" without saying which limit
+    // was hit leaves the user guessing whether to split a file or drop one.
+    if (budget.files <= 0) {
+      result.truncated = true;
+      result.warnings.push(
+        `knowledge collection stopped at the ${String(options.maxFiles)}-file limit; later paths were not indexed`,
+      );
+      break;
+    }
     if (budget.remaining <= 0) {
       result.truncated = true;
       result.warnings.push(

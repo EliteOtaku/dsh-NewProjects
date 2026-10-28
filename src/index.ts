@@ -60,6 +60,14 @@ export interface ProjectBetaConfig {
   ciPollIntervalMs?: number;
   /** Order of the shared-memory system-prompt section. */
   promptSectionOrder?: number;
+  /**
+   * Where the user-wide daily thread ledger lives.
+   *
+   * The enforced quota is "200 new threads per day across your projects", so the counter is
+   * shared by every project on this machine. Configurable because one machine may run
+   * several Harness profiles that should not share a budget.
+   */
+  quotaLedgerPath?: string;
 }
 
 /**
@@ -89,6 +97,7 @@ function createRuntime(options: {
   root: () => string;
   runner: ReturnType<typeof createCommandRunner>;
   threads: ThreadRuntime;
+  quotaLedgerPath?: string;
 }): Runtime {
   const engines = new Map<string, ProjectEngine>();
   const detaches = new Map<string, () => void>();
@@ -105,6 +114,7 @@ function createRuntime(options: {
     const engine = new ProjectEngine(root, {
       runner: options.runner,
       threads: options.threads,
+      ...(options.quotaLedgerPath === undefined ? {} : { quotaLedgerPath: options.quotaLedgerPath }),
     });
     engines.set(root, engine);
     // Attach once per root, here, so exactly one listener exists no matter how many tool
@@ -165,6 +175,7 @@ export function apply(ctx: HostContext, config: ProjectBetaConfig = {}): void {
       process.cwd(),
     runner: createCommandRunner(subprocess),
     threads,
+    ...(config.quotaLedgerPath === undefined ? {} : { quotaLedgerPath: config.quotaLedgerPath }),
   });
   ctx.effect(() => runtime.dispose);
 

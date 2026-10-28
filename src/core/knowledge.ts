@@ -1,38 +1,38 @@
 /**
- * Project knowledge: the local implementation of Projects' RAG mode.
+ * Project knowledge: an index threads read from, not content threads are handed.
  *
- * Anthropic's Projects behave in two ways depending on how much knowledge the project holds:
+ * This module used to implement the two-mode behaviour of claude.ai *chat* Projects — load
+ * the knowledge in full while it fits the window, switch to a retrieval tool past a
+ * threshold. That was the wrong product. Claude Code Projects has no such mechanism: its
+ * documentation never uses the words "knowledge", "retrieval" or "RAG", and what it gives a
+ * thread instead is
  *
- * - While the knowledge still fits in the model's context, it is loaded in full and every
- *   answer works from it directly.
- * - Once it approaches the limit, the product switches to a retrieval tool ("project
- *   knowledge search") that expands capacity by up to 10x, and switches back automatically if
- *   the knowledge shrinks again.
+ * - a readable mount (`the folders and files it can read under /mnt/project-files`), and
+ * - an index file read at startup, with bodies opened on demand: "Every cloud thread reads
+ *   the index file `MEMORY.md` when it starts and opens the other files when it needs them".
  *
- * The switch is therefore *derived* from the current size, never a mode flag a user or a
- * previous run can leave behind. That is the only way "automatically converts back" can be
- * true, and it is why {@link knowledgeMode} takes sizes rather than state.
+ * So the shape here is paths-first. The prompt carries an *index* — what documents exist and
+ * how big they are — and the thread reads the bodies off disk when it needs them. Three
+ * consequences, all of them subtractions:
  *
- * Everything here is pure: no filesystem, no clock beyond what the caller passes. Ranking is
- * BM25 over a tokeniser that treats Latin words and CJK characters alike, because a keyword
- * search that only understands whitespace-delimited words finds nothing in Chinese text.
+ * - No context budget. Nothing varies with the model's window because no document body sits
+ *   in the prefix. The one documented budget for standing prompt text is the 16,000
+ *   characters Projects allows for project instructions, and that is enforced where the
+ *   charter is assembled, not here.
+ * - No staleness. The thread reads the file, so it reads today's bytes. The *index* can lag,
+ *   but a lagging index only mis-ranks search hits; the citation it returns still points at
+ *   a file whose current contents the thread can read. {@link renderKnowledgeIndexSection}
+ *   therefore states when the index was built instead of pretending it is authoritative.
+ * - No mode flag, and no mode. There is nothing to switch, so there is nothing to leave
+ *   behind and nothing to oscillate at a boundary.
+ *
+ * BM25 search survives as a convenience — a second way in when a thread does not know which
+ * file to open — not as a mechanism. Everything here is pure: no filesystem, no clock beyond
+ * what the caller passes. Ranking treats Latin words and CJK characters alike, because a
+ * keyword search that only understands whitespace-delimited words finds nothing in Chinese.
  */
 
 import { fingerprint } from './util.js';
-
-/** Which way the project currently consumes its knowledge. */
-export type KnowledgeMode = 'context' | 'rag';
-
-/**
- * Characters of knowledge that still fit in a prompt prefix.
- *
- * 96k characters is roughly 24k tokens: large enough that most projects never leave context
- * mode, small enough that the prefix stays a fraction of a modern window.
- */
-export const DEFAULT_CONTEXT_BUDGET_CHARS = 96_000;
-
-/** Anthropic expands project capacity "by up to 10x" once RAG turns on. */
-export const RAG_CAPACITY_MULTIPLIER = 10;
 
 /** Largest chunk handed back by one search hit. */
 export const MAX_CHUNK_CHARS = 1_200;
@@ -50,19 +50,24 @@ export const DEFAULT_SEARCH_LIMIT = 5;
 export const MAX_SEARCH_LIMIT = 20;
 
 /**
- * Total capacity for a project: the in-context budget multiplied by the RAG expansion.
+ * Ceiling on indexed documents.
  *
- * Beyond this the collection stops and reports what it skipped. Silently dropping content
- * would make the index look complete while answers quietly miss files the user added.
+ * Mirrors the official collection limit, which counts entries rather than characters: a
+ * folder contributes "its first 100 files up to 200 MB, without any files over 30 MB". The
+ * index is a search aid, so a bound on how many documents it holds is the bound that matters;
+ * the old `budget x 10` figure was derived from a context budget that no longer exists.
  */
-export function knowledgeCapacity(budgetChars: number): number {
-  return Math.max(1, budgetChars) * RAG_CAPACITY_MULTIPLIER;
-}
+export const MAX_KNOWLEDGE_FILES = 100;
 
-/** Decide how the project should consume its knowledge right now. */
-export function knowledgeMode(totalChars: number, budgetChars: number): KnowledgeMode {
-  return totalChars <= Math.max(1, budgetChars) ? 'context' : 'rag';
-}
+/**
+ * Ceiling on indexed characters.
+ *
+ * Not a prompt budget — nothing here reaches the prompt. It bounds the on-disk index file,
+ * which holds every document chunked into JSON. 20M characters keeps that file in the tens
+ * of megabytes; past it, collection stops and says so, because an index that silently omits
+ * files makes search look exhaustive when it is not.
+ */
+export const MAX_KNOWLEDGE_INDEX_CHARS = 20_000_000;
 
 /** One addressable passage of a document. */
 export interface KnowledgeChunk {
@@ -97,12 +102,10 @@ export interface KnowledgeIndex {
 
 /** What the panel and the prompt need to describe the current knowledge state. */
 export interface KnowledgeState {
-  mode: KnowledgeMode;
   docs: number;
   chunks: number;
   totalChars: number;
-  budgetChars: number;
-  capacityChars: number;
+  /** When the index was built; the prompt states it so a thread knows the index can lag. */
   builtAt: number;
   sources: string[];
   warnings: string[];
@@ -242,17 +245,12 @@ export function parseIndex(text: string): KnowledgeIndex | undefined {
 /** Describe the current knowledge state for the panel and the prompt. */
 export function resolveKnowledgeState(
   index: KnowledgeIndex,
-  budgetChars: number,
   warnings: readonly string[] = [],
 ): KnowledgeState {
-  const budget = Math.max(1, Math.round(budgetChars));
   return {
-    mode: knowledgeMode(index.totalChars, budget),
     docs: index.docs.length,
     chunks: index.docs.reduce((sum, doc) => sum + doc.chunks.length, 0),
     totalChars: index.totalChars,
-    budgetChars: budget,
-    capacityChars: knowledgeCapacity(budget),
     builtAt: index.builtAt,
     sources: [...index.sources],
     warnings: [...warnings],
@@ -270,11 +268,7 @@ export function describeKnowledge(state: KnowledgeState): string {
   }
   const head =
     `${state.docs} document(s), ${state.chunks} chunk(s), ${state.totalChars} chars (~${approxTokens} tokens)`;
-  const mode =
-    state.mode === 'context'
-      ? `loaded in full into the prompt prefix (${state.totalChars}/${state.budgetChars} chars)`
-      : `retrieved on demand via project_knowledge_search (${state.totalChars}/${state.capacityChars} chars, ${RAG_CAPACITY_MULTIPLIER}x capacity)`;
-  return `${head}, ${mode}`;
+  return `${head}, listed in the charter and read from disk on demand; \`project_knowledge_search\` ranks passages`;
 }
 
 // ---------------------------------------------------------------------------
@@ -407,60 +401,54 @@ export function renderHits(hits: readonly KnowledgeHit[]): string {
 // ---------------------------------------------------------------------------
 
 /**
- * The in-context rendering: every document, in full.
+ * The knowledge index, as it appears in the charter.
  *
- * Sorted by path and stripped of timestamps so the prefix is byte-identical across sessions —
- * which is what keeps prompt caching working while the knowledge sits in the prefix.
- */
-export function renderKnowledgeInline(index: KnowledgeIndex): string {
-  const blocks: string[] = [];
-  const docs = [...index.docs].sort((a, b) => a.path.localeCompare(b.path));
-  for (const doc of docs) {
-    if (doc.chunks.length === 0) continue;
-    blocks.push(`### ${doc.path}`);
-    blocks.push('');
-    blocks.push(doc.chunks.map((chunk) => chunk.text).join('\n'));
-    blocks.push('');
-  }
-  return blocks.join('\n').trimEnd();
-}
-
-/**
- * The retrieval-mode notice.
+ * This is the whole of what knowledge contributes to the prompt: the catalogue, never the
+ * contents. It mirrors what a Projects thread gets — an index read at startup plus files it
+ * opens when it needs them — and it is why no document body and no context budget appear
+ * anywhere in prompt assembly.
  *
- * Deliberately short: in this mode the knowledge must NOT be in the prefix, which is the whole
- * reason the mode exists. The model is told the tool exists and what it covers, not the content.
+ * Every document is listed with its size, because the size is what lets a thread choose:
+ * "read the 2 KB decision record" and "read the 400 KB transcript" are different decisions
+ * and a bare path list cannot tell them apart.
+ *
+ * Sorted by path and free of timestamps, so the charter stays byte-identical between
+ * rebuilds. The index's age is stated in words rather than as a number: a thread cannot
+ * usefully compare an epoch to "now", and what it needs to know is only that the file on disk
+ * wins over the catalogue — which is exactly the failure mode this design removes.
  */
-export function renderKnowledgeRagNotice(state: KnowledgeState): string {
-  const lines: string[] = [];
-  lines.push('## Project knowledge (retrieval mode)');
-  lines.push('');
-  lines.push(
-    `This project holds ${state.docs} document(s) / ${state.totalChars} characters of knowledge, which exceeds the ${state.budgetChars}-character context budget, so it is not loaded into this prompt.`,
-  );
-  lines.push('');
-  lines.push(
-    'Call `project_knowledge_search` with what you need to find out before making design decisions. Search by meaning-bearing words from the question, not by file name alone. Do not claim the project has no documentation before searching.',
-  );
-  if (state.sources.length > 0) {
-    lines.push('');
-    lines.push('Indexed sources:');
-    for (const source of state.sources) lines.push(`- \`${source}\``);
-  }
-  return lines.join('\n');
-}
+export function renderKnowledgeIndexSection(
+  index: KnowledgeIndex,
+  state: KnowledgeState,
+  options: { boundPaths?: readonly string[] } = {},
+): string {
+  const bound = options.boundPaths ?? state.sources;
+  if (index.docs.length === 0 && bound.length === 0) return '';
 
-/** The context-mode heading that wraps {@link renderKnowledgeInline}. */
-export function renderKnowledgeContextSection(index: KnowledgeIndex, state: KnowledgeState): string {
-  const inline = renderKnowledgeInline(index);
-  if (inline.length === 0) return '';
   const lines: string[] = [];
   lines.push('## Project knowledge');
   lines.push('');
+
+  if (index.docs.length === 0) {
+    // Bound but never indexed. The paths alone are still worth stating: they are where the
+    // authoritative context lives, and a thread can read them without any index at all.
+    lines.push('These paths hold the authoritative context for this project. Read the ones your task touches before making design decisions:');
+    lines.push('');
+    for (const path of bound) lines.push(`- \`${path}\``);
+    return lines.join('\n');
+  }
+
   lines.push(
-    `The following ${state.docs} document(s) are the authoritative context for this project, loaded in full (${state.totalChars}/${state.budgetChars} characters). Read them before making design decisions.`,
+    `${state.docs} document(s) under ${bound.length} bound path(s) hold the authoritative context for this project. They are **not** reproduced here — read the ones your task touches, with your ordinary file tools, before making design decisions.`,
   );
   lines.push('');
-  lines.push(inline);
+  const docs = [...index.docs].sort((a, b) => a.path.localeCompare(b.path));
+  for (const doc of docs) {
+    lines.push(`- \`${doc.path}\` — ${doc.chars} chars`);
+  }
+  lines.push('');
+  lines.push(
+    'When you do not know which file answers your question, call `project_knowledge_search`: it ranks passages across all of them and cites `path:line`. Then open the file it points at. The file on disk is authoritative; the search index was built earlier and may lag it. Run `/project knowledge rebuild` after adding or removing files.',
+  );
   return lines.join('\n');
 }
