@@ -1,295 +1,269 @@
-# 请 Claude 复核：Projects 复刻的判断与疑问
+# 请 Claude 复核（第二轮）：Projects 复刻的边界、修正后的判断与剩余疑问
 
-这份文档是**给 Anthropic 的 Claude 复核用的**，不是给我们自己看的笔记。
+这份文档是**给 Anthropic 的 Claude 复核用的**，是我们的第二轮请求。
 
-目的：我们按公开文档复刻了 Claude Code Projects（Beta），但有几处判断是在文档没有明说的地方**自己推的**。这些推错方向的代价很高——会决定后面 4 批实现的形状。所以先把判断、理由和疑问摆出来，请复核者指出哪些推错了。
+## 0. 先澄清一件事：我们复刻的是什么
 
-复核者不需要读我们的代码。所有判断都写了文档依据或代码证据，可以独立核对。
+第一轮我们没把这一点写在显眼位置，导致复核者从「Claude Code 产品经理」的角度评判，而我们的目标是工程复刻。这次先说清楚。
 
-## 怎么用这份文档
-
-- **第 2 节**是我们已经做对的、不需要复核的部分（列出来只是让复核者知道基线在哪，不用花时间）。
-- **第 3 节**是**判断 + 理由**。理由比结论重要——结论可能碰巧对，理由错了会在下一个类似决策上再错一次。请重点看理由。
-- **第 4 节**是**我们无法从公开文档确定的疑问**，需要复核者给出方向。
-- **第 5 节**是**我们自己知道可能错了**的几处，已标出怀疑的强度。
-
-判断的置信度用三种标记：
-
-| 标记 | 含义 |
+| | 内容 |
 | --- | --- |
-| ✅ 有据 | 公开文档原文支持，可逐字核对 |
-| ⚠️ 推断 | 文档没明说，我们根据文档其他部分或 DSH 平台约束推断 |
-| ❓ 存疑 | 我们没有把握，明确请复核者裁定 |
+| **复刻对象** | **Claude Code 新版 Projects (Beta) 这个功能本身** —— 它的概念、行为、状态语义、交互契约。 |
+| **交付形态** | **DeepSeek Harness (DSH) 的本地插件**。跑在用户真机、真仓库，构建在 DSH 宿主的 `subagents` / `worktrees` / `tools` / `commands` / `sessionProjections` 之上。 |
+| **规格来源** | 只有 `code.claude.com/docs/en/claude-projects` 一份。 |
+| **不是** | 不是重建 Anthropic 的云产品。不做云端沙箱、GitHub App、账号 connectors、cloud environment、跨设备续跑。 |
+| **载体替换** | 云端 sandbox → 本地 git worktree；云端持久化会话 → DSH 子会话 + 事件溯源 Session Log；GitHub App → `gh` CLI。 |
 
-## 1. 背景：我们做了什么
+**因此请以这样的标准评判**：看**功能语义有没有**（用户能不能做到这件事、状态语义对不对、交互契约完不完整），而不是**云端的实现载体有没有**。凡是「官方用 A 载体实现 X，我们用 B 载体实现了 X」的，不算差距。
 
-宿主是 **DeepSeek Harness (DSH)**，一个基于 Cordis 插件体系的编码 agent 宿主。我们做的是一个 DSH 插件，按 Claude Code Projects 的公开文档复刻其能力。
+一个具体例子：官方 Library 必须**拷贝**线程产出的文件（云端沙箱会消失，"uncommitted changes can be lost"），我们在本地**不需要拷贝** —— 文件就在盘上，Library 只需一份清单 + 按需读取。这不是我们偷工，是载体优势。
 
-已经能工作的部分（261 项测试，实机验证过工具注册）：
+## 1. 第一轮已采纳的结论（不需要再复核）
 
-- 目标拆解 → 每个任务一个后台子会话 + 独立 git worktree + 独立分支
-- 项目级共享记忆，写进 system prompt 的固定槽位（利用 provider 端 prefix cache）
-- 线程自己 commit / push / 开 PR
-- CI 失败与 PR review comment 自动唤醒线程修复，最多 3 轮
-- 项目知识库：小项目全文放进 prompt，超预算自动切 BM25 检索
-- 6 个模型工具 + `/project` 命令族
+第一轮回执非常有价值，以下几条我们**已经照改**，列出来界定本轮讨论范围。
 
-**关键平台差异**：官方线程跑在**云端 sandbox**，我们跑在**用户本地的 git worktree**。宿主进程不在就不推进。这个差异影响了下面好几个判断。
-
-## 2. 无需复核的基线（✅ 有据）
-
-这些都直接对上了官方文档，列出来只为界定讨论范围：
-
-| 我们实现的行为 | 官方原文 |
+| 回执的指正 | 我们的修正 |
 | --- | --- |
-| 线程自己 commit、push、开 PR | "**Branch**: works on a new branch… **Pull request**: opens one when you ask, and can open one on its own for a bug fix" |
-| 开 PR 后自动盯 CI 与 review，CI 失败就推修复 | "**After it opens**: watches the pull request with auto-fix turned on… It pushes fixes when CI fails, addresses review comments" |
-| 知识库按体积在「全文」与「检索」之间切换，不存 flag | "RAG automatically activates when your project approaches or exceeds the context window limits… If your project knowledge later drops below the context window threshold, Claude can automatically convert back"（support.claude.com RAG 专文；**但阈值口径我们实现错了，见 Q3**） |
-| 记忆放在 system prompt 固定槽位以命中缓存 | "**Set context once**: every new thread starts with the project's instructions, so a rule you state once… reaches all of them" |
-| 遇阻才标记需要人，不猜结论 | "**Waiting on you**: Threads that need your reply or approval, or that failed"（失败也归入「等你」） |
+| **知识层抄错了产品**。`RAG` 专文讲的是 claude.ai chat 的旧版 Projects（无 threads、无 coordinator），`OFFICIAL` 全文 `RAG`／`retrieval`／`project knowledge` **各出现 0 次**，知识是挂载在 `/mnt/project-files` 的文件夹 | 知识层改为 **paths-first（挂载式）**，撤销 in-context/RAG 二分、阈值常量、陈旧检测。见 `GAP-22` |
+| **判断 A 的轴是过度解读**。`Idle` 的官方定义是 "finished and **aren't waiting on anything**"，在二元 `ai\|human` 里没有合法取值 | 轴改为**工作在生命周期里的位置**，`Waiting on you` 不是二分轴的一侧。见下方判断 G |
+| **「`failed` 归入 `Waiting on you` 说明底层是两层模型」这个理由错了**。官方原句是「groups threads by **state**」，分组是 state 的投影 | 承认理由错。但**结论（用户只看一处）保留**，`failed` 仍应并入「等你」 |
+| **改状态模型的代价估高了一个数量级**。`bucketOf()` 已是现成的 `state → bucket` 派生层 | 确认是功能增加、不是重构。`ThreadStatus` 不动、`stateVersion` 不升、数据不迁移。见 `GAP-04` |
+| **「投影必须晚于状态模型」这个约束不成立**（投影暴露的是桶不是枚举） | 两批合并。见 `GAP-03` |
+| **「项目需要绑定一段长期会话」框架错了**。官方协调者「works from recent messages, recent threads, and project memory **rather than its full history**」，还有 `Restart Claude` 可重启会话 | 改为「**协调状态三件套**」持久化：线程摘要 ✅ / 记忆 ✅ / **近期消息 ❌**。见 `GAP-29` |
+| **`MAX_HEAL_ATTEMPTS` 的轴选错了**（状态机用生命周期累计，续聊语境需连续失败计数） | 改为连续失败计数，有进展即清零。见 `GAP-23` |
+| **记忆广播是超额实现，删不是补** | 确认不删，并在文档里标为「比官方多」，不再当缺口。见 `BOUND-2` |
+| **拆解不调模型是技术债**，且它被排序规则过滤掉了 | 提到第二批，且与 `Suggested threads` 同批。见 `GAP-26` |
+| **最高危的「未接审批」不在六批计划里** | 提前到第四批。见 `GAP-18` |
 
-## 3. 我们的判断与理由（请重点看理由）
+## 2. 本轮的核心判断（请重点看理由）
 
-### 判断 A：状态模型应该按「轮到谁」分层，而不是按「AI 在干什么」
+理由比结论重要 —— 结论可能碰巧对，理由错了会在下一个类似决策上再错一次。
 
-**我们的做法**：把线程状态从现在的 7 个（`queued` / `running` / `ci_fixing` / `awaiting_review` / `needs_feedback` / `completed` / `failed`）重构成两层：
+### 判断 G（修正自判断 A）：状态是「工作生命周期里的位置」，`Waiting on you` 是注意力收口
 
-- 第一层是**球在谁手上**：`ai`（AI 的回合）或 `human`（人的回合）
-- 第二层是**原因**：`等审 PR` / `等你回答` / `要处理失败`
+**我们的做法**：`ThreadStatus` 保持一维，桶（分组）是它的投影。六个桶与官方一一对应：
+
+| 官方分组 | 官方定义 | 我方状态 |
+| --- | --- | --- |
+| Ready for review | "pull request is open and awaiting review" | `awaiting_review` |
+| Waiting on you | "need your reply or approval, **or that failed**" | `needs_feedback` + `failed` |
+| Working | "still running" | `queued` / `running` / `ci_fixing` |
+| Landing | "approved or **queued to merge**" | 新增 `landing` |
+| Idle | "finished and **aren't waiting on anything**" | 新增（与 `completed` 同义） |
+| Resolved | "marked done… or **automatically after a week with no activity**" | 新增 `resolved` |
 
 **理由**：
 
-1. 官方 Overview 的六个分组里，**`Ready for review`、`Waiting on you`、`Landing`、`Idle`、`Resolved` 全部是「球在谁手上」的表述**，只有 `Working` 是 AI 视角。六个里五个，这不像巧合。
-2. 官方把 **`failed` 放进 `Waiting on you`**（"Threads that need your reply or approval, or that failed"）。如果状态是按「AI 在干什么」组织的，失败应该跟「AI 跑完了」放在一起；它跟「等你」放一起，说明分组轴是「谁该动」。
-3. 我们现在的模型把 `failed` 单独成桶，导致前端要显示「有 3 个失败」和「有 2 个等你」两处，用户得在两个地方都看一眼才知道有没有自己的事。按「轮到谁」组织，用户只看一处。
+1. 官方明写「groups threads by **state**」—— state 一维，分组是投影。把它读成两层模型是我方上一轮的错（已承认）。
+2. 轴不是「轮到谁」，因为 `Idle` 在二元轴里无处安放。但轴也不是纯粹的生命周期 —— `Waiting on you` 明显是**注意力**维度（"need your reply"）。所以它其实是一个**混合轴**，主序是生命周期位置，`Waiting on you` 是把「需要你」的线程从各阶段收口到一个分组里。
+3. **我们保留的唯一结论**：`failed` 不该单独成桶。分开列会让用户在「有 3 个失败」和「有 2 个等你」两处找同一件事。
 
-**这个判断的代价**：改状态枚举是破坏性改动，要同时改投影的 `stateSchema`、`stateVersion`、所有测试断言、以及已落盘的旧数据迁移。
+**❓ 请复核这一条**：如果六个分组是**互斥**的（每个线程恰好一个分组），那么一个「PR 开着、CI 全绿、等 reviewer 看」的线程，应该落在 `Ready for review`，**不该**同时出现在 `Waiting on you` —— 因为 `Waiting on you` 的定义是 "need your **reply or approval**"，而"等一个尚未发生的 review"不是线程在等你回复。**这个读法对吗？** 它决定了 `Ready for review` 与 `Waiting on you` 是不是真的两个不同的状态（而不是子类关系）。
 
-**请复核**：这个分层轴的推断对不对？还是说官方图省事把人相关的分组凑一堆，并没有底层的两层模型？
+### 判断 H：知识层采用 paths-first（挂载式），BM25 降级为便利工具
 
-### 判断 B：投影（UI 数据层）必须晚于状态模型
+**我们的做法**：
 
-**我们的做法**：先重构状态模型，再接入 `ctx.projection`。
+1. charter 只渲染知识文件/目录**清单**，不注入正文；线程用普通文件工具自己读；
+2. 补 `tree`（目录树）与 `read`（按路径读行段）两个动作 —— 这是挂载模型的核心，比语义检索更贴近官方；
+3. BM25 检索保留，但索引**在查询时按需重建**（比对绑定路径指纹），只读入口永不写盘；
+4. 全文注入作为**可选优化**保留（配置 `inlineKnowledgeMaxChars`，**默认 0 关闭**），目的是命中 prefix cache。它是优化，不是机制。
 
-**理由**：投影的 `stateSchema` 由状态枚举决定。如果先做投影再改枚举，要写两遍 `stateSchema`、做一次 `stateVersion` 迁移、并且前端要适配两个版本。
+**理由**：`OFFICIAL` 全文 `RAG`／`retrieval`／`project knowledge` 各 0 次，唯一相关的是 `OFFICIAL` 第 297 行「the folders and files it can read under `/mnt/project-files`」。而 `RAG` 那篇被 `OFFICIAL` 自己点明是**另一个产品**：「**Projects in claude.ai chat and Cowork**: the earlier Projects experience, which groups conversations and reference files **without threads or a coordinator**」。还有一条硬反证：`RAG` 称 RAG "available on paid plans: Pro, Max, Team, and Enterprise"，而 `OFFICIAL` 明写 "Projects aren't offered on **Team or Enterprise** plans yet" —— plan 矩阵对不上。
 
-**请复核**：这个顺序约束是不是真的存在？还是说投影层可以做薄一点（只投影原始 descriptor、分组留给前端），从而摆脱对状态枚举的依赖？
+**优势**：这个改动是**减法** —— 删掉阈值、模式判定、陈旧检测，净减代码。
 
-**如果是后者，我们的第 2、3 批可以合并**，能省一整批。
+**❓ 请复核**：官方是否有 prompt 层面的引导，告诉模型「先查一下项目文件再回答」？我们目前只给清单 + 工具说明，靠模型自主。文档里 "you'll see Claude using a project knowledge search tool **when it needs to**" 读起来是纯自主，但我们担心漏查。**如果官方有显式引导（例如 charter 里有一句"回答前先确认项目知识"），请给原文。**
 
-### 判断 C：只有「合进主分支」需要人批准，其余全自动
+### 判断 I：知识路径必须锚定项目根，不能是相对线程 cwd 的相对路径
 
-**我们的做法**：线程 push、开 PR、修 CI 全自动；只有 merge 需要人点。目前**完全没有**接入审批机制。
+**这一条是我们自己核出来的，回执没提，但它是本架构特有的陷阱。**
 
-**理由**：按可逆性划线。
+**理由**：线程的 cwd 是它自己的 worktree（`.dsh-project/worktrees/<threadId>`），而 **worktree 只含 baseCommit 里已提交的文件**。用户根检出里**未提交**的知识文件，在 worktree 里根本读不到。
 
-| 动作 | 可逆性 | 判断 |
-| --- | --- | --- |
-| 分支上 commit / push | 完全可逆，分支随时删 | 全自动 |
-| 开 PR | 可逆，关掉即可 | 全自动 |
-| 合进主分支 | 半不可逆，历史留痕、下游可能已拉 | **人点一下** |
-| 删 worktree / 归档项目 | 不可逆，未推送的提交会丢 | **先确认已推送** |
+所以 charter 里必须渲染能定位到项目根的形式：绝对路径，或「项目根 = `<绝对路径>`」+ 相对路径，并明确说明「知识是项目级的，读项目根，不是读你的 worktree」。
 
-**对应官方**："**Merge it**" 是线程卡片上一个需要人点的按钮，而 push 与开 PR 是自动的。
+**我们补验过**：知识路径本身是相对项目 root 解析的（`knowledgeSource.ts` 的 `resolve(options.rootDir, bound)`），根 `.gitignore` 也没有排除 `.dsh-project/` —— 所以知识库可以放在受版本控制的路径下，paths-first 不会因 gitignore 失效。
 
-**请复核**：这条线划得对吗？有没有我们没意识到的半不可逆动作被划进了自动那侧？
+**❓ 请复核**：官方的 `/mnt/project-files` 与线程自己的仓库 checkout 是**两套独立路径**（项目文件在挂载点，代码仓库单独 clone）。我们的做法是「让线程去读项目根的绝对路径」，这等价吗？还是应该把知识**复制/软链到每个 worktree** 里，让 `cat .dsh-project/knowledge/x.md` 这种相对读取也能工作？后者的代价是每线程一份副本（磁盘）与同步问题。
 
-**一处我们不确定的**：如果 CI 全绿、reviewer 全 approve、PR 无冲突，官方会让线程自己合并吗？文档只说 `Landing` 分组包含 "Threads whose pull request is approved or **queued to merge**"。「queued to merge」听起来像自动流程，但**谁触发那个队列**文档没说。❓
+### 判断 J：拆解应「模型优先 + 正则兜底」，且 `Suggested threads` 必须同批
 
-### 判断 D：DSH 上不需要「项目绑定一段长期会话」
+**我们的做法**：
 
-**这是本轮改动最大的一条判断**，先说清楚它推翻了什么。
+1. 协调者先用可用的委派模型产出计划，拿不到模型才用现有的确定性文本分析；
+2. **降级必须可见** —— 现在模型不可用时是静默降级的，改成在结果里明说「委派模型不可用，我按 bullet 切了 3 项，请确认」；
+3. `coordinate` 增加 `planOnly`，只产出 `Suggested threads` 列表供人确认，不直接拉起。
 
-**原来的判断**：官方是「一个项目 = 一段持续对话」，我们要照抄，就得让项目绑定一个协调会话。我当时把它列为「产品定位改动」，理由是「要回答『DSH 一个会话可能同时开多个工作区，项目绑定哪个会话』这个设计问题」。
+**理由**：
 
-**现在的判断**：**不需要绑定会话**。项目需要跨会话存活的其实只有四样：
+- 官方「Claude acts as coordinator. It takes what you send, **decides** what becomes a thread」；
+- 官方「Sometimes Claude **proposes** threads instead of starting them, in a **Suggested threads** list. Click the arrow on a suggestion to start that thread」—— 确定性文本分析不会 "propose"；
+- 官方路由规则一「**A quick question usually gets an answer in the conversation**」**要求**判断「这是问题还是活」，正则做不了；
+- 官方首批建议第 4 条：「Propose threads **and wait for my go-ahead** before starting them」。
+- **为什么两件一起做**：`Suggested threads` 是拆解质量的保险 —— 把「拆错」的代价从「开错 5 个 worktree + 5 个分支」降到「删掉列表里 3 行」。单独做模型拆解而不做提议，等于放大风险敞口。
+- 原设计的两条理由（「委派模型不可用时也能工作」「可单测」）都对，但它们要的是**有一个确定性 fallback**，不是「拿确定性分析当主路径」。
 
-| 需要跨会话存活的 | 我们的状态 |
-| --- | --- |
-| 1. 这个项目要干什么（goal） | ❌ 缺（只是 `coordinate` 的入参，不落盘） |
-| 2. 哪些线程在做什么 | ✅ 已有（`manifest.threads`） |
-| 3. **哪些事在等我决定** | ❌ 缺 —— 但这就是判断 A 那个「轮到人」的集合，重构状态模型后免费得到 |
-| 4. 已定的决策与理由 | ✅ 已有（共享记忆） |
+**❓ 请复核**：`planOnly` 应该**默认 `true`**（与官方新项目姿态一致）还是 **默认 `false`**（保持现有体感）？我们倾向默认提议，但这是行为破坏性变更，想听第二意见。
 
-**理由**：只有第 3 项是缺的，而它不需要一段持续对话来承载——新会话进来只要查「有哪些球在我手上」就够了，不需要读历史。所以 `GAP-07` 应该从「项目绑定会话」改成「**协调状态跨会话可恢复**」（记一个协调日志 + 那个「等你决定」清单）。
+### 判断 K：审批必须改译为「根会话问人、线程执行」
 
-**还推翻了另一个假设**：我原来认为「把后续消息路由到已有线程」需要一套路由算法。现在认为不需要——**默认开新线程，用户要转给已有线程就明说**。
+**这一条是 DSH 平台约束，不是设计选择。**
 
-支持这个的理由：官方专门有一节叫 *Threads guessed or stalled instead of asking*，讲的就是线程**猜错了**（"assumed something wrong"）怎么补救。Anthropic 自己也要为「模型猜」写排查指引，说明猜路由本质不可靠。与其让模型猜，不如让人说。
+**我们核对过的两个 Host 服务**：
 
-**请复核**（三个问题）：
+- `userQuestions.ask(req)` —— 文档原文：「**`DELEGATED_CALLER` when that live agent is owned by another agent**」。子线程是 owned agent，**没有人类应答者，问不了人**。
+- `approval.request(req)` —— 要求必填 `toolName`（它是给**单次工具调用**做门的），且「requires an **open turn**… an idle ask rejects」。
 
-1. ❓ 「不绑定会话、只维护『等你决定』清单」这个替代方案，会不会丢掉某些只有长期对话才有的价值？我们能想到的是「上下文累积」与「模型知道之前聊过什么」，但我们认为线程描述符 + 共享记忆 + 知识库已经覆盖了大半。
-2. ❓ 官方文档写 "Claude decides where each message you send in the conversation goes"，并给出三条路由规则（快问快答留在对话里 / 新工作开新线程或转给已在做这块的线程 / 一条消息里多个无关任务拆成多条）。这个路由**在我们「每次显式调用拆解工具」的模型里能做到几成**？如果不做自动路由，用户体感会差多少？
-3. ⚠️ 我们推断「云端线程能跨设备续，是因为有服务器持久化；DSH 本地 worktree 做不到，所以也不该假装做到」。这个推理对吗？
+**所以官方的「线程内阻塞等人」在 DSH 上无法照抄。改译为三步**：
 
-### 判断 E：并发数不设硬上限
+1. 线程需要放行时**结束本轮**，把「我要做 X，需要批准」写进结束消息（走现有 `needs_feedback` 通道 —— 这是 DSH 上唯一能挂起等人又不阻塞的做法）；
+2. 协调者（根会话，是**唯一的 live root**，有应答者）用 `userQuestions.ask` 问人；
+3. 拿到答案后 `sendMessage` 给线程继续。
 
-**我们的做法**：不实现并发上限，只在拆解时限制「这一批最多几个任务」（8 个）。
+**语义等价**（球在人手上、线程等着），**落点不同**（官方的「线程内阻塞」→ 我们的「线程结束 + 根会话代问」）。
 
-**理由**：官方原文明确说并发不是硬上限：
+**本地的额外优势**：官方云线程**不读** `.claude/settings.json` 的权限规则（`OFFICIAL` 第 357 行："Not applied"），只能靠 auto mode + 线程内逐次批准。我们**可以**接 DSH 自己的权限体系（`approval.setPolicy` / `tools.guard`）。
 
-> "There's no fixed number; Claude starts as many as the work calls for, and a limit you ask for is a **preference rather than a cap**. The enforced limit is 200 new threads per day across your projects."
+**❓ 请复核**：这个改译会不会丢掉官方设计里的某个关键性质？我们能看到的是「线程内提示能带上下文（文件、命令预览）」，而「结束本轮 + 根会话代问」会**丢失线程的现场**。官方是否因为这个原因才把 prompt 放在线程内？
 
-**请复核**：我们把「并发偏好」完全不实现（连偏好都不给），是否合理？还是应该给一个「软建议」让模型自己遵守？
+### 判断 L：自愈计数应统计「连续失败」，不是生命周期总数
 
-### 判断 F：失败的线程算「人的回合」，不算「AI 的失败」
+**理由**：一个 PR 开两周、被 review 四轮、每轮都带来合理的新意见 —— 第四轮撞上 `MAX_HEAL_ATTEMPTS = 3` 就会升 `needs_feedback`，但那四轮里没有一次是「修不好」，它们是四件不同的事。**把正常的评审节奏误判成失败。**
 
-含在判断 A 里，单独列出来是因为它有个后果：**`failed` 的线程不应该被永久留在失败桶里等人清理，而应该等人处理完后转 `Resolved`**。官方 "You can reopen one from the same menu" 支持「Resolved 是可逆的终态」这个读法。
+**做法**：有进展即清零。进展的判定用现成数据 —— 失败 check 集合变了（有 check 转 pass），或本轮处理的是**新来的** review comment。
 
-❓ 请复核：`Resolved` 是不是**唯一**的正常终态？`Idle` 会不会自动转 `Resolved`（官方说「一周无活动自动转」），还是需要人为动作？
+**❓ 请复核**：官方的「auto-fix turned on」有没有预算概念？如果没有，「连续失败 3 次」这个阈值是我们自己加的，是否应该完全去掉、改为「只在无法推进时才交给人」？
 
-## 4. 我们无法从文档确定的疑问
+### 判断 M：项目内不实现 Scheduled tasks
 
-按重要性排。每条都写了「为什么文档不够」。
+**理由**：官方 Overview 有第三个标签页 `Scheduled tasks`，但 DSH 已经有独立的 `automation_create` 定时任务能力（每次触发新开 Session、有完整权限边界与运行历史）。本项目内再实现一套会重复造轮子，且语义会冲突（同一个 cron 到底归插件管还是归宿主管）。
 
-### Q1 线程之间「互不污染」的边界到底在哪
+**❓ 请复核**：官方 Scheduled tasks 的语义是「定时唤醒项目的协调者」还是「定时开一个线程」？如果是前者，它其实与项目的协调状态强耦合，我们靠宿主的 automation 能等价替代吗？
 
-**为什么文档不够**：官方说云线程 "each clones its repositories into its own cloud sandbox"，物理隔离是显然的。我们跑本地 worktree，共享同一个 `.git` 目录。
+## 3. 仍然无法从文档确定的疑问
 
-**我们的做法**：每个线程一个 worktree（只建分支时，线程仍在父检出里跑，并发时会互相看见未提交改动——这是我们踩过的真实缺陷）。
+### Q1 Overview 六分组是互斥还是重叠
 
-**我们的疑问**：
+见判断 G。这个问题的答案决定了我们是否需要改成多维标签。我们目前假设**互斥**（每个线程恰好一个桶）。
 
-- ⚠️ worktree 共享 `.git` 会不会在某些操作上出问题（例如两个线程同时 `git gc`、或者同时改 `.git/config`）？
-- ⚠️ 我们的 `healSweep` 会在线程空闲时唤醒它修 CI。如果两个线程的 PR 都失败、同时被唤醒，它们的 worktree 是独立的，但都操作同一个远端仓库。这算不算官方意义上的「互不污染」？
+具体冲突点：一个「PR 开着、CI 绿、等 reviewer」的线程 —— 是 `Ready for review`，还是同时也算 `Waiting on you`？
 
-### Q2 「一个线程」的边界：一次 turn，还是一个任务的生命周期
+### Q2 `Resolved` 的「一周无活动」怎么定义
 
-**为什么文档不够**：官方说线程 "does one piece of work and reports back to the conversation when it finishes"，但**修 CI 的三轮算一个线程还是三个**？
+`OFFICIAL` 只写 "automatically after a week with no activity"。
 
-**我们的做法**：同一个线程会话，用 `resume` 续聊（不新建会话），状态在 `ci_fixing` 与 `awaiting_review` 之间切。
+- 「活动」是线程有 turn、用户点开了线程、PR 有更新、还是并集？
+- 我们担心：一个线程的 PR 还开着等 review，reviewer 三周后才来。按「无活动」归档，这个 PR 就没人管了。**归档是否应排除「还开着 PR」的线程？**
 
-**我们的疑问**：
+我们的倾向：**PR 事件也算活动**（CI 失败/新评论会唤醒线程起一个 turn），所以不必给「还开着 PR」加特例 —— 真正一周零活动的 PR 是谁都没碰过的。
 
-- ❓ 官方「最多修 3 轮」是我们自己加的护栏，官方文档没说上限。这个上限合理吗？还是会让某些本来就该多轮的修复被过早交给人？
-- ⚠️ 续聊会让线程的上下文越滚越大（每次修都带上全部历史）。官方文档提到 "A follow-up routed to a thread that has been idle longer than the cache lifetime… re-reads that thread's whole conversation before doing anything"，并建议 "For new work, asking Claude to start a fresh thread can use less than reviving a large old one"。**修 CI 属于「new work」还是「reviving」**？
+### Q3 `Merge it` 之后线程进入什么状态
 
-### Q3 知识的「全文模式」和「检索模式」的切换阈值怎么定
+`OFFICIAL` 说 `Resolved` 包含 "by Claude once you've taken the last step, such as merging its pull request"，但没说合并后线程还会不会做别的事。
 
-**为什么文档不够**：官方只说阈值是 "the context window limits"，没说这个窗口是**哪个模型**的、也没说知识占窗口多少比例。
+- 合并后立即 `Resolved`，还是先 `Idle` 一段时间？
+- **我们踩到的边界**：PR 合并后分支常被删，此时 `gh pr checks` 会报错。我们的 `healSweep` 原来把「PR 已合并所以分支没了」和「网络挂了」当成同一种错误。**官方怎么处理这个?** 我们已改成区分「终局错误」与「可重试错误」，并加显式退订（`GAP-24`）。
 
-**已能从文档确定的**（不再是疑问）：
+### Q4 worktree 共享 `.git` 的并发边界
 
-> "RAG automatically activates when your project approaches or exceeds the context window limits." / "RAG activation is handled automatically based on the size of your project knowledge. When possible, projects will use in-context processing for optimal performance."
+官方云线程 "each clones its repositories into its own cloud sandbox"，物理隔离显然。我们跑本地 worktree，**共享同一个 `.git` 目录**（object database、`packed-refs`、`config`、`worktrees/` 元数据）。
 
-→ 阈值是**上下文窗口本身**，不是某个固定字符数。所以我们的做法在**方向上错了**，见下。
+我们已知的风险与护栏：
 
-**我们的做法**：默认预算 `DEFAULT_CONTEXT_BUDGET_CHARS = 96_000` 字符（约 24k tokens），容量 = 预算 × 10。这是个**写死的常量**（`src/core/knowledge.ts:32`）。
+- `git gc` / `worktree prune` 并发会 prune 掉另一 worktree 刚写、尚未被 ref 指向的 object（**会真丢数据**）→ 只由宿主串行执行，且对共享仓库设 `gc.auto=0`；
+- 锁冲突（`cannot lock ref` / `index.lock`）→ 视为瞬时错误、退避重试（`GAP-27`）；
+- 线程永不写 `.git/config`（`user.email`、remote 等），需要时用 `git -c k=v` 单次传入。
 
-**我们的疑问**：
+**❓ 还有我们没意识到的共享状态问题吗？**
 
-- ❓ **这个常量应该怎么定？** 官方说是按上下文窗口算，但同一项目可以换模型（`Coordinator model` 与 `Thread model` 是两个独立设置），窗口从 200k 到 1M 都有。我们的推断：
+### Q5 修 CI 属于「新工作」还是「续聊」
 
-  - 如果按**协调者模型**的窗口算，那么换线程模型不影响知识模式——但线程读不到全文知识时行为会变。
-  - 如果按**各自线程模型**的窗口算，同一个项目在不同线程里知识模式不同，`prefixVersion` 会分叉，缓存命中率下降。
+`OFFICIAL` 提到 "A follow-up routed to a thread that has been idle longer than the cache lifetime… re-reads that thread's whole conversation before doing anything"，并建议 "For new work, asking Claude to **start a fresh thread** can use less than reviving a large old one"。
 
-  ⚠️ 我们倾向第一种（按协调者模型），但 24k tokens 只占 200k 窗口的 12%，明显过于保守。**这个值大概应该定在窗口的 50%~70%**：知识要跟对话、system prompt、工具结果抢同一个窗口，留 30%~50% 给它们。
+- 修 CI 会越滚越大（每次修都带上全部历史）。**它属于 new work 还是 reviving？**
+- 如果是 new work，我们是否应该在第三轮自愈时**开新线程**并只带必要的失败信息？
 
-- ⚠️ **检索工具是模型自己决定何时调用吗？** 文档说 "you'll see Claude using a project knowledge search tool **when it needs to** find relevant information"，看起来是模型自主决定。我们的实现是**提供一个可调用工具、不强制**，与这个读法一致；但我们的 system prompt 里没有告诉模型"检索模式下先查知识再回答"，可能漏查。❓ 官方是纯自主，还是有 prompt 层面的引导？
+### Q6 Team 协作：beta 之后要不要现在留接口
 
-- ⚠️ 我们的 `knowledgeCapacity = budget × 10` 对应 "expand capacity by up to 10x"。**如果预算本身随模型窗口变化，容量也跟着变**——官方是不是这个意思，还是 10x 是相对某个固定基线？
+`OFFICIAL` 说 "Projects aren't offered on Team or Enterprise plans **yet**" —— 有 `yet`。
 
-### Q4 「一周无活动自动归档」的「活动」怎么定义
+我们现在判定「持平，不做」。**如果 beta 结束后开放共享，现在的数据模型（manifest 是单机文件）会成为障碍吗？** 值得现在留一个 `owner` 字段吗？（我们的倾向：不留。为尚未发生的需求提前设计复杂架构，违反我们的实现原则。）
 
-**为什么文档不够**：官方原文只有 "automatically after a week with no activity"。
+## 4. 我们自己知道可能错了的地方
 
-**我们的疑问**：
-
-- ❓ 「活动」是指：线程有 turn、用户点开了线程、PR 有更新、还是这些的并集？
-- ⚠️ 我们担心的是：一个线程的 PR 还开着等 review，reviewer 三周后才来看。如果按「无活动」归档，这个 PR 就没人管了。**归档是否应该排除「还开着 PR」的线程？**
-
-### Q5 `Merge it` 之后线程应该怎样
-
-**为什么文档不够**：官方说 `Resolved` 包含 "by Claude once you've taken the last step, such as merging its pull request"，但没说合并后线程还会不会做别的事。
-
-**我们的疑问**：
-
-- ❓ 合并后是立即 `Resolved`，还是先 `Idle` 一段时间？
-- ⚠️ 我们的 `deliverThread` 会在合并后继续 `healSweep`（因为状态还是 `awaiting_review`）。如果 PR 已合并且分支已删，`gh pr checks` 会报错。**这个边界官方怎么处理？**
-
-### Q6 Overview 的六个分组是互斥的还是有重叠
-
-**为什么文档不够**：官方表格里 `Ready for review`（"pull request is open and awaiting review"）与 `Waiting on you`（"need your reply or approval"）看起来会重叠——一个 PR 开着等你 review，同时是「等你」也同时是「待审」。
-
-**我们的做法**：桶是互斥的（每个线程恰好一个桶）。
-
-**我们的疑问**：
-
-- ❓ 官方是让一个线程出现在多个分组里，还是 `Ready for review` 是 `Waiting on you` 下面的一个子类？
-- ⚠️ 如果是重叠的，我们的互斥模型就错了，得改成多维标签。
-
-## 5. 我们自己知道可能错了的地方
-
-比上面几条更没把握，单独列出来。
-
-| # | 我们的做法 | 怀疑的强度 | 怀疑的理由 |
+| # | 我们的做法 | 怀疑强度 | 理由 |
 | --- | --- | --- | --- |
-| 1 | 拆解目标**不调模型**，用确定性的文本分析（识别 bullet 列表） | **高** | 官方是 Claude 在做协调（"Claude acts as coordinator. It takes what you send, decides what becomes a thread"），显然是模型判断。我们用确定性分析是为了「委派模型不可用时也能工作」和「可单测」，但这可能牺牲了真正的拆解质量——用户给一段散文式的需求，bullet 分析什么都拆不出来。**这是最大的一个技术债，可能是根本性的。** |
-| 2 | 线程产出文件只记 `git diff --name-status`，不收集内容 | 中 | 官方 Library 是 "the files you added and the files threads produced"，听起来是**实际文件**（可以下载/预览）。我们只记清单。 |
-| 3 | 记忆广播只推给**正在跑**的线程 | 中 | 我们的理由是「给 idle 子会话发消息会新起一轮，会白烧 token」。但官方说 "every new thread starts with the project's instructions"——它没说运行中的线程怎么拿到更新。如果官方是「等线程下次开口时自然带上」，那我们的做法可能过度了。 |
-| 4 | 知识库用 BM25 + 中文重叠 bigram | 中 | 官方是向量检索还是关键词检索，文档没说。BM25 对小语料够用，但语义查询（"这份文档讲了什么关于认证的"）会漏。 |
-| 5 | `needs_feedback` 与 `failed` 是两个状态 | 低-中 | 官方把它们都放进 `Waiting on you`，可能根本不需要区分。但要区分的话，原因是「等你回答」vs「要你处理失败」，对用户是有用的。 |
-| 6 | **知识切换阈值写死 96,000 字符** | **高** | 官方口径是「按上下文窗口」算，我们写成了一个常量，与「换模型」这件事脱钩。见 Q3。 |
+| 1 | 判断 G 里「主序是生命周期，`Waiting on you` 是注意力收口」 | 中 | 这是我从「轴不是二元」推出来的新轴，可能又是一种过度解读。也许官方就是**六个并列的、各自有定义的状态**，没有更深的轴。 |
+| 2 | paths-first 只给清单不给正文 | 中 | 如果模型不会主动去读，这个设计就退化成「什么都没给」。这是判断 H 的最大风险，必须有显式引导兜底。 |
+| 3 | 审批改译为「线程结束 + 根会话代问」 | 中 | 会丢失线程现场的上下文（文件、命令预览）。官方把 prompt 放在线程内可能是故意的。 |
+| 4 | 知识路径锚定项目根（判断 I） | 低-中 | 官方是挂载点与 checkout 两套路径。我们让线程读项目根绝对路径，等价性没验证过。 |
+| 5 | BM25 + 中文重叠 bigram | 中 | 官方用的是语义检索还是关键词检索，文档没说。BM25 对「这份文档讲了什么关于认证的」这类语义查询会漏。挂载式下模型可以自己 grep，所以危害比 RAG 模式下小。 |
+| 6 | `planOnly` 默认值 | 低 | 行为破坏性变更，但方向明确（官方建议先提议）。 |
+| 7 | 不做 Scheduled tasks（判断 M） | 低 | 如果官方语义是「唤醒协调者」而非「开线程」，宿主的 automation 未必等价。 |
 
-## 6. 我们打算怎么改（请复核这个顺序）
+## 5. 分批计划（请复核顺序）
 
-按「会不会安静地出错」排，不按工作量排：
+排序原则：不只看「会不会安静地出错」，还要看**它是不是后续批次的输入**。上一轮把「错得不安静」的项（拆解、审批）过滤到了最后，实际是在给错的输入抛光。
 
 | 批次 | 内容 | 为什么排这里 |
 | --- | --- | --- |
-| **1 让输出可信** | 全局配额口径修正（官方说 200/天是 `across your projects`，我们现在是每项目独立计数）+ 知识陈旧检测（绑定的文件改了必须手动重建，否则**静默给旧答案**）+ 知识阈值改为由上下文窗口派生（Q3，现在是写死常量） | 不碰 UI 与状态模型，可独立上线。这三项是错得最贵的，且都在知识层/配额层的同几行上 |
-| **2 状态模型重构** | 7 状态 → 「轮到谁 + 原因」两层（判断 A） | 投影的 `stateSchema` 由它决定（判断 B）。**如果判断 B 不成立，本批可与第 3 批合并** |
-| **3 让报回可用** | 会话投影 + Library + PR 聚合 | 三者合起来 = 一眼看到所有球在哪 |
-| **4 让裁定可用** | Merge it / Resolve conflicts + Pause + 归档 | 人都看到球了，得能踢 |
-| **5 减少重复交代** | goal 持久化 + 读仓库里的 `CLAUDE.md` + 协调状态可恢复（判断 D） | 依赖 3/4 的可视性才有意义 |
-| **6 卫生** | worktree 回收 + `deinit --purge` + 线程超时 + Usage 统计 | 不出错，只占资源与观感 |
+| **1 让输出可信** | 全局配额口径（200/天是 `across your projects`，我们现在每项目独立计数）+ 知识改 paths-first | 不碰 UI 与状态模型，可独立上线；knowledge 是**减法** |
+| **2 让拆解可信** | 模型优先拆解 + `Suggested threads` | 它是后续所有批次的**输入**。拆解烂是用户一眼看得见的，所以上一轮被排序规则过滤掉了 |
+| **3 让报回可用** | 会话投影 + 六分组 + 线程终态 + Library + PR 聚合 | **投影与状态可同批**（原判断 B 的串行约束不成立） |
+| **4 让裁定可用** | 卡片动作（Merge it / Resolve conflicts / Review PR）+ 审批 + Pause + PR 退订 + **worktree 回收** + 自愈禁令 | **不可逆动作（worktree 回收）与它的防护同批**，不推到最后；回收依赖 Library 先有清单 |
+| **5 减少重复交代** | goal 持久化 + 读仓库 `CLAUDE.md` + 协调状态三件套 | |
+| **6 卫生** | Usage + Archive + 线程超时 + `deinit --purge` + git 锁重试 | 不出错，只占资源与观感 |
 
-❓ **请复核这个顺序**。特别是：第 2 批（状态模型）压在第 3 批（投影）前面，代价是「用户要等两批才看到 UI 改善」。如果判断 B 不成立，这个代价就是白付的。
+**❓ 请复核**：批次 2 提前是这一轮的主要调整，是否正确？还有哪些「是后续批次输入」的项被我们漏掉了？
 
-## 7. 公开文档里我们读到了但没实现的（已确认）
+## 6. 已知未实现清单（不是漏做）
 
-列出来是为了让复核者知道哪些是**已知未做**而不是**漏做**：
+| 官方能力 | 我们 | 计划 |
+| --- | --- | --- |
+| 项目 goal（可持久、可后加） | ❌ 只是 `coordinate` 入参，不落盘 | 批次 5 |
+| 读仓库 `CLAUDE.md` / `.claude/CLAUDE.md` / `.claude/rules/` | ❌ 只读自己的 `PROJECT_INSTRUCTIONS.md` | 批次 5，**只读仓库根**（照抄官方的加载范围，不顺手读子目录） |
+| Suggested threads | ❌ 直接启动 | 批次 2 |
+| Library / Pull requests | ❌ 只有知识绑定路径 | 批次 3 |
+| Scheduled tasks | ❌ 不做 | 判断 M |
+| Pause / Archive | ❌ 只有 `deinit`，且只删 manifest | 批次 4 / 6 |
+| Usage（按线程、按模型看 token） | ❌ 完全没有 | 批次 6 |
+| 权限提示审批 | ❌ 完全不接 | 批次 4，按判断 K 改译 |
+| `Merge it` / `Resolve conflicts` / `Review PR` | ❌ 只有 `deliver`（≈Create PR）与 `heal`（≈Fix CI + Address comments） | 批次 4 |
+| 会话投影 | ❌ 一行未写 | 批次 3 |
+| 六分组 Overview | ❌ 只有五桶，且 `failed` 错列 | 批次 3 |
+| 线程终态与归档 | ❌ `manifest.threads` 只增不减 | 批次 3 |
+| Continue in project | ❌ 不做，收益不明 | — |
+| Team 协作 / 共享 | ✅ **持平** —— 官方 beta 期间同样不支持 | 见 Q6 |
+| GitHub App / connectors / cloud environment | ❌ 不做，走 `gh` CLI + DSH 自己的 MCP | 载体差异 |
 
-| 官方能力 | 我们 |
-| --- | --- |
-| 项目 goal（可持久、可后加） | ❌ 只是 `coordinate` 的入参，不落盘 |
-| 读仓库的 `CLAUDE.md` / `.claude/rules/` | ❌ 只读自己的 `PROJECT_INSTRUCTIONS.md` |
-| Suggested threads（先提议后启动） | ❌ 直接启动 |
-| Library / Pull requests / Scheduled tasks 三个标签页 | ❌ 只有知识库的绑定路径 |
-| Pause / Archive / Delete | ⚠️ 只有 `deinit`，且只删 manifest 不删 worktree |
-| Thread model / effort（可给线程钉模型） | ❌ 只能指定 provider 名 |
-| Usage（按线程、按模型看 token） | ❌ 完全没有 |
-| 权限提示审批 | ❌ 完全不接审批 |
-| `Merge it` / `Resolve conflicts` / `Review PR` 卡片动作 | ❌ 只有 `deliver`（≈Create PR）与 `heal`（≈Fix CI + Address comments） |
-| Continue in project（把已有会话带进项目） | ❌ 不做，判断为收益不明 |
-| Team 协作 / 共享 | ✅ 持平——官方 beta 期间也不支持（"A project belongs to one user"） |
-| GitHub App / connectors / cloud environment | ❌ 不做，走 `gh` CLI 已有鉴权 + DSH 自己的 MCP 配置 |
+## 7. 复核者可以怎么回答
 
-## 8. 复核者可以怎么回答
+不必逐条回。最有价值的四种回答：
 
-不必逐条回。最有价值的三种回答：
-
-1. **「第 3 节哪条判断的理由不成立」** —— 理由错了比结论错了更值得指出，因为会传染到下一个决策。
-2. **「第 4 节哪个疑问你们其实能从文档 X 推出来」** —— 有些我们以为文档没说，可能只是没读到。
-3. **「第 6 节的顺序里，哪一批做了以后会推翻前面某批」** —— 顺序错要返工，这是最贵的错。
+1. **「第 2 节哪条判断的理由不成立」** —— 理由错了比结论错了更值得指出，会传染到下一个决策（上一轮的三处指正都是理由层面）。
+2. **「第 3 节哪个疑问你们其实能从文档 X 推出来」** —— 有些我们以为文档没说，可能只是没读到。
+3. **「第 5 节的顺序里，哪一批做了以后会推翻前面某批」** —— 顺序错要返工，这是最贵的错。
+4. **「你对我们的复刻边界有误解」** —— 如果我们又把某个载体差异当成功能缺口（或反过来，把功能缺口当成载体差异），请指出。
 
 如果只能回答一个问题，请回答这个：
 
-> **判断 A（按「轮到谁」分层状态模型）这个轴，是对的，还是我们过度解读了六个分组？**
+> **六个分组是不是互斥的？一个「PR 开着、CI 绿、等 reviewer」的线程，落在 `Ready for review` 还是 `Waiting on you`？**
 
-因为它决定了第 2、3 批的形状，而这两批是接下来投入最大的部分。
+因为它决定了判断 G 的形状，而批次 3 的主要工作量在那里。
 
-如果还能回答第二个，请回答 Q3 里的这个：
+如果还能回答第二个：
 
-> **知识模式阈值应该按哪个模型的窗口算（协调者 / 线程 / 两者各自）？**「10 倍容量」是相对该窗口，还是相对某个固定基线？
+> **paths-first 下官方有没有 prompt 层面的引导？**（请给原文）如果只是纯自主，我们需要自己加一句，那就成了一个偏离。
 
-## 9. 附：本文档引用来源
+## 8. 引用来源
 
-| 代号 | 来源 | 覆盖范围 |
-| --- | --- | --- |
-| `OFFICIAL` | https://code.claude.com/docs/en/claude-projects | 线程模型、Overview 六分组、设置项、Pause/Archive/Delete、goal、仓库约定、路由、限制。**全文不含 RAG 字样** |
-| `RAG` | https://support.claude.com/en/articles/11473015-retrieval-augmented-generation-rag-for-projects | 知识模式触发条件、10 倍容量、检索工具、何时切回。**阈值口径只在这里** |
-| `SPEC` | 本项目内部 `PROJECT_BETA_SPEC.md` | 五模块定义（写给自己的规格，与官方有出入时以官方为准） |
+| 代号 | 来源 | 覆盖范围 | 本轮地位 |
+| --- | --- | --- | --- |
+| `OFFICIAL` | https://code.claude.com/docs/en/claude-projects | 线程模型、路由、Overview 六分组、卡片动作、设置项、Pause/Archive/Delete、goal、仓库约定、限制、云端环境 | **唯一规格来源** |
+| `RAG` | https://support.claude.com/…-rag-for-projects | 知识模式触发条件、10 倍容量、检索工具 | ❌ **已除名**，讲的是另一个产品，见判断 H |
+| `SPEC` | 本项目 `PROJECT_BETA_SPEC.md` | 五模块定义 | 内部文档，与 `OFFICIAL` 冲突时以 `OFFICIAL` 为准 |
 
-本文档中所有引号内的英文均为逐字引用，可用上表链接核对。若发现引文与原文不符，请指出——那说明我们的取证有误，应该先修取证再谈判断。
+本文档中所有引号内的英文均为逐字引用，可用上表链接核对。若发现引文与原文不符，请指出 —— 那说明我们的取证有误，应该先修取证再谈判断。
+
+我们的完整差距登记簿（24 条，含代码证据与验收标准）在 `docs/GAPS.md`。

@@ -4,6 +4,20 @@
 
 它不是愿望清单：每一条都带**代码证据（文件:行号）**、**依据来源**和**验收标准**。开工前先读条目，完工后按验收标准关闭，不要凭记忆改动。
 
+## 复刻的是什么，不是什么（评审前必读）
+
+这一节是 2026-10-28 第一轮外部复核后新增的。缺了它，评审会默认我们在重建云端产品，从而把载体差异当成功能缺陷。
+
+| | 内容 |
+| --- | --- |
+| **复刻对象** | **Code Projects 这个功能本身** —— 它的概念、行为、状态语义、交互契约。规格来源是 `OFFICIAL`（`code.claude.com`），不是云端实现细节。 |
+| **交付形态** | **DSH 本地插件**（`dsh-newprojects`）。跑在用户真机、真仓库、DSH 宿主的 `subagents` / `worktrees` / `tools` 之上。 |
+| **不是** | 不是重建 Anthropic 的云产品：不做云端沙箱、不做 GitHub App、不做账号 connectors、不做 cloud environment、不做跨设备续跑。 |
+| **载体替换规则** | 官方的**云端沙箱**我方替换为**本地 git worktree**；官方的**云端持久化会话**我方替换为**DSH 子会话 + 事件溯源 Session Log**；官方的**GitHub App** 我方替换为 **`gh` CLI**。这三处替换的差异一律记在 `## ARCH`，**不是缺陷、不排期**。 |
+| **评判标准** | 判断一项「缺不缺」，看的是**功能语义有没有**（用户能不能做到这件事），不是**云端的实现载体有没有**。凡是「官方用 A 载体实现 X，我们用 B 载体实现了 X」的，不算差距。 |
+
+同理，`support.claude.com` 的 RAG 专文描述的是**另一个产品**（见下节），不构成本项目的规格来源。
+
 ## 怎么用
 
 - **证据行号会漂移**。改动相关代码后，回来更新行号；行号失效时按符号名（函数/常量名）搜索，符号名是稳定的契约。
@@ -13,26 +27,45 @@
 
 ## 依据来源
 
-两个来源，冲突时以官方文档为准（本项目规格写于官方文档细化之前）。
-
 | 代号 | 来源 | 说明 |
 | --- | --- | --- |
-| `SPEC` | `PROJECT_BETA_SPEC.md` | 本项目内部规格，五模块定义 |
-| `OFFICIAL` | https://code.claude.com/docs/en/claude-projects | 官方 Claude Code Projects 文档（2026-10 拉取），比 `support.claude.com` 那篇「什么是项目」详细得多 |
-| `RAG` | https://support.claude.com/en/articles/11473015-retrieval-augmented-generation-rag-for-projects | 官方 RAG 专文。**知识模式阈值口径只在这里**（「approaches or exceeds the context window limits」），`code.claude.com` 全文不含 RAG 字样 |
+| `SPEC` | `PROJECT_BETA_SPEC.md` | 本项目内部规格，五模块定义。**功能语义以 `OFFICIAL` 为准**，本文件写于官方文档细化之前。 |
+| `OFFICIAL` | https://code.claude.com/docs/en/claude-projects | 官方 Code Projects 文档（2026-10 拉取）。**这是本项目的唯一功能规格来源。** |
+| `RAG` | https://support.claude.com/en/articles/11473015-…-rag-for-projects | ❌ **不是本项目的规格来源，见下。** 仅作历史记录保留。 |
 
-`support.claude.com` 那篇「什么是项目」只覆盖旧版项目知识库 + RAG，正文明确写着「本文的其余部分介绍项目的当前版本」，新版细节全部指向 `code.claude.com`。引用知识模式语义时用 `RAG`，引用线程/Overview 语义时用 `OFFICIAL`——两者不要混引。
+### `RAG` 那篇为什么被除名（2026-10-28 第一轮复核确认）
+
+对 `OFFICIAL` 全文做词频核对，结果：
+
+| 词 | 出现次数 |
+| --- | --- |
+| `RAG` | **0** |
+| `retrieval` | **0** |
+| `project knowledge` | **0** |
+| `/mnt/project-files` | 1 |
+
+`OFFICIAL` 里唯一相关的一句是把项目文件**挂载成文件夹**供线程用普通文件工具读取：
+
+> Repositories, files, and environment | … the folders and files it can read under `/mnt/project-files`
+
+而 `RAG` 那篇讲的是**另一个产品**，`OFFICIAL` 自己点明了这一层关系：
+
+> **Projects in claude.ai chat and Cowork**: the **earlier Projects experience**, which groups conversations and reference files **without threads or a coordinator**.
+
+它还有一条反证：`RAG` 称 RAG "available on paid plans: Pro, Max, Team, and Enterprise"，而 `OFFICIAL` 明写 "Projects aren't offered on Team or Enterprise plans yet" —— plan 矩阵对不上。
+
+**结论**：我们复刻的是**有 threads 和 coordinator** 的那个 Projects，但知识机制当初抄的是**没有 threads 和 coordinator** 的那个。所有基于 `RAG` 派生的条目（阈值、模式二分、陈旧检测）在 2026-10-28 撤销并由 `GAP-22` 取代。
 
 ## 优先级总览
 
 | 优先级 | 含义 | 条目 |
 | --- | --- | --- |
 | **P0** | 违背规格或官方原文 | `GAP-01` |
-| **P1** | 会静默产出错误结果 | `GAP-02` `GAP-21` |
+| **P1** | 会静默产出错误结果 | `GAP-22` `GAP-23` `GAP-24` |
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | `GAP-03` `GAP-04` `GAP-05` |
-| **P3** | 官方有、我们无，独立功能 | `GAP-06` ~ `GAP-13` |
-| **P4** | 项目管理类，缺了不能「管起来」 | `GAP-14` ~ `GAP-18` |
-| **P5** | 磁盘与性能，不出错 | `GAP-19` `GAP-20` |
+| **P3** | 官方有、我们无，独立功能 | `GAP-06` `GAP-09` ~ `GAP-13` `GAP-26` `GAP-29` |
+| **P4** | 项目管理类，缺了不能「管起来」 | `GAP-14` `GAP-15` `GAP-17` `GAP-18` `GAP-25` `GAP-28` |
+| **P5** | 磁盘、性能与健壮性，不出错 | `GAP-19` `GAP-20` `GAP-27` |
 | **ARCH** | 架构性差异，记录不排期 | `GAP-A1` ~ `GAP-A4` |
 | **BOUND** | 有意为之的边界，非缺陷 | `BOUND-1` ~ `BOUND-4` |
 
@@ -55,47 +88,73 @@
 
 ---
 
-## P1 — 会静默出错（2 项）
+## P1 — 会静默出错（3 项）
 
-### GAP-02 项目知识没有变更检测
+### GAP-22 知识层应改为 paths-first（撤销 in-context / RAG 二分）
 
-- **依据**：无明文要求，但这是**唯一会让系统安静给出过期答案**的缺陷。官方对知识库的承诺是「Claude 将使用这些内容来更好地理解上下文」，用陈旧内容回答等于违背承诺。
-- **现状**：`buildKnowledge`（`src/core/engine.ts:897`）只在三处被调用：`/project knowledge rebuild`（`src/host/commands.ts:94`）、`project_knowledge` 工具的 `rebuild` 动作（`src/host/tools.ts:410`）、以及 `setKnowledgePaths` 内部。绑定的文件改了，索引不知道，prompt 里仍是旧正文，**没有任何提示**。
-- **已有的基础**：`IndexedDocument.sha`（`src/core/knowledge.ts:83`）已经存了每份文档内容的指纹，`knowledgeSource.ts` 里已有 `stat` 调用（`:119`、`:181`）。做陈旧检测不需要新概念。
-- **做法（按成本从低到高，建议先做 A）**：
-  - **A. 惰性校验**：`knowledgeState()` 在有缓存时比对绑定路径的 `mtime`+`size` 摘要（目录则取其下所有已索引文件的摘要）。不一致就在返回的 `KnowledgeState.warnings` 里加一条 `knowledge changed on disk; run /project knowledge rebuild`，并在 `describeKnowledge` 与 overview 里显示。**不自动重建**——重建是写盘动作，不该发生在只读查询里。
-  - **B. 自动重建**：`coordinate` 启动前与 `healSweep` 每轮开头做一次 mtime 校验，变了就重建。成本是不能在只读路径里做，得接受一次额外 IO。
-  - **C. 文件监听**：`fs.watch`。不推荐 —— DSH 插件生命周期里难以保证句柄回收，且网络盘上不可靠。
-- **验收标准**：
-  1. 改一个已索引文件后，`overviewJson().knowledge.warnings` 出现陈旧提示；
-  2. 未改动时不出现提示（不产生假阳性 —— 每次查询都警告等于没有警告）；
-  3. 新增/删除文件同样能检出；
-  4. 单测覆盖「改了→警告」「没改→不警告」「rebuild 后警告消失」。
+> **本条取代 `GAP-21`（阈值写死）、`GAP-02`（陈旧检测）、`GAP-16`（自动重建时机）三条。** 它是一个减法项：做完之后那三个问题不再存在，而不是被修好。
 
----
-
-### GAP-21 知识模式阈值写死成常量，与「上下文窗口」脱钩
-
-- **依据**：`RAG` 专文原文两处 —— 「RAG automatically activates when your project **approaches or exceeds the context window limits**」/「RAG activation is handled automatically **based on the size of your project knowledge**」。阈值口径是**上下文窗口**，且「up to 10x」是相对该窗口。
-- **现状**：`DEFAULT_CONTEXT_BUDGET_CHARS = 96_000`（`src/core/knowledge.ts:32`）是**硬编码常量**，`engine.buildKnowledge` / `loadKnowledge` / `knowledgeState` 全部默认取它（`src/core/engine.ts:899`、`:924`、`:939`），没有读模型窗口的任何路径。`knowledgeCapacity = budget × 10`（`:58`）因此也钉在 96 万字符。
-- **后果（为什么算 P1 而不是「配置项缺失」）**：
-  1. **与换模型脱钩**。同一项目可以在 `Coordinator model` 与 `Thread model` 上是两个不同窗口的模型，但知识模式只有一个。用户把模型换成大窗口后，知识仍在 9.6 万字符处切到检索模式 —— **明明能全文装下却去检索，是质量损失且用户无从察觉**。
-  2. **换小了会超窗**。反向换到小窗口模型时，9.6 万字符的知识 + 对话 + 工具结果可能一起超过真实窗口，表现为上下文截断或报错，而系统仍认为自己在「context 模式」。
-  3. **24k tokens 本身偏保守**。9.6 万字符 ≈ 24k tokens，只占 200k 窗口的 12%，预留 88% 给其他内容是过度保守。
+- **依据**：`OFFICIAL` 全文 `RAG` / `retrieval` / `project knowledge` 各 **0 次**，知识是「挂在 `/mnt/project-files` 下的文件夹，线程用普通文件工具自己读」。详见 `## 依据来源`。
+- **现状**：
+  - `src/core/knowledge.ts:32` 的 `DEFAULT_CONTEXT_BUDGET_CHARS = 96_000` 与 `knowledgeMode(totalChars, budgetChars)`（`:63`）把知识分成 `context`（全文注入 charter）与 `rag`（只给检索工具）两种模式；
+  - 模式切换依赖一个与真实上下文窗口脱钩的硬编码常量；
+  - 模式只由 `buildKnowledge`（`src/core/engine.ts:897`）重建，绑定的文件改了系统不知道（原 `GAP-02`）；
+  - `src/core/knowledge.ts:1-19` 的模块注释把这两个模式当成官方行为**陈述**（实际来自 chat Projects），是下一个读代码的人会跟着再推一遍的错误来源。
+- **已经有正确的形状**：`renderProjectCharter` 里存在一条 fallback —— 无索引但有 `knowledgePaths` 时渲染 `## Bound project knowledge` + 路径清单 + "Read these before making design decisions"（`src/core/prompt.ts:83-89`）。**这条 fallback 才是 Code Projects 的形状**，只是现在被索引注入挤成了次要路径。
 - **做法**：
-  1. 预算改为**由窗口派生**：`budgetChars = windowTokens × CHARS_PER_TOKEN × ratio`，`ratio` 默认 0.5~0.7（知识要跟对话、system prompt、工具结果抢同一个窗口）。窗口来源按优先级：项目配置显式值 → 协调者模型的窗口（Host 有 `agentDefaultModel` / `subagentModelSelection` 可查）→ 兜底常量。
-  2. `DEFAULT_CONTEXT_BUDGET_CHARS` 保留为**兜底值**而非默认值，注释改清楚。
-  3. 预算变化必须推进 `prefixVersion` 并触发 charter 重渲染，否则 `context`/`rag` 切换后 prompt 前缀不更新。
-  4. **与 `GAP-04` 的耦合**：若同一项目里协调者与线程用不同窗口，需要决定「按谁的窗口算」。建议按**协调者**（它就是装配 charter 的那个），并在 charter 里注明知识模式，让线程知道自己拿到的是全文还是只有检索工具。
+  1. **主路径换成路径清单**：charter 只渲染知识文件/目录清单（含一句说明「用文件工具读」），不注入正文。阈值、模式、陈旧检测随之删除。
+  2. **清单里的路径必须锚定项目根目录，不能是相对线程 cwd 的相对路径。** 这是本架构特有的陷阱：线程的 cwd 是 `.dsh-project/worktrees/<threadId>`（`src/core/engine.ts:526`），而 worktree 只含 **baseCommit 里已提交的文件** —— 用户根检出里**未提交**的知识文件在 worktree 里读不到。解法：charter 里渲染能定位到项目根的形式（绝对路径，或「项目根 = <绝对路径>」+ 相对路径），并说明「知识是项目级的，读项目根，不是读你的 worktree」。
+  3. **补导航能力**（这是 `OFFICIAL` 挂载模型的核心，比语义检索重要）：`project_knowledge` 工具增加 `tree`（列目录树，受深度/条数上限）与 `read`（按路径读某文件的指定行段）两个动作，让模型在检索没命中时有第二条路。
+  4. **BM25 降级为便利工具，不再是「模式」**：`project_knowledge_search` 始终可用；索引在**查询时按需重建**（比对绑定路径指纹，变了就重建再检索）。工具调用本来就是写路径，允许写索引；只读入口（`knowledgeState` / `overview`）永不写盘 —— 原 `GAP-16` 的「什么时候允许自动重建」就此有答案。
+  5. **删除**：`DEFAULT_CONTEXT_BUDGET_CHARS`、`knowledgeMode`、`knowledgeCapacity`、`RAG_CAPACITY_MULTIPLIER`、`KnowledgeState.mode` 的 `'context' | 'rag'` 语义（改成 `'paths' | 'inline'` 或直接去掉 mode）。
+  6. **重写** `src/core/knowledge.ts:1-19` 的模块注释，明确写出：Code Projects 没有 RAG 概念，两模式来自 chat Projects，本实现采用挂载式。
+  7. **全文注入作为可选优化保留**：配置项 `inlineKnowledgeMaxChars`，**默认 0（关闭）**。开启后仅在总字符数低于该值时把正文注入 charter（目的是复用 provider 端 prefix cache）。名称必须叫「inline」而不是「context 模式」，且文档写明它只是优化、不是机制。
 - **要小心的**：
-  - 不要按线程模型各自算 —— 会让同一个项目的 `prefixVersion` 分叉，缓存命中率下降，且同一份知识在不同线程里一个是全文一个是检索，行为不可预期。
-  - 窗口数字如果拿不到（未知 provider/model），必须**回退而不是抛错**，否则换模型即崩。
+  - 路径清单必须**顺序稳定、无时间戳**，否则每次 charter 字节都变，prefix cache 全废；
+  - 目录展开要么在 charter 里只写目录名（让线程自己 `ls`），要么写完整清单但设上限；写一半又不说上限会让模型以为看全了；
+  - 别顺手把知识路径下的所有文件都纳入索引 —— 大仓库的 `node_modules` 类目录已有 `IGNORED_DIRECTORIES`（`src/core/knowledgeSource.ts`），但要确认它对新加的 `tree` 动作同样生效。
 - **验收标准**：
-  1. 换到一个窗口更大的模型后，同样的知识量从 `rag` 回到 `context`；
-  2. 换到小窗口模型时预算相应缩小，不会出现「自认为 context 但超窗」；
-  3. 拿不到窗口时回退常量且不抛错；
-  4. 预算变化引起 charter 变化（字节不同），预算不变时 charter 字节稳定；
-  5. 单测覆盖「窗口未知→回退」「窗口变化→模式切换」「预算不变→charter 稳定」。
+  1. 空知识项目：charter 里没有知识段，也没有空段落；
+  2. 绑定文件后：charter 出现路径清单，**不含文件正文**；二次渲染字节相同；
+  3. 线程能在 worktree 里读到**根检出已提交**的知识文件（用 charter 给出的定位形式）；
+  4. 改一个已绑定文件后，`project_knowledge_search` 返回新内容（按需重建生效），`knowledgeState` 不写盘；
+  5. `grep -rn "DEFAULT_CONTEXT_BUDGET_CHARS\|knowledgeMode\|RAG_CAPACITY" src/` 为空；
+  6. `tree` / `read` 两个动作有单测，含路径越界（`../`）拒绝。
+
+### GAP-23 自愈计数应统计「连续失败」而不是生命周期总数
+
+- **依据**：`OFFICIAL` 把「线程持续监视它的 PR」当成**预期成本**列出：「Threads watching a pull request: an idle thread wakes up and uses your plan again when CI fails or a review comment arrives on its pull request.」
+- **现状**：`MAX_HEAL_ATTEMPTS = 3`（`src/core/healing.ts:20`，注释写「Maximum automatic healing rounds before the thread escalates to the user」）是**线程生命周期内的累计次数**，每轮自愈 `+1`（`src/core/engine.ts:874`），只有用户手动 `retry` 才清零（`:730`）。
+- **为什么是 P1**：一个 PR 开两周、被 review 四轮、每轮都带来合理的新意见 —— 第四轮会撞上限升 `needs_feedback`，但那四轮里没有一次是「修不好」，它们是四件不同的事。**把正常的评审节奏误判成失败**，而且用户看到的提示是「修不好，需要你介入」。
+- **做法**：改成**连续失败计数**，有进展时清零。进展的判定用现成数据：
+  - 一轮之后失败的 check 集合变了（有 check 从 `fail` 转 `pass`，或失败集合不再相同）→ 清零；
+  - 本轮处理的是**新来的** review comment（`consumedCommentIds` 已有，`ProjectReviewSnapshot` 里存着）→ 清零；
+  - 同一组 check 连续 3 次 `fail` → 升级给人。
+- **要小心的**：
+  - 字段名要改（`healAttempts` → 建议 `consecutiveFails` + 保留一个只读的 `healRounds` 用于展示），否则老数据与老语义混在一起；
+  - 升级文案要说清是「同一组检查连续失败」，不是「修了三次」。
+- **验收标准**：
+  1. 失败集合变化后计数归零（单测）；
+  2. 新评论到达后计数归零（单测）；
+  3. 同一组失败连续 3 次 → `needs_feedback` 且文案含检查名；
+  4. 四轮不同意见的自愈不会撞上限。
+
+### GAP-24 `healSweep` 分不清「PR 已终局」与「GitHub 挂了」，且没有显式退订
+
+- **现状**：
+  - `healSweep` 的候选是 `branch !== undefined && status ∈ {awaiting_review, ci_fixing, running}`（`src/core/engine.ts:759`），**没有「已终局」的概念**；
+  - 每线程一轮 `gh` 调用，任何异常都进 `result.errors`（`:783-784`）并被 `describeError` 压成一行文本 —— **「PR 被合并后分支被删了」和「网络/认证挂了」走同一条路径**；
+  - 合并后之所以还能被扫到，是因为状态要等某次成功轮询才知道变 `merged`；而那次轮询本身往往先报错。
+- **依据**：`OFFICIAL`「an idle thread wakes up … when CI fails or a review comment arrives on **its** pull request」+ 官方的止损手段是显式退订：「**To stop that, ask in the thread for it to stop watching the pull request.**」
+- **做法**：
+  1. 把 `gh` 失败分成两类：**终局**（PR 不存在 / 分支不存在 / 无权访问该 ref —— 应转去查 PR 终态，大概率 `merged` → `resolved`）与**可重试**（网络、限流、认证过期）。终局不是 error，可重试才是。
+  2. 加**显式退订**：descriptor 增加 `unwatchAt?: number`（或 `watching: boolean`）。合并后、转 `resolved` 后、项目归档后自动退订；提供 `unwatch` 动作。`healSweep` 跳过已退订线程。
+  3. 现有的「状态不在候选集就不扫」是**隐式**退订，要保留但不能当唯一手段。
+- **验收标准**：
+  1. PR 合并 + 分支删除后，下一轮 sweep 不报 error，线程转终态；
+  2. 网络失败仍报 error 且不影响其他线程；
+  3. 退订后 sweep 不再访问该 PR（用 fake runner 断言零 `gh` 调用）；
+  4. 合并 → 退订的链路有集成测试。
 
 ---
 
@@ -103,13 +162,13 @@
 
 ### GAP-03 没有会话投影（sessionProjections）
 
-- **依据**：`SPEC` 模块 E「基于 DSH 的 `ctx.projection` 与 `/project` 命令平面」；`OFFICIAL` 的 **Overview** 面板与线程卡片都要求随会话实时更新。
-- **现状**：`sessionProjections.register` **一行都没写**（`grep -rn projection src/index.ts src/host/*.ts` 返回空）。目前只有 `project_overview` 工具（`src/host/tools.ts:276`）与 `/project` 命令（`src/host/commands.ts:169`）这两种**主动拉取**的表面。
-- **连带影响**：`GAP-04`、`GAP-05`、`GAP-11`、`GAP-12` 都需要它，所以它排在这一批的第一位。
-- **要修的文档**：`README.md:29` 现在写着「Host-only 会话投影保持面板随会话事件更新」，**这句是虚的**，随本项一起改或先改成事实陈述。
-- **做法**：`sessionProjections.register` 的 `ProjectionDefinition` 需要一个 `key`、`stateSchema`（Zod）、`init(header, inheritedEventCount)`、`apply(state, event)`、`stateVersion`。关键约束：
-  - `apply` 必须是**纯函数**（不得读文件、不得发命令），因为它对每个会话事件同步执行。所以投影里只能放「已算好的摘要」，不能在里面查 manifest。
-  - 线程状态变化的来源是 `agent` 层的 turn 结束与 `healSweep` 的写入，这些要主动 `append` 一个事件到会话，投影才能看见。**目前这些状态只写进 manifest 文件，没有写进会话事件流** —— 这是本项真正的工作量，不是写个 reducer 就完。
+- **依据**：`SPEC` 模块 E「基于 DSH 的 `ctx.projection` 与 `/project` 命令平面」；`OFFICIAL` 的 Overview 面板与线程卡片要求随会话实时更新。
+- **现状**：`sessionProjections.register` **一行都没写**（`grep -rn projection src/index.ts src/host/*.ts` 返回空）。目前只有 `project_overview` 工具与 `/project` 命令这两种**主动拉取**的表面。
+- **不再被 `GAP-04` 阻塞**（2026-10-28 修正）：原判断「投影的 `stateSchema` 由状态枚举决定，所以必须先定状态模型」**不成立**。`bucketOf`（`src/core/overview.ts:41`）已经是现成的 `state → bucket` 派生函数，投影暴露的是**桶**而不是枚举；后加 `landing`/`idle`/`resolved` 只改 `bucketOf` 的 case，`stateSchema` 不变。**因此 `GAP-03` 与 `GAP-04` 可以同批做，不必串行两批。**
+- **要修的文档**：`README.md` 曾写「Host-only 会话投影保持面板随会话事件更新」，**那句是虚的**，已在文档对齐时改成事实陈述。
+- **做法**：`ProjectionDefinition` 需要 `key` / `stateSchema`（Zod）/ `init(header, inheritedEventCount)` / `apply(state, event)` / `stateVersion`。关键约束：
+  - `apply` 必须是**纯函数**（不得读文件、不得发命令），它对每个会话事件同步执行。所以投影里只能放「已算好的摘要」，不能在里面查 manifest。
+  - 线程状态变化的来源是 `agent` 层 turn 结束与 `healSweep` 的写入，这些要主动 `append` 事件到会话，投影才能看见。**目前这些状态只写进 manifest 文件，没有写进会话事件流** —— 这是本项真正的工作量，不是写个 reducer 就完。
 - **验收标准**：
   1. 注册后 `/project init` + `coordinate` 能在会话快照里看到线程摘要，且不需要用户敲命令；
   2. 线程 turn 结束后快照里的状态随之改变；
@@ -118,210 +177,295 @@
 
 ### GAP-04 Overview 只有五桶，官方是六组
 
-- **依据**：`OFFICIAL` 的 Threads 标签页分组 —— **Ready for review / Waiting on you / Working / Landing / Idle / Resolved**；`SPEC` 模块 E 只列了四类（已完成 / 待审 PR / 等反馈 / 运行中+自愈中）。
-- **现状**：`OverviewBucket`（`src/types.ts:23`）是 `completed | awaiting_review | waiting_for_feedback | running | failed`，`bucketOf`（`src/core/overview.ts:41`）把 `queued|running|ci_fixing` 归 `running`、`completed` 归 `completed`、`failed` 归 `failed`。
-- **缺的三个语义**：
-  - **Landing**：PR 已批准（`reviewDecision === 'APPROVED'`）或已入队合并。数据其实已经读进来了（`ProjectReviewSnapshot` 有 `state`，`readReviewVerdicts` 在 `src/core/engine.ts:806` 已接入），只是没有对应状态。
-  - **Idle**：完成且不等待任何事。现在 `completed` 混着「已完成且有 PR」与「收尾没报 PR」两种情况。
-  - **Resolved**：人工或超时标记完成、**可重开**、**不再被唤醒**。现在没有任何状态表达「这个线程结束了，别再管它」，而 `healSweep` 的候选状态（`src/core/engine.ts:755` 附近的 `awaiting_review | ci_fixing | running`）恰恰依赖这个区分才能正确停止唤醒。
-- **做法顺序**：先扩 `ThreadStatus` 与 `OverviewBucket`（扩枚举是破坏性改动，要同时改 `bucketOf`、`renderOverviewMarkdown`、`describeThread`、所有测试断言），再补 Landing/Resolved 的判定来源。
+- **依据**：`OFFICIAL`「The pane's **Threads** tab **groups threads by state**」+ 六分组表：**Ready for review**（PR open awaiting review）/ **Waiting on you**（"need your reply or approval, **or that failed**"）/ **Working**（"still running"）/ **Landing**（"approved or **queued to merge**"）/ **Idle**（"finished and **aren't waiting on anything**"）/ **Resolved**（"marked done: by you, by Claude once you've taken the last step, or **automatically after a week with no activity**"，可 reopen）。
+- **现状**：`OverviewBucket`（`src/types.ts:23`）= `completed | awaiting_review | waiting_for_feedback | running | failed`（5 项）；`bucketOf`（`src/core/overview.ts:41`）把 `queued|running|ci_fixing` 归 `running`、`completed` 归 `completed`、`failed` 归 `failed`（单独一桶）。
+- **两个具体错误**：
+  1. **`failed` 单列一桶**是错的。官方把它放进 `Waiting on you`（"or that failed"），也就是**同一个桶**。现在「有 3 个失败」和「有 2 个等你」被拆成两处，正是原文档里那个「用户要看两个地方」抱怨的真实成因。
+  2. **`completed` 混了两种语义**：`Idle`（"finished and aren't waiting on anything"）与 `Resolved`（人已确认/PR 已合/一周无活动）。前者是**活的**状态，后者是**终态标记且可重开**。
+- **缺失三个语义**：`Landing`（数据已读进来但无状态表达）、`Idle`、`Resolved`。
+- **做法（这是加法，不是重构 —— 2026-10-28 修正原判断）**：
+  1. `ThreadStatus` 增加 `landing`；`completed` 拆成 `idle` + `resolved`（或保留 `completed` 作为 `idle` 的别名并新增 `resolved`，避免动落盘数据）；
+  2. `bucketOf` 改两处：`failed` 并入 `waiting_for_feedback`；新增 `landing` / `idle` / `resolved` 的 case；
+  3. `BUCKET_ORDER` / `BUCKET_LABELS` 各增两项、删 `failed` 一项；`totals.failed` 改成**按 status 数**而不是按桶数（桶里已经混了 `needs_feedback`）。
+  - 预期量：**二十行以内**。`stateVersion` 不需要升，落盘数据不需要迁移，测试只动数桶的那几条。
+- **要小心的**：`isActiveStatus`（`src/core/overview.ts`）当前是 `['queued','running','ci_fixing']`。`landing` 加进来后**不应**算作 active（球已经踢出去了），但**必须**仍在 `healSweep` 候选里以便发现合并完成。这两个判断现在写在不同地方，容易漏一个。
 - **验收标准**：
-  1. 六个分组与官方命名一一对应（中文文案自行决定，键名对应）；
-  2. `Resolved` 的线程不再进入 `healSweep` 候选，且可被重新打开；
-  3. 一周无活动自动转 `Resolved`（若实现 `GAP-05`）；
-  4. 旧的五项断言全部更新，不允许留着双重语义。
+  1. 六个分组与官方命名一一对应（键名对应，中文文案自行决定）；
+  2. `failed` 不再单独成桶，"or that failed" 的合并语义有测试断言；
+  3. `Resolved` 的线程不再进入 `healSweep` 候选，且可被重新打开；
+  4. 旧的五桶断言全部更新，不允许留双重语义。
 
-### GAP-05 没有归档与自动收尾
+### GAP-05 线程没有终态与归档
 
-- **依据**：`OFFICIAL`「Resolved: …or automatically after a week with no activity. You can reopen one from the same menu」。
-- **现状**：`manifest.threads` **只增不减**，`grep "delete draft.threads"` 返回空。线程描述符永远不会被清理或归档。
-- **后果**：跑满几百个线程后 `manifest.json` 变大、每次 `overview` 都要遍历全部线程、overview 里堆满早就没用的条目。
-- **做法**：不删数据（删除会让历史 PR 关联丢失），而是加 `archivedAt?: number` 字段，`overview` 默认只列未归档的，加一个 `/project threads --all` 开关。自动归档用 `updatedAt` 距今天数判断，阈值可配。
+- **依据**：`OFFICIAL`「**Resolved**: …marked done: by you from the thread's menu, by Claude once you've taken the last step, such as merging its pull request, or automatically after a week with no activity. **You can reopen one from the same menu**」。
+- **现状**：`manifest.threads` **只增不减**，`grep "delete draft.threads"` 返回空。没有任何状态表达「这个线程结束了，别再管它」，因此 `healSweep` 只能靠「状态不在候选集」隐式停止。
+- **三个入口要分清**（2026-10-28 明确）：
+  - 人工：用户从菜单标记（对应 `close` 动作）；
+  - 自动 1：合并后由协调者标记（`decideHealAction` 的 `prState === 'merged'` 分支已有，`src/core/healing.ts:153-154`）；
+  - 自动 2：**一周无活动**。这是**所有状态**的兜底，不是从 `Idle` 出发的转移。
+- **「无活动」的定义**：任何 turn 都算活动，**PR 事件也算**（CI 失败 / 新评论会唤醒线程起一个 turn）。所以不必给「PR 还开着等 review」加特例 —— 真正一周零活动的 PR 是谁都没碰过的 PR。
+- **做法**：
+  1. 复用 `GAP-04` 的 `resolved` 状态（**不要**新造 `archivedAt` 这一套平行概念，会和状态机打架）；
+  2. `updatedAt` 超阈值自动转 `resolved`，摘要写进 `note` 说明是自动的；
+  3. **自动转 `resolved` 不得停止 PR 监视的清理逻辑本身**，但要按 `GAP-24` 退订（不再唤醒）；若之后 PR 有新事件，允许 reopen；
+  4. `overview` 默认不列 `resolved`，加 `/project threads --all` 与 `/project reopen <id>`。
 - **验收标准**：
-  1. 超过阈值的线程自动获得 `archivedAt`；
-  2. 默认 overview 不显示已归档线程，但数据仍在 manifest 里；
-  3. 归档的线程不被 `healSweep` 唤醒；
-  4. 可手动取消归档（对应官方「reopen」）。
+  1. 超阈值的线程获得 `resolved` 且 `note` 说明原因；
+  2. 默认 overview 不显示已 resolved 线程，但数据仍在 manifest 里；
+  3. 已 resolved 的线程不被 `healSweep` 唤醒，可手动 reopen；
+  4. 三个入口都有测试。
 
 ---
 
-## P3 — 官方有、我们无（独立功能，8 项）
+## P3 — 官方有、我们无（独立功能）
 
 ### GAP-06 项目没有持久化的 goal
 
-- **依据**：`OFFICIAL`「**Goal** (optional): one line of what you're trying to get done… Without a goal, Claude works from the tasks you send, and you can add a goal later in **Project settings > General**」。
-- **现状**：`goal` 只是 `coordinate` 的入参字符串（`src/core/engine.ts:402`），**不落盘**。`grep -c goal src/types.ts` = **0**，`ProjectManifest` 里没有这个字段。
-- **后果**：新会话进来不知道这个项目要干什么，`charter` 里也没有目标，线程启动时缺少「我们在朝什么努力」。
-- **做法**：`ProjectManifest` 加 `goal?: string`；`init` 接受 goal；`charter` 渲染它；`/project goal <text>` 修改；`project_overview` 返回它。
+- **依据**：`OFFICIAL`「**Goal** (optional): one line of what you're trying to get done… Without a goal, Claude works from the tasks you send, and you can add a goal later in **Project settings > General**」，且「Claude in the conversation **works toward it**」。
+- **现状**：`goal` 只是 `coordinate` 的入参字符串（`src/core/engine.ts:402`），**不落盘**。`grep -c goal src/types.ts` = **0**。
+- **注意**：它不只是元数据，**参与协调决策** —— 装配 charter 时要有它，拆解时也要参考它。
+- **做法**：`ProjectManifest` 加 `goal?: string`；`init` 接受 goal；`charter` 渲染；`/project goal <text>` 修改；`project_overview` 返回。
 - **验收标准**：
   1. `init` 带 goal 后落盘、跨进程读回；
-  2. charter 文本包含 goal，且 goal 不变时 charter 字节不变（不能破坏 prefix cache）；
-  3. 无 goal 时 charter 不渲染空段落。
-
-### GAP-07 项目与协调会话之间没有绑定
-
-- **依据**：`OFFICIAL`「A project is one ongoing conversation where Claude coordinates a stream of related work for you.」
-- **现状**：模型在**任意会话**里调 `project_coordinate`；项目是「无状态工具集」，不是一个持续对话。
-- **后果**：无法「把 bug 报告随手丢进去」；后续消息没有「建新线程还是转给已有线程」的路由逻辑；用户每次都要重新交代背景。
-- **为什么排在 P3 而不是 P2**：它是**产品定位改动**，不是补齐功能。真要做，得先回答「一个 DSH 会话可能同时开多个工作区，项目绑定哪个会话」这个设计问题，而且要改 `project_coordinate` 的语义（从「一次性拆解」变成「消息路由」）。
-- **验收标准**（若做）：
-  1. 项目记录 `coordinatorSessionId`；
-  2. 同一会话的后续消息能路由到已有线程（按标题/目标匹配）或新建线程，且路由决策可见；
-  3. 换会话打开同一项目时有明确提示，不是静默失效。
-
-### GAP-08 没有 Suggested threads（先提议后启动）
-
-- **依据**：`OFFICIAL`「Sometimes Claude proposes threads instead of starting them, in a **Suggested threads** list. Click the arrow on a suggestion to start that thread. … a button under the list starts all of them.」
-- **现状**：`coordinate` 直接启动（`src/core/engine.ts:400`）。`CoordinateResult` 里有 `planned` 字段但只用于回显。
-- **做法**：`coordinate` 加 `planOnly: true` 选项，返回计划不启动；计划存进 manifest（带 `suggestedAt`）；新增 `project_thread_manage` 的 `start` 动作或 `/project threads start <id>`。
-- **验收标准**：
-  1. `planOnly` 时零线程启动、零配额消耗；
-  2. 建议可单独启动，也可一次全起；
-  3. 建议过期（例如超 24h）自动丢弃。
+  2. charter 含 goal，goal 不变时 charter 字节不变（不破坏 prefix cache）；
+  3. 无 goal 时不渲染空段落。
 
 ### GAP-09 不读仓库里的 CLAUDE.md / .claude/rules/
 
-- **依据**：`OFFICIAL`「`CLAUDE.md`, `.claude/CLAUDE.md`, and `.claude/rules/` at the repository root — Loaded from every repository when the thread starts」。
-- **现状**：charter 只读自己的 `.dsh-project/PROJECT_INSTRUCTIONS.md`（默认路径在 `src/core/engine.ts:218`，读取在 `:362`）。
-- **后果**：用户仓库里已有的 `AGENTS.md` / `CLAUDE.md` 约定不会传给线程 —— 这对一个跑在用户仓库里的插件来说是真实的落差。
-- **做法**：`renderProjectCharter` 的输入加一层「仓库约定」来源，按 `CLAUDE.md` → `.claude/CLAUDE.md` → `AGENTS.md` → `.claude/rules/*.md` 顺序收集（存在才读）。**必须保持前缀稳定**：内容按固定顺序拼接，不含时间戳。
-- **注意**：本仓库自己的 `AGENTS.md` 就会被读到 —— 这是正确行为，但要确认里面的「提交前先跑 verify」之类指令对线程也是合理的。
+- **依据**：`OFFICIAL`「`CLAUDE.md`, `.claude/CLAUDE.md`, and `.claude/rules/` at the **repository root** — Loaded from every repository when the thread starts」，且「Permission rules in `.claude/settings.json` | **Not applied**」。
+- **现状**：charter 只读自己的 `.dsh-project/PROJECT_INSTRUCTIONS.md`（路径在 `src/core/engine.ts:218`，读取在 `:362`）。
+- **边界必须照抄官方，否则会做多**：只读**仓库根**的这三个位置。**不读**子目录的 `CLAUDE.md`、**不读** path-specific rules、**不读** `.claude/settings.json` 的权限规则。我们在本地能读全盘，顺手把子目录也读了会让 charter 随检出内容膨胀，直接冲突 prefix cache 目标。
+- **做法**：`renderProjectCharter` 的输入加「仓库约定」来源，按 `CLAUDE.md` → `.claude/CLAUDE.md` → `.claude/rules/*.md` 顺序收集（存在才读）。**顺序固定、无时间戳**，保持前缀稳定。
 - **验收标准**：
-  1. 仓库有 `CLAUDE.md` 时 charter 包含它；
-  2. 多个来源按固定顺序合并，同内容多次渲染字节相同；
-  3. 文件不存在时静默跳过，不产生空段落也不报错。
+  1. 仓库根有 `CLAUDE.md` 时 charter 包含它；
+  2. 多来源按固定顺序合并，同内容多次渲染字节相同；
+  3. 文件不存在时静默跳过，不产生空段落；
+  4. **子目录的 `CLAUDE.md` 不被读取**（有测试断言）。
 
-### GAP-10 没有 Library（线程产出文件的收集）
+### GAP-10 没有 Library（线程产出文件）
 
-- **依据**：`OFFICIAL`「**Library**: the files and folders you added and the files threads produced」。
-- **现状**：只收集用户绑定为知识的路径（`knowledgePaths`）。**线程产出的文件完全不收集** —— 它们只留在 `.dsh-project/worktrees/<threadId>` 里，等 worktree 被回收（`GAP-19`）就一起没了。
-- **做法**：交付时（`deliverThread`，`src/core/engine.ts:1071`）记录 `git diff --name-status <base>..<branch>` 的文件清单进 descriptor；`project_overview` 汇总去重后返回。不需要复制文件。
+- **依据**：`OFFICIAL`「**Library**: the files **and folders** you added and the files threads produced」；非代码项目「threads deliver each write-up **as a file** on the project's Library tab」。
+- **现状**：只收集用户绑定的知识路径。**线程产出的文件完全不收集**，只留在 `.dsh-project/worktrees/<threadId>`，worktree 一回收就没了。
+- **关键认知（本轮修正，从「中」降为「小」）**：官方云端必须拷贝文件，因为沙箱会消失（「If the sandbox can't be resumed, the thread continues from a fresh clone, so uncommitted changes can be lost」）。**我们在本地没有这个约束 —— 文件就在盘上**。所以 Library = 一份清单 + 按需读取，**不是新的存储层**。
+- **做法**：`deliverThread`（`src/core/engine.ts:1071`）记录 `git diff --name-status <base>..<branch>` 的文件清单进 descriptor；`overviewJson()` 汇总去重后返回；读取时按 `worktreePath` + 路径直接读盘。清单是元数据，worktree 删除后仍在（配合 `GAP-19`）。
+- **要小心的**：只记 `name-status` 不够 —— 用户想知道「这个文件是什么」。`read` 动作要能按需读内容，且**文件已被删时如实报「已不可读」**，不要显示空内容。
 - **验收标准**：
-  1. `deliverThread` 后 descriptor 里有产出文件清单；
-  2. overview 的 `library` 字段汇总所有线程产出，去重；
-  3. worktree 删除后清单仍在（清单是元数据，不依赖 worktree 存活）。
+  1. `deliverThread` 后 descriptor 有产出清单（含变更类型 A/M/D）；
+  2. overview 汇总去重；
+  3. worktree 删除后清单仍在，读取时明确报不可读；
+  4. 非代码产出（文档类）同样进清单。
 
 ### GAP-11 没有 Pull requests 聚合视图
 
 - **依据**：`OFFICIAL`「**Pull requests**: shown once threads have opened any」。
-- **现状**：每线程一个 `prOrDeliverableRef` 字符串字段，没有聚合。
-- **做法**：`overviewJson()` 加 `pullRequests` 数组，从所有 descriptor 的 `review` 快照里提取；带 `state` / `checks` 摘要 / `url`。
-- **验收标准**：有 PR 的线程出现在聚合里，按状态分组；无 PR 时不返回该字段（不要返回空数组假装有）。
+- **现状**：每线程一个 `prOrDeliverableRef` 字符串，没有聚合。
+- **做法**：`overviewJson()` 加 `pullRequests`，从各 descriptor 的 `review` 快照提取；带 `state` / checks 摘要 / `url` / `threadId`。
+- **验收标准**：有 PR 的线程出现在聚合里并按状态分组；无 PR 时**不返回该字段**（不要返回空数组假装有）。
 
 ### GAP-12 线程卡片动作缺 Merge it / Resolve conflicts / Review PR
 
-- **依据**：`OFFICIAL` 线程卡片按钮 —— **Resolve conflicts**、**Fix CI**、**Address comments**、**Merge it**、**Review PR**、**Create PR**。
-- **现状对照**：`ThreadAction`（`src/core/engine.ts:125`）是 `inspect | steer | respond | interrupt | retry | close`；工具侧 enum（`src/host/tools.ts:233`）多了 `deliver | heal`。
-  - **Fix CI / Address comments** → 由 `heal` 覆盖（自动判定修哪一类）
-  - **Create PR** → 由 `deliver` 覆盖
-  - **Merge it** → **缺**。需要 `gh pr merge <n> --squash`（或按 `mergeable` / review 状态选策略），并处理「不可合并时报原因」。
-  - **Resolve conflicts** → **缺**。本质是「把目标分支合进线程分支 + 解冲突 + push」，可用现有 `resume` 实现，但需要一个新 prompt 模板（和 `buildHealPrompt` 并列，不能复用）。
-  - **Review PR** → **缺**。要求把 PR URL 传回会话让前端可点。投影做好（`GAP-03`）后这件事才有真正落点。
+- **依据**：`OFFICIAL` 卡片动作六个，且**执行者分两类**：
+  > **Resolve conflicts**, **Fix CI**, **Address comments**, and **Merge it** send that instruction to the thread **as a message from you**, so you can prompt the thread yourself instead of waiting for it to react to the pull request.
+  >
+  > **Create PR** … creates the pull request from that branch **directly rather than sending the thread an instruction** to open one.
+- **现状对照**：`ThreadAction`（`src/core/engine.ts:125`）= `inspect | steer | respond | interrupt | retry | close`；工具侧 enum（`src/host/tools.ts:233`）多 `deliver | heal`。
+  - `Fix CI` / `Address comments` → `heal` 覆盖（自动判定修哪类）；
+  - `Create PR` → `deliver` 覆盖（**恰好是唯一宿主直办的那个，方向对了**）；
+  - **`Merge it` → 缺**。⚠️ **必须发消息给线程，不要让宿主代跑 `gh pr merge`。** 理由不是形式，是责任链：线程才知道自己的 PR 现在什么状态、要不要先 rebase、合完要不要清理。照着 `deliver` 的样子写就会做错。
+  - **`Resolve conflicts` → 缺**。本质是「把目标分支合进线程分支 + 解冲突 + push」，用现有 `resume` 实现，但需要独立 prompt 模板（`buildHealPrompt` 不能复用 —— 它讲的是 CI 失败与评审意见）。
+  - **`Review PR` → 缺**。要求把 PR URL 传回会话让前端可点；投影（`GAP-03`）做好后才有真正落点。
 - **验收标准**：
-  1. `merge` 动作在 PR 可合并时成功并记 `completed`；不可合并时返回具体原因（不静默失败）；
-  2. `conflicts` 动作能唤醒线程并把冲突文件清单交给它；
-  3. 两者都有单测覆盖成功与失败路径。
+  1. `merge` 通过**发消息**给线程执行（断言 `threads.resumes` 收到消息、且宿主没有直接跑 `gh pr merge`）；
+  2. `conflicts` 唤醒线程并把冲突文件清单交给它；
+  3. `review` 返回可点击的 URL；
+  4. 三者都有成功与失败路径的单测。
 
 ### GAP-13 没有 Usage（token 用量）
 
 - **依据**：`OFFICIAL`「Open **Usage** in **Project settings** to see token use by thread and by model, and how much went to the project conversation.」
 - **现状**：完全没有。Host 有 `tokenMeter` 服务但未接入（`grep -rn tokenMeter src/` 返回空）。
-- **做法**：读 Host `tokenMeter` 按线程归集；`overviewJson()` 加 `usage` 字段。**注意**：如果 `tokenMeter` 只能给全局数字，就明确标注「本项目无法按线程拆分」，不要造一个假的分布。
-- **验收标准**：能看到按线程的用量；拿不到精确数据时如实显示「不可用」而不是显示 0。
+- **做法**：读 Host `tokenMeter` 按线程归集；`overviewJson()` 加 `usage`。**如果 `tokenMeter` 只能给全局数字，就明确标注「本项目无法按线程拆分」，不要造假的分布。**
+- **验收标准**：能看到按线程用量；拿不到精确数据时如实显示「不可用」而不是 0。
+
+### GAP-26 拆解应模型优先，并把「先提议后启动」与它一起做
+
+- **依据**：
+  - `OFFICIAL`「Claude acts as coordinator. It takes what you send, decides what becomes a thread」；
+  - 「Sometimes Claude **proposes** threads instead of starting them, in a **Suggested threads** list. Click the arrow on a suggestion to start that thread. … a button under the list starts all of them.」—— 确定性文本分析不会 "propose"；
+  - 路由规则一「**A quick question usually gets an answer in the conversation**」**要求**判断「这是问题还是活」，正则做不了；
+  - 官方首批建议第 4 条：「Propose threads **and wait for my go-ahead** before starting them, and drop those limits once a few threads come back the way you want」。
+- **现状**：`planTasks`（`src/core/planner.ts`）是**纯确定性文本分析**（bullet 识别 + 标题提取 + `scopeHintOf`），不调模型；`coordinate` 直接启动（`src/core/engine.ts:400`）。原设计的两条理由（「委派模型不可用时也能工作」「可单测」）都对，但它们要的是**有一个确定性 fallback**，而不是「拿确定性分析当主路径」。差别在哪个是主路径。
+- **为什么两件一起做**：`Suggested threads` 是拆解质量的**保险** —— 提议列表把「拆错」的代价从「开了 5 个错 worktree + 5 个分支」降到「用户删掉列表里 3 行」。单独做模型的拆解而不做提议，等于把风险敞口放大。
+- **做法**：
+  1. **模型优先，正则兜底**：`planner.ts` 现有整套保留，降级为 fallback。协调者先用可用的委派模型产出计划，拿不到模型时才用正则。
+  2. **fallback 必须可见**：现在模型不可用时是静默降级的。改成在结果里明说「委派模型不可用，我按 bullet 切了 3 项，请确认」。**静默降级的拆解与静默过期的知识是同一类错误**，而且这个更常见。
+  3. **`Suggested threads`**：`coordinate` 加 `planOnly: true`（默认改为 `true`？—— 倾向**默认提议**，与官方新项目姿态一致，但保留 `--start` 直接启动）。计划存进 manifest（带 `suggestedAt`），提供单独启动、全部启动、过期丢弃。
+- **要小心的**：默认值改动会改变现有 CLI/工具的体感。若沿用 `planOnly: false` 默认，则必须在文档里说明「与官方新项目姿态不同」，不要两边都含糊。
+- **验收标准**：
+  1. 有模型时由模型产出计划（可用 fake provider 测），无模型时降级且**结果里带降级说明**；
+  2. `planOnly` 时零线程启动、零配额消耗；
+  3. 建议可单独启动，也可一次全起；
+  4. 建议超 24h 自动丢弃；
+  5. 正则 fallback 的现有单测继续通过（测试资产不浪费）。
+
+### GAP-29 协调状态跨会话不可恢复（原「项目绑定会话」重定义）
+
+- **依据**：`OFFICIAL`「You don't manage context windows in a project. Threads compact automatically, and **the conversation works from recent messages, recent threads, and project memory rather than its full history**, so it keeps going for as long as the project runs.」还有 **`Restart Claude`**（"Restarts the project conversation"，且 "threads aren't affected"）—— 协调会话是**可重启、可丢的**。
+- **原判断的错误**：原 `GAP-07` 写「项目与协调会话之间没有绑定」，被理解成「需要让项目绑定一段长期会话」。**这是错的**：官方协调者自己就不靠完整历史，还提供重启按钮。真正缺的不是「绑定」，是**协调状态能跨会话恢复**。
+- **缺的是三件套**（不是两件套）：
+  | 项 | 现状 |
+  | --- | --- |
+  | 线程摘要 | ✅ 有（`manifest.threads`） |
+  | 共享记忆 | ✅ 有（`manifest.memories`） |
+  | **近期消息** | ❌ 没有 —— 协调者侧最近几轮说了什么，完全没存 |
+- **结论**：**不做会话绑定**，做「协调状态三件套」的持久化。项目仍然是一个无状态工具集 + 一份 manifest，任何会话进来都能从三件套里恢复出「现在有哪些活、在等谁、之前决定过什么」。
+- **做法**：manifest 加 `recentMessages: Array<{ at, role, text }>`（环形缓冲，容量可配，默认 ~20 条），由 `coordinate` / `memory` / `healSweep` 的写入路径追加；charter 的协调者视角渲染最近消息摘要（**注意：只给协调者，不进线程前缀**，否则线程前缀会随消息变化，prefix cache 全废）。
+- **验收标准**：
+  1. 换一个全新会话打开同一项目，能读到三件套；
+  2. 最近消息有容量上限，不会无限增长；
+  3. 线程的 charter 字节**不因**协调者消息变化而改变（有测试断言）。
 
 ---
 
-## P4 — 项目管理类（5 项）
+## P4 — 项目管理类
 
 ### GAP-14 没有 Pause
 
 - **依据**：`OFFICIAL`「**Pause**: stops everything at once. Every running thread and the conversation are interrupted, no new threads start, scheduled tasks don't run, and the project doesn't accept messages until you resume it.」
-- **现状**：无。只能逐个 `interrupt`。
-- **做法**：`ProjectManifest` 加 `pausedAt?: number`；`coordinate` / `healSweep` / `deliverThread` 开头检查并拒绝；`/project pause` 与 `/project resume`。
-- **验收标准**：暂停后 `coordinate` 与 `healSweep` 都不动作且给出明确原因；恢复后可继续；暂停状态跨进程持久。
+- **判断**：在本地平台上这就是「我要用这台机器干别的」的那个开关，**比归档常用得多**，应优先于 `GAP-15`。
+- **做法**：`ProjectManifest` 加 `pausedAt?: number`；`coordinate` / `healSweep` / `deliverThread` 开头检查并拒绝；`/project pause` 与 `/project resume`；暂停时 `interrupt` 所有活跃线程。
+- **验收标准**：暂停后 `coordinate` / `healSweep` 都不动作且给出明确原因；恢复后可继续；暂停状态跨进程持久。
 
 ### GAP-15 没有 Archive
 
 - **依据**：`OFFICIAL`「**Archive**: hides the project from the sidebar and archives its threads, which stops any thread that was running or watching a pull request.」
-- **现状**：无归档概念。（`GAP-05` 是**线程级**归档，本条是**项目级**，两者不同，不要合并实现。）
-- **做法**：`active: false` 或 `archivedAt`；归档时对所有活跃线程置停并清理 `live` 映射；`/project archive` 与 `/project unarchive`。
+- **现状**：无归档概念。**（`GAP-05` 是线程级终态，本条是项目级，两者不同，不要合并实现。）**
+- **做法**：`archivedAt` 字段；归档时中断活跃线程、退订所有 PR 监视、置停 watcher；`/project archive` 与 `/project unarchive`。
 - **验收标准**：归档后无任何后台动作（watcher 不再碰它）；取消归档后线程可继续。
-
-### GAP-16 知识索引的自动重建时机尚未决定
-
-- **现状**：`buildKnowledge` 只从两个显式入口进入 —— `/project knowledge rebuild`（`src/host/commands.ts:94`）与 `project_knowledge` 工具的 `rebuild` 动作（`src/host/tools.ts:410`）。
-- **本项要决的不是「能不能重建」，而是「什么时候允许自动重建」**。新增自动重建会把写盘动作引入原本只读的路径，所以位置有限制：
-  - ❌ 不能在 `knowledgeState()` / `overview()` 里做 —— 这两个是查询，副作用会让读者意外。
-  - ✅ 只能在 `coordinate()` 与 `healSweep()` 开头做 —— 这两个本来就是写路径。
-- **与 `GAP-02` 的关系**：`GAP-02` 的 A 方案（惰性校验 + 警告）落地后，用户至少能看到「知识已过期」。本条决定的是**要不要替用户自动修**。
-- **做完后**：把结论写回 `GAP-02` 的做法段，本条即可关闭。
 
 ### GAP-17 无线程运行时长上限
 
 - **现状**：卡死的线程会一直占 `running`，只能人工 `interrupt`。`grep -rn "maxDuration\|deadline" src/core/engine.ts` 返回空。
-- **做法**：descriptor 加 `deadlineAt`；`healSweep` 检查超时并 `interrupt` + 置 `needs_feedback`（不是 `failed` —— 超时是「没跑完」，不是「跑失败」）。
-- **验收标准**：超时线程被中断且状态可解释；不误杀长任务（阈值要可配，默认足够宽）。
+- **做法**：descriptor 加 `deadlineAt`；`healSweep` 检查超时并 `interrupt` + 置 `needs_feedback`（**不是 `failed`** —— 超时是「没跑完」，不是「跑失败」）。
+- **验收标准**：超时线程被中断且状态可解释；不误杀长任务（阈值可配，默认足够宽）。
 
-### GAP-18 未接入 approval 服务
+### GAP-18 未接入审批（需按 DSH 的授权模型改写）
 
-- **现状**：线程自己 push、自己开 PR，不请求审批（`grep "ctx.get('approval')"` 返回空）。
-- **判断**：在 `danger-full-access` 下这是**合理的设计选择**，但在受限环境里会成为阻碍。不是缺陷，是**缺一个开关**。
-- **做法**：加配置项 `requireApprovalFor: ('push'|'pr'|'merge')[]`，默认空数组（保持当前行为）。只有用户显式开启才走 `approval` 服务。
-- **验收标准**：默认行为不变；开启后 push 前出现审批请求；拒绝时状态可解释（不是卡在 running）。
+- **依据**：`OFFICIAL`「When a thread needs your approval, the prompt is **inside that thread** and the thread waits until you answer it **there**. Telling Claude in the project conversation to go ahead **doesn't reach it**.」+「Threads run in **auto mode**」+「Don't **merge**, **force-push**, or **change CI configuration** without asking me in the thread.」
+- **现状**：线程自己 push、自己开 PR，不请求审批（`grep -rn "approval" src/` 返回空）。
+- **⚠️ 关键约束：官方那种「在线程内阻塞等人」在 DSH 上做不到。** 已核实两个 Host 服务：
+  - `userQuestions.ask(req)` 在 `agent` 被别的 agent 拥有时直接抛 **`DELEGATED_CALLER`**，且要求是注册表里的**精确 live root**（否则 `CALLER_NOT_LIVE`）——**子线程没有人类应答者，问不了人**；
+  - `approval.request(req)` 要求 `toolName`（它是给**单次工具调用**做门的），且**必须有 open turn**，否则直接拒绝。
+- **所以必须改译为「根会话问人、线程执行」**：
+  1. 线程在需要放行时 **结束本轮**并把「我要做 X，需要批准」写进结束消息（走现有 `needs_feedback` 通道，这是 DSH 上唯一能挂起等人又不阻塞的做法）；
+  2. 协调者（根会话）用 `userQuestions.ask` 问人（它才是 live root，有应答者）；
+  3. 拿到答案后 `sendMessage` 给线程继续。
+  - 语义与官方等价（球在人手上、线程等着），**落点不同**（官方的「线程内阻塞」改为「线程结束 + 根会话代问」）。
+- **本地的额外优势，应当利用**：官方云线程**不读** `.claude/settings.json` 的权限规则（"Not applied"），只能靠 auto mode + 线程内逐次批准。我们在本地**可以**接 DSH 自己的权限体系（`approval.setPolicy` / `tools.guard`），这是相对官方的一个真实优势。
+- **做法**：配置项 `requireApprovalFor: ('push'|'pr'|'merge'|'force-push')[]`，**默认空数组**（保持当前行为）。非空时按上面三步走。
+- **验收标准**：
+  1. 默认行为不变（不引入审批往返）；
+  2. 开启后 push 前线程转 `needs_feedback`，协调者收到可答问题；
+  3. 拒绝时状态可解释（不是卡在 `running`）；
+  4. 不试图在子线程里调用 `userQuestions.ask`（有测试断言不会抛 `DELEGATED_CALLER`）。
+
+### GAP-25 heal prompt 没禁止 force-push 与改 CI 配置
+
+- **依据**：`OFFICIAL` 项目指令示范：「Don't merge, **force-push**, or **change CI configuration** without asking me in the thread.」——官方自己把「需要人点头」的动作列出来了。
+- **现状**：`buildHealPrompt`（`src/core/healing.ts:139-143`）的 5 步里只禁了弱化断言：第 2 步 "Do not weaken, skip, or delete the failing assertion to make it pass."。**没有**禁 `force-push`，也**没有**禁改 CI 配置文件。
+- **为什么危险**：一个自愈线程在修 CI 时**最省力的「修法」就是改 CI 本身**（放宽超时、加 `continue-on-error`、把失败的 test 从 workflow 里去掉）。这会让「CI 变绿」与「代码变对」脱钩，而这正是自愈器最该防的。
+- **做法**：`buildHealPrompt` 的第 2 步或新增一步加两条禁令：不得 `force-push`；不得修改 `.github/workflows/` 等 CI 配置来让检查通过。需要改 CI 时停下来问。
+- **顺带**：`deliverThread` 与将来的 `merge` 动作也应带上这两条（`force-push` 会重写别人可能已拉取的历史，不属于「分支上 push 完全可逆」那一类）。
+- **验收标准**：
+  1. heal prompt 文本含 force-push 与 CI 配置禁令（单测断言关键词）；
+  2. 交付 prompt 同样含；
+  3. 文档里写明「改 CI 必须问人」。
+
+### GAP-28 并发偏好无法表达
+
+- **依据**：`OFFICIAL`「There's no fixed number; Claude starts as many as the work calls for, and a limit you ask for is a **preference rather than a cap**.」+ 紧接着的「Claude **saves preferences like these to project memory** on its own and follows them in later cloud threads. … **Add one to project instructions when you want it worded exactly and applied to every thread from the start.**」
+- **现状**：没有任何表达并发偏好的地方。`MAX_PLANNED_TASKS = 8`（`src/core/planner.ts:18`）是**一次拆解最多几项**，不是并发 —— 连续两次 `coordinate` 就是 16 个线程在跑。
+- **判断**：**不加硬上限是对的**（有据）。但官方的「偏好」不是「什么都不做」，而是**持久化进记忆/指令，由模型遵守**。我们有记忆层、有 instructions 层，实现成本接近零。
+- **做法**：一条共享记忆键 `concurrency-preference`（或 manifest 字段 `maxConcurrentThreads?: number`），`coordinate` 时读它并在计划阶段告知模型/限制本次启动数；`/project concurrent <n>` 写入。**明确写进文档：这是偏好不是硬闸。**
+- **本地额外理由**：云端的并发成本是 token，我们的成本是 token + 磁盘 + 宿主进程 + 同一台机器的 CPU，所以更该有。官方首批建议也主张新项目从低并发开始。
+- **验收标准**：偏好可写、可读、跨进程持久；`coordinate` 遵守它并在结果里说明「按你的并发偏好只启动了 N 个」；不设时行为不变。
 
 ---
 
-## P5 — 磁盘与性能（2 项）
+## P5 — 磁盘、性能与健壮性
 
 ### GAP-19 worktree 永不回收
 
-- **现状**：`worktreeRoot` 是 `.dsh-project/worktrees`（`src/core/manifest.ts:47`），每个线程一个目录，**从不删除**（`grep "worktree remove\|prune" src/` 返回空，engine 里没有任何 `rm`）。
-- **后果**：跑 100 个线程 = 100 份完整 checkout。
-- **做法**：`deliverThread` 成功后（PR 已开、分支已推）删除 worktree（`git worktree remove --force` + 目录兜底），**保留分支**。删除前确认：分支已推送（否则未推送的提交会丢）。放在 `GAP-10` 之后做 —— 先有产出清单，再删目录，顺序不能反。
+- **现状**：`worktreeRoot` 是 `.dsh-project/worktrees`（`src/core/manifest.ts:47`），每线程一个目录，**从不删除**（`grep "worktree remove\|prune" src/` 返回空，engine 里没有任何 `rm`）。跑 100 个线程 = 100 份完整 checkout。
+- **做法**：`deliverThread` 成功后（PR 已开、分支已推）删除 worktree（`git worktree remove --force` + 目录兜底），**保留分支**。删除前必须确认分支已推送，否则未推送的提交会丢。
+- **顺序不能反**：先有产出清单（`GAP-10`），再删目录。否则删完就再也说不清「这个线程产出了什么」。
+- **排期上移**（2026-10-28 修正）：原排在最后一批。但**不可逆的动作不该最后做防护** —— 在它之前，每一次 `deinit` / 归档都在这个风险上。因此移到与 `Pause` / `Archive` 同批。
 - **验收标准**：
   1. 交付成功且已推送后 worktree 被删，分支与远端都在；
-  2. 未推送时不删（防止丢提交）；
-  3. 删除失败不阻塞交付（记 warning）。
+  2. 未推送时不删（防丢提交）；
+  3. 删除失败不阻塞交付（记 warning）；
+  4. 删除后 Library 清单仍可读（配合 `GAP-10`）。
 
 ### GAP-20 `deinit` 只删 manifest，其余全留磁盘
 
-- **现状**：`ManifestStore.destroy()`（`src/core/manifest.ts:192`）只做两次 `rm`：`manifest.json` 与 `.tmp`。`.dsh-project/` 目录、所有 worktree、`KNOWLEDGE_INDEX.json`、`SHARED_MEMORY.md` 全部留在磁盘上。它们都被 `.gitignore` 忽略，所以不脏仓库，但占空间且让「已 deinit」的项目残留。
-- **做法**：`destroy` 增加可选参数 `{ purge: boolean }`。默认 `false`（保守，不删用户可能想要的数据），`/project deinit --purge` 显式清理整个 `.dsh-project/`。**先确认 `.dsh-project` 下没有任何用户手写文件**（`PROJECT_INSTRUCTIONS.md` 是**用户写的**，不能默认删）。
+- **现状**：`ManifestStore.destroy()`（`src/core/manifest.ts:192`）只删 `manifest.json` 与 `.tmp`。`.dsh-project/` 目录、所有 worktree、`KNOWLEDGE_INDEX.json`、`SHARED_MEMORY.md` 全留在磁盘。
+- **做法**：`destroy` 增加可选 `{ purge: boolean }`，默认 `false`（保守）。`/project deinit --purge` 显式清理整个 `.dsh-project/`。**先确认 `.dsh-project` 下没有用户手写文件**（`PROJECT_INSTRUCTIONS.md` 是**用户写的**，不能默认删）。
 - **验收标准**：
   1. 默认 `deinit` 行为不变；
   2. `--purge` 删除 `.dsh-project/` 但保留仓库其他内容；
   3. `--purge` 时对 `PROJECT_INSTRUCTIONS.md` 给出明确警告或先备份。
 
+### GAP-27 git 锁冲突被当成失败
+
+- **依据**：无官方明文（云端每线程自己的 clone，不会有这个问题）。这是**本地架构特有**的问题：所有 worktree **共享同一个 `.git`**（object database、`packed-refs`、`.git/config`、`worktrees/` 元数据）。
+- **现状**：`CommandError` 会把 `cannot lock ref` / `index.lock` / `cannot lock ... File exists` 当作普通失败，进而让线程转 `failed` 或交付失败。
+- **为什么是 P5 而不是更高**：它不产生**错误答案**，产生的是**错误结论**（「这个线程失败了」），而失败是可见的、可 retry 的。但仍该修 —— 正常并发下不该有假失败。
+- **做法**：
+  1. `CommandError` 增加可重试判定：`cannot lock ref|index.lock|Unable to create '.*\.lock'|Lock file already exists` 视为**瞬时**，指数退避重试 2~3 次；
+  2. 重试耗尽仍失败才报错，且报错文案要说明是「仓库被另一个线程占用」而不是「你的代码有问题」。
+- **共享 `.git` 的其它护栏（一并记录，避免下轮重新分析）**：
+  - `git gc` / `worktree prune` **只由宿主串行执行**，且建议对共享仓库设 `gc.auto=0`（并发 gc 会 prune 掉另一个 worktree 刚写、尚未被 ref 指向的 object —— 这会真的丢数据）；
+  - **线程永不写 `.git/config`**（`user.email`、remote 等），需要时用 `git -c k=v` 单次传入；
+  - 凭证走每线程独立 env / `GIT_ASKPASS`，不落 config。
+- **验收标准**：
+  1. 模拟一次 `cannot lock ref` 后重试成功，线程不转 `failed`；
+  2. 连续失败仍如实报错，文案指出仓库占用；
+  3. 重试次数可配，不无限重试。
+
 ---
 
 ## ARCH — 架构性差异（记录，不排期）
 
-这些**不是缺陷**，是定位不同。只有明确要改变产品定位时才做；顺手实现会破坏现有取舍的完整性。
+这些**不是缺陷**，是载体不同（见 `## 复刻的是什么，不是什么`）。只有明确要改变产品定位时才做；顺手实现会破坏现有取舍的完整性。
 
 ### GAP-A1 云端 sandbox vs 本地 worktree
 
-- **官方**：每个云线程在自己的云端 sandbox 里 clone 仓库，关掉笔记本也继续跑，sandbox 在轮次之间暂停。
-- **我们**：本地 worktree，宿主进程在跑才能推进。
-- **换来的**：能用本地工具链、本地文件、本地网络环境、本地凭据。
-- **代价**：宿主不在就停。已在 `BOUND-1` 记录。
+- **官方**：每个云线程在自己的云端 sandbox 里 clone 仓库，关掉笔记本也继续跑，sandbox 在轮次之间暂停；resume 失败则从 fresh clone 继续，可能丢未提交改动。
+- **我们**：本地 worktree，宿主进程在跑才能推进；未提交改动一直在盘上，不会因 resume 失败丢失。
+- **官方对同一件事的背书**：官方**支持**线程跑在用户自己的电脑上（Remote Control），且 `claude remote-control --spawn worktree` 就是「每线程一个 worktree」的官方开关；官方的本地线程限制原文可直接抄作我们的 README 口径：
+  - "Runs only while that computer is awake with Remote Control turned on"
+  - "The thread **pauses** while that computer is asleep, and **stops** if the desktop app or `claude remote-control` quits"
+  - "Starts with the project's instructions, **but not with its memory files loaded**"
+- **换来的**：本地工具链、本地文件、本地网络、本地凭据、文件不会丢。
+- **代价**：宿主不在就停（`BOUND-1`），共享 `.git` 带来锁竞争（`GAP-27`）。**第三条尤其要记**：官方本地线程**不加载记忆文件**，我们是加载的（`src/core/prompt.ts:56`）—— 这不算错（本地读得到，官方是跨设备传输成本），但若有人拿官方行为提 bug，出处在这里。
 
 ### GAP-A2 没有 GitHub App / connectors / cloud environment
 
-- **官方**：需要装 Claude GitHub App；线程从账号 connectors 拿 MCP 工具；环境决定网络白名单、环境变量、网络密钥、setup 脚本。
-- **我们**：走 `gh` CLI 的已有鉴权，不装 App；MCP 用 DSH 自己的配置。
-- **换来的**：不需要装 App、不需要云端环境配置。
+- **官方**：装 Claude GitHub App；线程从账号 connectors 拿 MCP 工具；cloud environment 决定网络白名单、环境变量、网络密钥、setup 脚本。
+- **我们**：走 `gh` CLI 的已有鉴权，不装 App；MCP 用 DSH 自己的配置；环境就是用户机器。
+- **换来的**：零安装、零云端配置。
 - **代价**：没有 setup 脚本与网络密钥管理。若将来需要，应作为独立能力设计，不要塞进本项目。
 
 ### GAP-A3 没有 Team 协作
 
-- **官方**：beta 期间**同样不支持**共享（「A project belongs to one user. You can't share a project or its threads with another user」）。`support.claude.com` 那篇讲的 Team 共享是**旧版**项目。
+- **官方**：beta 期间**同样不支持**共享（「A project belongs to one user. You can't share a project or its threads with another user」）。`support.claude.com` 那篇的 Team 共享表属于**旧版**项目。
 - **结论**：**持平**，不是差距。不要因为看到旧文档里的共享权限表就去做。
 
 ### GAP-A4 没有 Continue in project
 
 - **官方**：从一个已有云会话「Continue in project」，把它的工作带进项目。
 - **我们**：无。
-- **判断**：DSH 里会话与工作区的概念已经足够松，做这个的收益不明。记录，不排期。
+- **判断**：DSH 里会话与工作区的关系已足够松，收益不明。记录，不排期。
 
 ---
 
@@ -333,17 +477,19 @@
 
 - `SubagentThreadRuntime.parents` 是**进程内存**（`src/host/subagents.ts`）。宿主重启后 `firstKnownParent`（`src/index.ts:299`）返回 `undefined`，watcher（`src/index.ts:265`，注册于 `:230`）跳过该引擎，无法唤醒任何线程。
 - **根因**：Host 按 **live sender** 授权唤醒（`subagents.sendMessage` 要有真实 `Agent`），凭空造一个 parent 会被拒。这不是我们的疏漏，是安全模型。
-- **缓解**：重启后用户主动敲 `/project heal`（命令行里有 `agent`，是可用的 parent）或直接 `thread <id> retry`。
+- **缓解**：重启后用户主动敲 `/project heal`（命令行里有 `agent`，是可用的 parent）或 `thread <id> retry`。
 - **要不要改**：不改，除非 Host 提供持久化的授权主体。
 
-### BOUND-2 线程描述符永不清理
+### BOUND-2 记忆广播给运行中线程（比官方多，非缺口）
 
-见 `GAP-05`（会做归档解决）。
+- 我们会给 `busy` 线程广播共享记忆；官方**不给运行中的线程任何更新**：「Changes to instructions, repositories, plugins, and environment in **Project settings** reach new threads, **not threads already running**」，且「Every cloud thread reads the index file `MEMORY.md` **when it starts**」。
+- **判断：这不是债，是超额实现。** 只推 `busy`、不推 `idle`（省 token）那个取舍是对的。
+- **若要动，方向是删**（去掉实时广播，省一条代码路径和一类竞态），**不是补**。不要把它当缺口排期。
 
 ### BOUND-3 `quotaWarning()` 是死代码
 
-- `src/index.ts` 的 `overview()` 内联写了 80% 判断，而这个导出的 `quotaWarning()` 无人调用（只有 `test/unit/quota.test.ts` 用到）。
-- **判断**：`GAP-01` 重写配额时会一并处理 —— 要么让 overview 改用它，要么删掉。**不要**为了「消除未使用导出」而单独改，会与配额改造冲突。
+- `src/index.ts` 的 `overview()` 内联写了 80% 判断，而导出的 `quotaWarning()` 无人调用（只有单测用到）。
+- **判断**：`GAP-01` 重写配额时一并处理 —— 要么让 overview 改用它，要么删掉。**不要**为了「消除未使用导出」单独改，会与配额改造冲突。
 
 ### BOUND-4 单进程内一个 root 恰好一个 turn-end 订阅
 
@@ -351,17 +497,40 @@
 
 ---
 
+## 编号变更记录
+
+条目编号一旦撤销就**不再复用**，避免旧讨论里的编号指向别的东西。搜索某个编号找不到定义时，查这张表。
+
+| 编号 | 状态 | 去向 |
+| --- | --- | --- |
+| `GAP-02` | **撤销** | 知识陈旧检测。paths-first 下知识由模型按需读盘，没有「陈旧」概念。并入 `GAP-22` |
+| `GAP-07` | **撤销** | 「项目与协调会话绑定」。框架错了，改为「协调状态跨会话可恢复」= `GAP-29` |
+| `GAP-08` | **从未启用** | 上一轮编号跳号，无对应条目 |
+| `GAP-16` | **撤销** | 「知识自动重建的时机」。并入 `GAP-22` 第 4 条（查询时按需重建） |
+| `GAP-21` | **撤销** | 知识阈值写死。阈值本身随模式二分一起消失。并入 `GAP-22` |
+
+**新增编号**（本轮加入）：`GAP-22` ~ `GAP-29`。
+
 ## 已修正的错误判断
 
-记录曾经判断错、后来纠正的结论，避免下一轮重复踩。
+记录曾经判断错、后来纠正的结论，避免下一轮重复踩。**理由错了比结论错了更值得记 —— 它会传染到下一个决策。**
 
 | 时间 | 曾经的判断 | 实际 | 出处 |
 | --- | --- | --- | --- |
-| 2026-10 | 「缺并发度控制」列为规格缺口 | **判断错误**。`OFFICIAL` 原文：「There's no fixed number; Claude starts as many as the work calls for, and a limit you ask for is a **preference rather than a cap**. The enforced limit is 200 new threads per day across your projects.」并发数**本来就不是硬上限**。真正的偏离在配额口径（→ `GAP-01`）。 | 讨论 m01720 前后 |
-| 2026-10 | 「review verdicts 没接入」 | **判断错误**，已接入。`readReviewVerdicts`（`src/core/engine.ts:806`）把 `CHANGES_REQUESTED` 的 review 正文转成 `review-<id>` 的待消费评论参与自愈。 | 代码核对 |
-| 2026-10 | README 称「Host-only 会话投影保持面板随会话事件更新」 | **文档虚述**，投影未实现。修 `GAP-03` 时一并改。 | `README.md:29` |
-| 2026-10 | 「项目知识 RAG 未实现」 | 后来已补齐（`src/core/knowledge.ts` + `knowledgeSource.ts`，261 项测试）。**不是缺口**，此条仅作历史记录。 | commit `71cac2e` |
-| 2026-10 | 知识模式按体积切换「已对上官方，无需复核」 | **只对了一半**。切换这个**行为**对上了 `RAG` 专文，但**阈值口径错了**：官方说「context window limits」，我们写死 96,000 字符常量。已据此新增 `GAP-21`。 | 复核取证 m01844 |
+| 2026-10 | 「缺并发度控制」列为规格缺口 | **判断错误**。官方明写「a limit you ask for is a preference rather than a cap」。真正的缺口是**偏好无处表达**（→ `GAP-28`）。 | 讨论 m01720 前后 |
+| 2026-10 | 「review verdicts 没接入」 | **判断错误**，已接入（`readReviewVerdicts`，`src/core/engine.ts:806`）。 | 代码核对 |
+| 2026-10 | README 称「Host-only 会话投影保持面板随会话更新」 | **文档虚述**，投影未实现。已改为事实陈述。 | `README.md` |
+| 2026-10 | 「项目知识 RAG 未实现」 | 已补齐（`knowledge.ts` + `knowledgeSource.ts`）。**但补错了产品**，见下条。 | commit `71cac2e` |
+| 2026-10-28 | 「知识模式按体积切换已对上官方」 | **前提错了**。`RAG` 那篇讲的是 chat Projects；`OFFICIAL` 全文 `RAG`/`retrieval`/`project knowledge` 各 0 次。整套二分、阈值、陈旧检测**全部撤销**，改为 paths-first（→ `GAP-22`）。 | 第一轮复核 §0 |
+| 2026-10-28 | 「状态轴是『轮到谁』，六分组有五个是人视角」 | **过度解读一半**。`Idle` 的官方定义是 "finished and **aren't waiting on anything**"，在二元 `ai\|human` 里没有合法取值。真正的轴是**工作在生命周期里的位置**，`Waiting on you` 只是其中一个分组被挑出来做「需要你」的收口。**结论（用户只看一处）仍对。** | 第一轮复核 §0 ① |
+| 2026-10-28 | 「`failed` 被归入 `Waiting on you` 说明底层是两层模型」 | **理由错**。官方原句是「The pane's Threads tab **groups threads by state**」—— 分组是 state 的**投影**，state 是一维的。把它当两层模型的证据，下一次看到任何界面聚合都会再推一次同样结论。 | 第一轮复核 §0 ② |
+| 2026-10-28 | 「改状态枚举是破坏性改动，要改投影 schema、升 `stateVersion`、迁移落盘数据」 | **代价估高一个数量级**。`bucketOf`（`src/core/overview.ts:41`）已是现成的 `state → bucket` 派生层，`BUCKET_ORDER` 只有 5 项。实际改动二十行以内，`ThreadStatus` 不动、`stateVersion` 不升、数据不迁移（→ `GAP-04`）。 | 第一轮复核 §0 ③ |
+| 2026-10-28 | 「投影必须晚于状态模型（`stateSchema` 由枚举决定）」 | **约束不成立**。投影暴露的是**桶**不是枚举；后加三个状态只改 `bucketOf` 的 case。批次 2/3 可以合并（→ `GAP-03`）。 | 第一轮复核 §1 B |
+| 2026-10-28 | 「项目需要『绑定一段长期会话』」 | **框架错了**。官方协调者自己「works from recent messages, recent threads, and project memory **rather than its full history**」，还有 `Restart Claude` 可重启会话。真正缺的是**协调状态三件套**（线程摘要 ✅ / 记忆 ✅ / **近期消息 ❌**）（→ `GAP-29`）。 | 第一轮复核 §1 D |
+| 2026-10-28 | 「`MAX_HEAL_ATTEMPTS = 3` 是合理的护栏」 | **轴选错了**。它是生命周期累计，会误伤正常的多轮评审（四轮不同意见的第四轮被当成「修不好」）。应改为**连续失败**计数（→ `GAP-23`）。 | 第一轮复核 §2 Q2 |
+| 2026-10-28 | 「记忆广播给运行中线程是过度实现，可能要删」 | **反问句的答案是：不删**。官方只影响新线程，我们做得比官方多；只推 `busy` 的取舍正确（→ `BOUND-2`）。 | 第一轮复核 §3 §5.3 |
+| 2026-10-28 | 「拆解不调模型是可以接受的取舍」 | **是技术债，且它不在原六批计划里**。排序规则（「会不会安静地出错」）把它过滤掉了，因为拆解烂是**用户一眼看得见**的。但拆解质量是所有后续批次的**输入**（→ `GAP-26`）。 | 第一轮复核 §4 |
+| 2026-10-28 | 「审批要挂在线程上、阻塞线程」 | **在 DSH 上做不到**。`userQuestions.ask` 对 owned agent 抛 `DELEGATED_CALLER`；`approval.request` 只服务单次工具调用且要求 open turn。必须改译为「根会话问人、线程执行」（→ `GAP-18`）。 | 本轮 Host 契约核对 |
 
 ---
 
@@ -369,20 +538,23 @@
 
 每批独立提交、独立验证。批内条目彼此有依赖，不要拆开做。
 
-| 批次 | 条目 | 依赖 | 预计量 |
-| --- | --- | --- | --- |
-| **第一批** | `GAP-01` 全局配额 + `GAP-02` 知识陈旧检测 + `GAP-21` 知识阈值按窗口派生 | 无 | 中（~500 行 + 测试） |
-| **第二批** | `GAP-03` 会话投影 → `GAP-04` 六分组 → `GAP-05` 归档 | 04/05 必须等 03（状态要能进事件流） | 中偏大 |
-| **第三批** | `GAP-06` goal + `GAP-07` 会话绑定 + `GAP-10` Library + `GAP-11` PR 聚合 | 07 需先定「项目绑哪个会话」的设计 | 中 |
-| **第四批** | `GAP-08` 建议线程 + `GAP-09` 仓库约定 + `GAP-12` 卡片动作 | 08 依赖 07 的消息路由思路 | 中 |
-| **第五批** | `GAP-14` Pause + `GAP-15` Archive + `GAP-17` 超时 + `GAP-19` worktree 回收（需 10 先完成） | 19 依赖 10 | 小 |
-| **按需** | `GAP-13` Usage、`GAP-18` approval 开关、`GAP-20` purge、`GAP-16` 自动重建决策 | — | 小 |
+**排序原则**（2026-10-28 修订）：不只看「会不会安静地出错」，还要看**它是不是后续批次的输入**。原排序把「错得不安静」的项（拆解、审批）过滤到了最后，结果是在给错的输入抛光。
 
-> **第一批为什么把 `GAP-21` 也放进来**：它和 `GAP-02` 都在 `knowledge.ts`/`engine.ts` 的同几行上（`DEFAULT_CONTEXT_BUDGET_CHARS` 的三个调用点），分开做要改两遍同样的位置、跑两遍同样的测试。而且两项都属于「知识层给出错误或不完整答案」，验收方式一致。
+| 批次 | 条目 | 依赖 | 说明 |
+| --- | --- | --- | --- |
+| **第一批 让输出可信** | `GAP-01` 全局配额 + `GAP-22` 知识 paths-first | 无 | 22 是**减法**：删代码为主，净减不增 |
+| **第二批 让拆解可信** | `GAP-26` 模型优先拆解 + Suggested threads | 无（可与一批并行） | 后者是前者的保险，必须同批 |
+| **第三批 让报回可用** | `GAP-03` 投影 + `GAP-04` 六分组 + `GAP-05` 终态 + `GAP-10` Library + `GAP-11` PR 聚合 | 03 与 04 **可同批**（原判断的串行约束不成立） | 状态部分是加法，不是重构 |
+| **第四批 让裁定可用** | `GAP-12` 卡片动作 + `GAP-18` 审批 + `GAP-14` Pause + `GAP-24` 退订 + `GAP-19` worktree 回收 + `GAP-25` 禁令 | 19 依赖 10（先有清单再删目录） | **不可逆动作（19）与它的防护同批**，不推到最后 |
+| **第五批 减少重复交代** | `GAP-06` goal + `GAP-09` 仓库约定 + `GAP-29` 三件套 | 无 | |
+| **第六批 卫生** | `GAP-13` Usage + `GAP-15` Archive + `GAP-17` 超时 + `GAP-20` purge + `GAP-27` 锁重试 | 无 | |
+| **按需** | `GAP-23` 自愈计数、`GAP-28` 并发偏好 | 无 | 23 属 P1，若第三/四批之间有空档应先插队 |
+
+> **第一批为什么不含 `GAP-23`（P1 却在按需）**：它的触发条件是「PR 被多轮评审」，只有真的跑起来才会遇到；而 21/22/24 在**第一次自愈**就可能出错。若第一批做完还有余量，`GAP-23` 应第一个补上。
 
 **验证方式（每批都要走）**：
 
 1. `npm run verify`（typecheck + build + 全部测试）
 2. 实机探针：junction 挂载 + `dsh --profile web --patch ./probe-patch.yml --no-open --port 1949x`，检查 `PROBE-OK tools:` 与零 `did not activate`
 3. **日志不得截断**（`| head` 会吞掉真实错误 —— 这是踩过的坑，见 `AGENTS.md`）
-4. 更新本文件的勾选状态，以及 `README.md` 中因此变化的事实陈述
+4. 改动 doc 里引用的行号，或改成符号名引用
