@@ -72,7 +72,7 @@
 | **P0** | 违背规格或官方原文 | ~~`GAP-01`~~ ✅ 已关闭 2026-10-27 |
 | **P1** | 会静默产出错误结果 | `GAP-23` `GAP-24`（`GAP-22` / `GAP-22a` 已关闭） |
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | `GAP-03` `GAP-04` `GAP-05` |
-| **P3** | 官方有、我们无，独立功能 | `GAP-06` `GAP-09` ~ `GAP-13` `GAP-26` `GAP-29` |
+| **P3** | 官方有、我们无，独立功能 | `GAP-06` `GAP-09` ~ `GAP-13` `GAP-29` |
 | **P4** | 项目管理类，缺了不能「管起来」 | `GAP-14` `GAP-15` `GAP-17` `GAP-18` `GAP-25` `GAP-28` |
 | **P5** | 磁盘、性能与健壮性，不出错 | `GAP-19` `GAP-20` `GAP-27` |
 | **ARCH** | 架构性差异，记录不排期 | `GAP-A1` ~ `GAP-A4` |
@@ -351,26 +351,58 @@
 - **做法**：读 Host `tokenMeter` 按线程归集；`overviewJson()` 加 `usage`。**如果 `tokenMeter` 只能给全局数字，就明确标注「本项目无法按线程拆分」，不要造假的分布。**
 - **验收标准**：能看到按线程用量；拿不到精确数据时如实显示「不可用」而不是 0。
 
-### GAP-26 拆解应模型优先，并把「先提议后启动」与它一起做
+### GAP-26 拆解应模型优先，并把「先提议后启动」与它一起做 ✅ 已做
 
 - **依据**：
   - `OFFICIAL`「Claude acts as coordinator. It takes what you send, decides what becomes a thread」；
   - 「Sometimes Claude **proposes** threads instead of starting them, in a **Suggested threads** list. Click the arrow on a suggestion to start that thread. … a button under the list starts all of them.」—— 确定性文本分析不会 "propose"；
   - 路由规则一「**A quick question usually gets an answer in the conversation**」**要求**判断「这是问题还是活」，正则做不了；
   - 官方首批建议第 4 条：「Propose threads **and wait for my go-ahead** before starting them, and drop those limits once a few threads come back the way you want」。
-- **现状**：`planTasks`（`src/core/planner.ts`）是**纯确定性文本分析**（bullet 识别 + 标题提取 + `scopeHintOf`），不调模型；`coordinate` 直接启动（`src/core/engine.ts:400`）。原设计的两条理由（「委派模型不可用时也能工作」「可单测」）都对，但它们要的是**有一个确定性 fallback**，而不是「拿确定性分析当主路径」。差别在哪个是主路径。
-- **为什么两件一起做**：`Suggested threads` 是拆解质量的**保险** —— 提议列表把「拆错」的代价从「开了 5 个错 worktree + 5 个分支」降到「用户删掉列表里 3 行」。单独做模型的拆解而不做提议，等于把风险敞口放大。
-- **做法**：
-  1. **模型优先，正则兜底**：`planner.ts` 现有整套保留，降级为 fallback。协调者先用可用的委派模型产出计划，拿不到模型时才用正则。
-  2. **fallback 必须可见**：现在模型不可用时是静默降级的。改成在结果里明说「委派模型不可用，我按 bullet 切了 3 项，请确认」。**静默降级的拆解与静默过期的知识是同一类错误**，而且这个更常见。
-  3. **`Suggested threads`**：`coordinate` 加 `planOnly: true`（默认改为 `true`？—— 倾向**默认提议**，与官方新项目姿态一致，但保留 `--start` 直接启动）。计划存进 manifest（带 `suggestedAt`），提供单独启动、全部启动、过期丢弃。
-- **要小心的**：默认值改动会改变现有 CLI/工具的体感。若沿用 `planOnly: false` 默认，则必须在文档里说明「与官方新项目姿态不同」，不要两边都含糊。
-- **验收标准**：
-  1. 有模型时由模型产出计划（可用 fake provider 测），无模型时降级且**结果里带降级说明**；
-  2. `planOnly` 时零线程启动、零配额消耗；
-  3. 建议可单独启动，也可一次全起；
-  4. 建议超 24h 自动丢弃；
-  5. 正则 fallback 的现有单测继续通过（测试资产不浪费）。
+- **现状（2026-10-29 已落地）**：见下方「实际做法」。
+
+#### 实际做法（2026-10-29）
+
+**1. 「模型优先」的实现方式：由协调者自己给计划，而不是在工具里调模型**
+
+原验收标准写的是「有模型时由模型产出计划（可用 fake provider 测）」，暗示在 `coordinate` 内部调一次模型。**这条路走错了**：DSH 里**协调者本身就是那个模型**（根会话在调用 `project_coordinate` 工具），工具内再调一次模型是嵌套委派——多花一次 token、多一层失败点，而且拿不到用户在对话里的上下文（用户刚说「只改前端」，工具里的模型不知道）。
+
+正确的落法是**计划从参数进来**：`project_coordinate` 接受 `tasks: [{ title, objective, scopeHint? }]`，`normaliseTasks`（`src/core/planner.ts`）只做校验与截断（缺 objective 用 title 顶、超长截 80、去重、上限 `MAX_PLANNED_TASKS = 8`）。模型给计划就是**决定**，直接启动；模型没给（或被 route 掉）才走 `planTasks` 的确定性兜底，而那一路的输出是**提议**。
+
+**2. 降级必须可见**
+
+`resolvePlan`（`src/core/engine.ts:583`）返回 `{ tasks, origin: 'model' | 'fallback', note? }`，fallback 时 `note` 用调用方的单位解释降级：
+`no task list was supplied, so the goal was split by its bullet markers (3 tasks). This is a deterministic guess, not a model decision — check the titles before accepting them.`
+`CoordinateResult.planOrigin` / `planNote` 原样透传到工具结果与 `/project coordinate` 输出。
+
+**3. Suggested threads：默认提议**
+
+- `planOnly` 默认值 = `origin === 'fallback'`（`src/core/engine.ts:468`）。模型自己给的计划直接起，猜出来的计划先提议 —— 这是「猜测需要确认、决定不需要」的同一原则。
+- 计划存进 `ProjectManifest.plan: ProjectPlan`（`plannedAt` / `origin` / `note?` / `tasks`），只有一份，对齐官方单一 **Suggested threads** 列表。
+- 启动：`startSuggested(parent, { indices?, limit? })`（`src/core/engine.ts:627`）—— 全部、按序号子集、或带 limit；启动成功的任务离开计划，**失败的留在计划里可重试**；释放未用掉的配额预约（本地账本 + 全局账本两处都退）。
+- 丢弃：`discardSuggested()`；`/project drop`。
+- 过期：`PLAN_TTL_MS = 24h`（`src/core/planner.ts`）。**过期是读时报告、写时执行**：`pendingPlan()` 只返回 `{ expired }` 不动记录（否则面板每次渲染都会 bump revision 并和其他写入打架），真正清除发生在下一次 `startSuggested` / `discardSuggested`。
+- 面板：`ProjectOverview.suggested?: SuggestedPlanView`（含 `expired`），`renderOverviewMarkdown` 单列一节；过期时文案为 `## Suggested threads (stale, dropped on next run)` 且不再给启动指引。
+
+**4. 命令与工具**
+
+- `/project coordinate <goal>` 现在**只提议**（命令路径没有模型，必然是 fallback），输出 `nothing started. \`/project start\` for all, \`/project start 1 3\` for some, \`/project drop\` to discard.`
+- `/project start [ordinals...]`、`/project drop` 新增。
+- `project_thread_manage` 新增 `action: 'start' | 'drop'`（`indices?`），并在 `project_coordinate` 的 `planOnly` 结果里附 `next` 指引，明确告诉模型「把标题给用户看，等他们同意后再 start」。
+
+**5. 不做的部分**
+
+官方建议里的「drop those limits once a few threads come back the way you want」（自适应放宽并发偏好）属 `GAP-28`，未在本条实现。
+
+#### 验收标准（全部已有测试）
+
+1. ✅ 模型给了 `tasks` 时按它启动、**不再被正则重切**（`test/tools.test.ts`「starts exactly the tasks the model supplied, without re-splitting the goal」，断言 goal 是散文而 tasks 是两条时 `planned` 恰为那两条、`planOrigin === 'model'`）。
+2. ✅ fallback 时**结果里带降级说明**（`test/engine.test.ts` 断言 `planNote` 含 `deterministic guess`）。
+3. ✅ `planOnly` 时**零线程启动、零配额消耗**（`test/engine.test.ts` 断言 `started` 为空且 `quota.created` 不变）。
+4. ✅ 建议可**单独启动**、也可**一次全起**、失败的留下可重试（`test/engine.test.ts` 的 `startSuggested` 组）。
+5. ✅ 建议超 24h **自动丢弃**（读时 `expired: true`，`startSuggested` 抛 `INVALID_INPUT` 并清掉计划）。
+6. ✅ 正则 fallback 的原有单测继续通过（`test/unit/planner.test.ts` 15 项未改动）。
+7. ✅ 面板能看到待启动建议（`test/unit/overview.test.ts`、`test/commands.test.ts`）。
+
 
 ### GAP-29 协调状态跨会话不可恢复（原「项目绑定会话」重定义）
 
@@ -608,6 +640,7 @@
 | 2026-10-27 | 「`OFFICIAL` 全文 `RAG`/`retrieval`/`project knowledge` 各 0 次」 | **比这更强：四个 0**。`knowledge` 这个词本身也是 0 次。Code Projects 连「知识」都不用，只有「挂载给线程读的文件」与「线程自己记的 memory 文件」。 | 同上 ② |
 | 2026-10-27 | 「六分组可能重叠，也许要改成多维标签」 | **互斥，不要改**。但互斥是**按构造**成立（「groups threads by state」），所以两条定义同真时必须自己定优先级：**人阻塞优先于 PR 生命周期位置**，否则等审批的线程会被 PR 状态掩埋而面板一切正常（→ `GAP-04`）。 | 同上 §问题一 |
 | 2026-10-27 | 「账本用和 `ManifestStore` 同级的串行队列就够」 | **不够**。这个文件按定义被机器上所有项目、所有 Host 进程共享，进程内队列只能序列化从来不是问题的那批写者。实现改为排他锁文件 + 锁内重读 + 陈旧锁打破（→ `GAP-01`）。 | 本批实现 |
+| 2026-10-29 | 「模型优先」= 在 `coordinate` 工具内部调一次模型 | **框架错了**。DSH 里协调者本身就是那个模型（根会话在调 `project_coordinate`），工具内再调一次是嵌套委派：多花一次 token、多一层失败点，而且**看不到用户在对话里刚说的话**。正确落法是计划**从参数进来**（`tasks`），工具只校验；拿不到就降级为正则兜底并明确标注（→ `GAP-26`）。 | 本批实现 |
 | 2026-10-27 | `test/engine.test.ts` 的 `quotaDay` 断言 | **测试写错**，不是实现错。`dayKey` 取**本地**日历日，而固定时钟 `2026-01-02T03:04:05Z` 在任何比 UTC 晚 3 小时以上的时区都落在 01-01。硬编码字面量在欧洲过、在加州挂（已在改动前的 HEAD 上复现确认）。改为 `dayKey(fixedClock().now())`。 | 本批 `npm run verify` |
 
 ---
@@ -621,7 +654,7 @@
 | 批次 | 条目 | 依赖 | 说明 |
 | --- | --- | --- | --- |
 | **第一批 让输出可信** | `GAP-01` 全局配额 ✅ + `GAP-22` 知识 paths-first ✅ | 无 | 2026-10-27 `9c7ef10`：`GAP-01` 关闭，`GAP-22` 的减法做完（确实净减）；2026-10-29：`GAP-22a`（路径锚定项目根）关闭 —— **第一批完成** |
-| **第二批 让拆解可信** | `GAP-26` 模型优先拆解 + Suggested threads | 无（可与一批并行） | 后者是前者的保险，必须同批 |
+| **第二批 让拆解可信** | `GAP-26` 模型优先拆解 + Suggested threads ✅ | 无（可与一批并行） | 后者是前者的保险，必须同批。2026-10-29 关闭 —— **第二批完成** |
 | **第三批 让报回可用** | `GAP-03` 投影 + `GAP-04` 六分组 + `GAP-05` 终态 + `GAP-10` Library + `GAP-11` PR 聚合 | 03 与 04 **可同批**（原判断的串行约束不成立） | 状态部分是加法，不是重构 |
 | **第四批 让裁定可用** | `GAP-12` 卡片动作 + `GAP-18` 审批 + `GAP-14` Pause + `GAP-24` 退订 + `GAP-19` worktree 回收 + `GAP-25` 禁令 | 19 依赖 10（先有清单再删目录） | **不可逆动作（19）与它的防护同批**，不推到最后 |
 | **第五批 减少重复交代** | `GAP-06` goal + `GAP-09` 仓库约定 + `GAP-29` 三件套 | 无 | |

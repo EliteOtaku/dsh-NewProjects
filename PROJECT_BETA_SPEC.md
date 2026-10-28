@@ -28,7 +28,9 @@
 
 - **职责**：用户在单一对话框中描述高层目标后，Coordinator 自动分析仓库现状，将复杂工程任务拆解为多个互不阻塞的子任务，并调度并行的工作线程（Threads）执行。
 - **拆解质量优先于确定性**：官方明写「Claude acts as coordinator. It takes what you send, **decides** what becomes a thread」，且「Sometimes Claude **proposes** threads instead of starting them」。因此拆解**应以委派模型为主路径**，确定性文本分析降级为**可见的** fallback（不可用时必须告知用户「我按 bullet 切了几项」）。静默降级的拆解与静默过期的知识是同一类错误。
+  - *实现注记（2026-10-29）*：主路径**不是**在工具内部再调一次模型。DSH 里协调者本身就是那个模型（根会话在调用 `project_coordinate`），工具内嵌套委派会多花一次 token、多一层失败点，且看不到用户在对话里刚说的话。落法是计划**从参数进来**（`tasks: [{title, objective, scopeHint?}]`），工具只做校验与截断；拿不到才降级为正则兜底，并在结果里带 `planOrigin: 'fallback'` 与 `planNote`。
 - **先提议后启动**：新增线程默认可以只产出 `Suggested threads` 列表供人确认，而不是直接拉起。这是拆解质量的保险——把「拆错」的代价从「开错 5 个 worktree + 5 个分支」降到「删掉列表里 3 行」。
+  - *实现注记（2026-10-29）*：默认值 = 「模型给的计划直接起（那是决定）、猜出来的计划先提议（那是猜测）」。计划存 `manifest.plan`，一份，24 小时过期；`/project start [序号...]` 启动、`/project drop` 丢弃；启动失败的任务留在计划里可重试，同时退还两处配额预约。
 - **配额护栏**：默认限制单个用户每天**在所有项目中**最多新建 **200 个线程**。
   - *实现注记（2026-10）*：**当前为每项目独立计数，未做到"跨项目"**。见 `docs/GAPS.md` 的 `GAP-01`。
 - **并发度**：官方原文「There's no fixed number; Claude starts as many as the work calls for, and a limit you ask for is a **preference rather than a cap**」——并发数**本来就不是硬上限**，不设硬闸是符合规格的。但官方的「偏好」会被**持久化进记忆并由模型遵守**，所以我们应让并发偏好「可表达、可持久化、可被协调者读到」，见 `GAP-28`。

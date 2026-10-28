@@ -177,7 +177,7 @@ describe('coordinate', () => {
     await engine.init({ name: 'demo' });
     repoReady(runner);
 
-    const result = await engine.coordinate(PARENT, '- add the form\n- wire persistence', {});
+    const result = await engine.coordinate(PARENT, '- add the form\n- wire persistence', { planOnly: false });
     assert.equal(result.started.length, 2);
     assert.equal(result.skipped.length, 0);
     assert.equal(threads.launches.length, 2);
@@ -195,7 +195,7 @@ describe('coordinate', () => {
     const { engine, runner } = await harness();
     await engine.init({ name: 'demo' });
     repoReady(runner);
-    await engine.coordinate(PARENT, '- one\n- two\n- three', {});
+    await engine.coordinate(PARENT, '- one\n- two\n- three', { planOnly: false });
     const manifest = await engine.requireManifest();
     assert.equal(manifest.dailyThreadsCreated, 3);
   });
@@ -206,7 +206,7 @@ describe('coordinate', () => {
     await engine.init({ name: 'demo' });
     repoReady(runner);
     threads.failNextLaunch = 'provider unavailable';
-    const result = await engine.coordinate(PARENT, '- one\n- two', {});
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     assert.equal(result.started.length, 1);
     assert.equal(result.skipped.length, 1);
     const manifest = await engine.requireManifest();
@@ -218,7 +218,7 @@ describe('coordinate', () => {
     await engine.init({ name: 'demo', dailyThreadQuotaMax: 2 });
     repoReady(runner);
     await assert.rejects(
-      () => engine.coordinate(PARENT, '- one\n- two\n- three', {}),
+      () => engine.coordinate(PARENT, '- one\n- two\n- three', { planOnly: false }),
       (error: unknown) => isProjectError(error) && error.code === 'QUOTA_EXCEEDED',
     );
     const manifest = await engine.requireManifest();
@@ -247,14 +247,14 @@ describe('coordinate', () => {
     const first = await build();
     await first.engine.init({ name: 'one' });
     repoReady(first.runner);
-    const started = await first.engine.coordinate(PARENT, '- a\n- b\n- c', {});
+    const started = await first.engine.coordinate(PARENT, '- a\n- b\n- c', { planOnly: false });
     assert.equal(started.started.length, 3);
     assert.equal(started.quota.global?.created, 3);
 
     const second = await build();
     await second.engine.init({ name: 'two' });
     repoReady(second.runner);
-    const also = await second.engine.coordinate(PARENT, '- d', {});
+    const also = await second.engine.coordinate(PARENT, '- d', { planOnly: false });
     // The second project's own counter starts at zero, but the shared one carries on.
     assert.equal((await second.engine.requireManifest()).dailyThreadsCreated, 1);
     assert.equal(also.quota.global?.created, 4);
@@ -278,7 +278,7 @@ describe('coordinate', () => {
     await engine.init({ name: 'demo' });
     repoReady(runner);
     await assert.rejects(
-      () => engine.coordinate(PARENT, '- one', {}),
+      () => engine.coordinate(PARENT, '- one', { planOnly: false }),
       (error: unknown) => isProjectError(error) && error.code === 'QUOTA_EXCEEDED',
     );
     const manifest = await engine.requireManifest();
@@ -301,7 +301,7 @@ describe('coordinate', () => {
     });
     await engine.init({ name: 'demo', dailyThreadQuotaMax: 2 });
     repoReady(runner);
-    await assert.rejects(() => engine.coordinate(PARENT, '- one\n- two\n- three', {}));
+    await assert.rejects(() => engine.coordinate(PARENT, '- one\n- two\n- three', { planOnly: false }));
     const { QuotaLedger } = await import('../src/core/quotaLedger.js');
     const after = await new QuotaLedger(ledger).snapshot('any', fixedClock().now());
     assert.equal(after.created, 0, 'the global reservation must be refunded');
@@ -322,7 +322,7 @@ describe('coordinate', () => {
     await engine.init({ name: 'demo' });
     repoReady(runner);
     threads.failNextLaunch = 'provider unavailable';
-    const result = await engine.coordinate(PARENT, '- one\n- two', {});
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     assert.equal(result.started.length, 1);
     assert.equal(result.quota.global?.created, 1, 'the failed task must not keep its shared reservation');
   });
@@ -331,7 +331,7 @@ describe('coordinate', () => {
     const { engine, runner } = await harness();
     await engine.init({ name: 'demo' });
     repoReady(runner);
-    const result = await engine.coordinate(PARENT, '- one\n- two\n- three', { limit: 2 });
+    const result = await engine.coordinate(PARENT, '- one\n- two\n- three', { limit: 2, planOnly: false });
     assert.equal(result.started.length, 2);
     assert.equal(result.planned.length, 2);
   });
@@ -340,7 +340,7 @@ describe('coordinate', () => {
     const { engine, threads } = await harness();
     await engine.init({ name: 'demo' });
     // Nothing routed: every probe fails, so inspectRepo reports "not a repo".
-    const result = await engine.coordinate(PARENT, '- one\n- two', {});
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     assert.equal(result.started.length, 2);
     assert.equal(threads.launches.length, 2);
     for (const thread of result.started) {
@@ -360,7 +360,7 @@ describe('coordinate', () => {
     });
     await unavailable.init();
     await assert.rejects(
-      () => unavailable.coordinate(PARENT, '- one\n- two', {}),
+      () => unavailable.coordinate(PARENT, '- one\n- two', { planOnly: false }),
       (error: unknown) => isProjectError(error) && error.code === 'SPAWN_FAILED',
     );
   });
@@ -369,7 +369,7 @@ describe('coordinate', () => {
     const { engine } = await harness();
     await engine.init();
     await assert.rejects(
-      () => engine.coordinate(PARENT, '   ', {}),
+      () => engine.coordinate(PARENT, '   ', { planOnly: false }),
       (error: unknown) => isProjectError(error) && error.code === 'INVALID_INPUT',
     );
   });
@@ -379,7 +379,7 @@ describe('coordinate', () => {
     await engine.init({ name: 'demo' });
     repoReady(runner);
     await engine.setMemory(undefined, { key: 'db', decision: 'use postgres' });
-    await engine.coordinate(PARENT, '- one\n- two', { memoryKeys: ['db'] });
+    await engine.coordinate(PARENT, '- one\n- two', { memoryKeys: ['db'], planOnly: false });
     assert.equal(threads.launches.length, 2);
     for (const launch of threads.launches) {
       assert.match(launch.prompt, /branch|scope/i);
@@ -416,7 +416,7 @@ describe('turn-end routing', () => {
     await engine.init({ name: 'demo' });
     repoReady(runner);
     engine.attach();
-    const result = await engine.coordinate(PARENT, '- one\n- two', {});
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     const child = result.started[0]?.childSessionId ?? '';
     threads.finish(child, {
       stopReason: 'completed',
@@ -435,7 +435,7 @@ describe('turn-end routing', () => {
     await engine.init({ name: 'demo' });
     repoReady(runner);
     engine.attach();
-    const result = await engine.coordinate(PARENT, '- one\n- two', {});
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     const child = result.started[0]?.childSessionId ?? '';
     threads.finish(child, { stopReason: 'completed', text: 'All done, tests pass.' });
     const updated = await eventually(async () => {
@@ -450,7 +450,7 @@ describe('turn-end routing', () => {
     await engine.init({ name: 'demo' });
     repoReady(runner);
     engine.attach();
-    const result = await engine.coordinate(PARENT, '- one\n- two', {});
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     const child = result.started[0]?.childSessionId ?? '';
     threads.finish(child, { stopReason: 'error', text: '', diagnostic: 'model exploded' });
     const updated = await eventually(async () => {
@@ -465,7 +465,7 @@ describe('turn-end routing', () => {
     await engine.init({ name: 'demo' });
     repoReady(runner);
     engine.attach();
-    const result = await engine.coordinate(PARENT, '- one\n- two', {});
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     const child = result.started[0]?.childSessionId ?? '';
     threads.finish(child, { stopReason: 'aborted', text: '' });
     const updated = await eventually(async () => {
@@ -492,7 +492,7 @@ describe('turn-end routing', () => {
     await engine.init({ name: 'demo' });
     repoReady(runner);
     const detach = engine.attach();
-    const result = await engine.coordinate(PARENT, '- one\n- two', {});
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     detach();
     threads.finish(result.started[0]?.childSessionId ?? '', { stopReason: 'completed', text: 'x' });
     await new Promise((resolve) => setImmediate(resolve));
@@ -507,7 +507,7 @@ describe('manageThread', () => {
     const { engine, runner, threads } = await harness();
     await engine.init({ name: 'demo' });
     repoReady(runner);
-    const result = await engine.coordinate(PARENT, '- one\n- two', {});
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     const id = result.started[0]?.threadId ?? '';
     await engine.manageThread(PARENT, id, 'steer', 'also handle the empty case');
     assert.equal(threads.steers.length, 1);
@@ -518,7 +518,7 @@ describe('manageThread', () => {
     const { engine, runner } = await harness();
     await engine.init({ name: 'demo' });
     repoReady(runner);
-    const result = await engine.coordinate(PARENT, '- one\n- two', {});
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     await assert.rejects(
       () => engine.manageThread(PARENT, result.started[0]?.threadId ?? '', 'steer', ''),
       (error: unknown) => isProjectError(error) && error.code === 'INVALID_INPUT',
@@ -538,7 +538,7 @@ describe('manageThread', () => {
     const { engine, runner, threads } = await harness();
     await engine.init({ name: 'demo' });
     repoReady(runner);
-    const result = await engine.coordinate(PARENT, '- one\n- two', {});
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     const id = result.started[0]?.threadId ?? '';
     const child = result.started[0]?.childSessionId ?? '';
     await engine.manageThread(PARENT, id, 'interrupt', undefined);
@@ -549,7 +549,7 @@ describe('manageThread', () => {
     const { engine, runner } = await harness();
     await engine.init({ name: 'demo' });
     repoReady(runner);
-    const result = await engine.coordinate(PARENT, '- one\n- two', {});
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     const id = result.started[0]?.threadId ?? '';
     const closed = await engine.manageThread(PARENT, id, 'close', undefined);
     assert.equal(closed.thread.status, 'completed');
@@ -561,7 +561,7 @@ describe('overview / charter', () => {
     const { engine, runner } = await harness();
     await engine.init({ name: 'demo' });
     repoReady(runner);
-    await engine.coordinate(PARENT, '- one\n- two', {});
+    await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     const overview = await engine.overview();
     assert.equal(overview.name, 'demo');
     assert.equal(overview.totals.threads, 2);
@@ -572,7 +572,7 @@ describe('overview / charter', () => {
     const { engine, runner } = await harness();
     await engine.init({ name: 'demo' });
     repoReady(runner);
-    await engine.coordinate(PARENT, '- one\n- two', {});
+    await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     const payload = await engine.overviewJson();
     assert.equal(payload['name'], 'demo');
     assert.equal((payload['totals'] as { threads: number }).threads, 2);
@@ -657,7 +657,7 @@ describe('deliverThread', () => {
     const { engine, runner } = await harness();
     await engine.init({ name: 'demo' });
     repoReady(runner);
-    const result = await engine.coordinate(PARENT, '- one\n- two', {});
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     const threadId = result.started[0]?.threadId ?? '';
     return { engine, runner, threadId };
   }
@@ -704,7 +704,7 @@ describe('deliverThread', () => {
     runner.on('git add', { exitCode: 0 });
     runner.on('git commit', { stdout: '[main abc1234] one\n' });
     runner.on('git rev-parse HEAD', { stdout: 'abc1234\n' });
-    const result = await engine.coordinate(PARENT, '- one\n- two', {});
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     const threadId = result.started[0]?.threadId ?? '';
     const delivered = await engine.deliverThread(threadId);
     assert.equal(delivered.prRef, undefined);
@@ -750,7 +750,7 @@ describe('healSweep', () => {
     const { engine, runner } = await harness();
     await engine.init({ name: 'demo' });
     repoReady(runner);
-    const result = await engine.coordinate(PARENT, '- one\n- two', {});
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     // No `gh pr view` route: findPullRequest fails, so the sweep must record an error
     // instead of inventing a state.
     const sweep = await engine.healSweep(PARENT, AbortSignal.timeout(5000));

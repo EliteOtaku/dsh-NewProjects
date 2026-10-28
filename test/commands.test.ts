@@ -211,6 +211,8 @@ describe('/project threads and thread', () => {
     await run(engine, 'init');
     repoReady(runner);
     await run(engine, 'coordinate - one\n- two');
+    // coordinate only proposes; starting is a separate, explicit step.
+    await run(engine, 'start');
     const listed = await run(engine, 'threads');
     assert.match(listed.text, /one/);
     // The branch carries the task ordinal, which is what keeps two same-titled tasks from
@@ -222,8 +224,12 @@ describe('/project threads and thread', () => {
     const { engine, runner } = await harness();
     await run(engine, 'init');
     repoReady(runner);
-    const result = await run(engine, 'coordinate - one\n- two');
-    assert.match(result.text, /planned 2, started 2, skipped 0/);
+    const proposed = await run(engine, 'coordinate - one\n- two');
+    // The command path bypasses the model, so its split is a guess and stays proposed.
+    assert.match(proposed.text, /planned 2, started 0, skipped 0/);
+    assert.match(proposed.text, /1\. one/);
+    const result = await run(engine, 'start');
+    assert.match(result.text, /started 2, skipped 0, still proposed 0/);
     assert.match(result.text, /quota 2\/200/);
   });
 
@@ -240,7 +246,10 @@ describe('/project threads and thread', () => {
     await run(engine, 'init');
     repoReady(runner);
     const coordinated = await run(engine, 'coordinate - one\n- two');
-    const threadId = /started `([^`]+)`/.exec(coordinated.text)?.[1] ?? '';
+    assert.match(coordinated.text, /planned 2, started 0, skipped 0/);
+    assert.match(coordinated.text, /nothing started/);
+    const started = await run(engine, 'start');
+    const threadId = /started `([^`]+)`/.exec(started.text)?.[1] ?? '';
     const inspected = await run(engine, `thread ${threadId}`);
     assert.equal(inspected.kind, 'success');
     assert.match(inspected.text, /one/);
@@ -250,8 +259,9 @@ describe('/project threads and thread', () => {
     const { engine, runner, threads } = await harness();
     await run(engine, 'init');
     repoReady(runner);
-    const coordinated = await run(engine, 'coordinate - one\n- two');
-    const threadId = /started `([^`]+)`/.exec(coordinated.text)?.[1] ?? '';
+    await run(engine, 'coordinate - one\n- two');
+    const started = await run(engine, 'start');
+    const threadId = /started `([^`]+)`/.exec(started.text)?.[1] ?? '';
     const result = await run(engine, `thread ${threadId} steer add a test`);
     assert.equal(result.kind, 'success');
     assert.equal(threads.steers[0]?.text, 'add a test');

@@ -109,13 +109,47 @@ describe('project_coordinate', () => {
     const { engine, runner } = await harness();
     await engine.init({ name: 'demo' });
     repoReady(runner);
-    const result = (await tool({ engineFor: () => Promise.resolve(engine), parentOf: () => PARENT }, 'project_coordinate').execute(
+    const source = { engineFor: () => Promise.resolve(engine), parentOf: () => PARENT };
+    // A goal with no `tasks` still has to leave the caller with an actionable plan, so the
+    // fallback splitter proposes and the caller starts. Asking to start immediately is allowed.
+    const proposed = (await tool(source, 'project_coordinate').execute(
       { goal: '- add tests\n- document the API' },
       context(),
     )) as Record<string, unknown>;
+    assert.equal(proposed['ok'], true);
+    assert.equal((proposed['planned'] as unknown[]).length, 2);
+    assert.equal((proposed['started'] as unknown[]).length, 0);
+    assert.equal((proposed['suggested'] as unknown[]).length, 2);
+    const started = (await tool(source, 'project_coordinate').execute(
+      { goal: '- add tests\n- document the API', planOnly: false },
+      context(),
+    )) as Record<string, unknown>;
+    assert.equal((started['started'] as unknown[]).length, 2);
+    assert.equal(started['suggested'], undefined);
+  });
+
+  it('starts exactly the tasks the model supplied, without re-splitting the goal', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const result = (await tool({ engineFor: () => Promise.resolve(engine), parentOf: () => PARENT }, 'project_coordinate').execute(
+      {
+        goal: 'ship the settings page',
+        // The model's split disagrees with what the bullet splitter would produce, which is the
+        // whole point: the goal is prose here, not a list.
+        tasks: [
+          { title: 'add the form', objective: 'add the settings form and its validation' },
+          { title: 'wire persistence', objective: 'persist settings through the store' },
+        ],
+      },
+      context(),
+    )) as Record<string, unknown>;
     assert.equal(result['ok'], true);
-    assert.equal((result['started'] as unknown[]).length, 2);
-    assert.equal((result['planned'] as unknown[]).length, 2);
+    const planned = result['planned'] as Array<Record<string, string>>;
+    assert.equal(planned.length, 2);
+    assert.equal(planned[0]?.['title'], 'add the form');
+    assert.equal(planned[1]?.['objective'], 'persist settings through the store');
+    assert.equal(result['planOrigin'], 'model');
   });
 
   it('returns an uninitialised result instead of throwing', async () => {
@@ -207,7 +241,7 @@ describe('project_thread_manage', () => {
     const { engine, runner } = await harness();
     await engine.init({ name: 'demo' });
     repoReady(runner);
-    await engine.coordinate(PARENT, '- one\n- two', {});
+    await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     const manage = tool({ engineFor: () => Promise.resolve(engine), parentOf: () => PARENT }, 'project_thread_manage');
     const result = (await manage.execute({ action: 'list' }, context())) as Record<string, unknown>;
     const threads = result['threads'] as Array<Record<string, unknown>>;
@@ -246,7 +280,7 @@ describe('project_thread_manage', () => {
     const { engine, runner, threads } = await harness();
     await engine.init({ name: 'demo' });
     repoReady(runner);
-    const started = await engine.coordinate(PARENT, '- one\n- two', {});
+    const started = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
     const threadId = started.started[0]?.threadId ?? '';
     const manage = tool({ engineFor: () => Promise.resolve(engine), parentOf: () => PARENT }, 'project_thread_manage');
     const result = (await manage.execute({ action: 'steer', threadId, message: 'use the existing helper' }, context())) as Record<

@@ -20,7 +20,7 @@ Issue 与规格都存在本仓库的 GitHub Issues（`EliteOtaku/dsh-NewProjects
 
 ```bash
 npm install
-npm run verify     # typecheck + build + test，共 285 项测试
+npm run verify     # typecheck + build + test，共 295 项测试
 npm test           # 只跑测试
 npm run build      # 只编译到 lib/
 ```
@@ -60,7 +60,8 @@ npm run build      # 只编译到 lib/
 
 记录在 [README.md 的「设计取舍」](./README.md#设计取舍) 一节，包括：每个线程一个私有 worktree、一律走 `CommandRunner`、一轮结束不等于已交付、广播只推正在跑的线程、未知 CI 状态算 `pending`、不可逆动作与它的防护同批、`subprocess` 唯一硬依赖。
 
-> ⚠️ **「拆解不调模型」已经不再是取舍，是登记在册的技术债**（`GAP-26`）。新代码不要在这条上继续加码：协调者应模型优先、确定性分析作可见的 fallback。
+> ✅ **拆解已改为模型优先（`GAP-26` 2026-10-29 关闭）**，但落法是「计划从参数进来」而不是工具内调模型——协调者本身就是那个模型，工具只校验 `tasks`。
+> 新代码不要退回「拿正则当主路径」：正则只做 fallback，且**猜出来的拆解必须先提议、不直接启动**（`planOrigin: 'fallback'` → `planOnly`）。
 
 ## 未实现部分与已知缺陷（动手前必读）
 

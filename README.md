@@ -29,9 +29,9 @@ Claude Code **Projects (Beta)** 式的动态协作中枢，作为 DeepSeek Harne
 
 | 能力 | 实现 |
 | --- | --- |
-| **Coordinator + 并行 Threads** | `project_coordinate` 工具拆解目标，每个任务一个 `subagents` 子会话 + 独立 `git branch` + 私有 worktree。每日配额 200，**按用户跨项目合计**（账本在 `~/.dsh/dsh-newprojects/quota.json`，路径可配），全有或全无地预留，启动失败自动退还；项目自己的 `dailyThreadQuotaMax` 是偏好而非硬限。（**拆解目前是确定性 bullet 分析，未用模型**——见 [`docs/GAPS.md`](docs/GAPS.md) 的 `GAP-26`。） |
+| **Coordinator + 并行 Threads** | 协调者（就是调用工具的那个模型）自己给出拆解，经 `project_coordinate` 的 `tasks` 参数传入后直接启动；没给就降级为正则兜底，而**猜出来的拆解一律先提议不启动**（`Suggested threads`，`/project start` 才起，24 小时过期自动丢弃）。每个任务一个 `subagents` 子会话 + 独立 `git branch` + 私有 worktree。每日配额 200，**按用户跨项目合计**（账本在 `~/.dsh/dsh-newprojects/quota.json`，路径可配），全有或全无地预留，启动失败自动退还；项目自己的 `dailyThreadQuotaMax` 是偏好而非硬限。 |
 | **跨线程共享记忆** | `project_memory_sync` 写入决策后广播到所有**正在运行**的线程；新线程启动前缀自动带上全量记忆。记忆渲染成字节稳定的 system prompt 段，命中 provider 端 prefix cache。 |
-| **项目知识（挂载式）** | 绑定文件或目录后，charter 渲染**索引**（每份文档一行：路径 + 字符数）让线程自己读盘，正文永不进 prompt（对照官方的 `/mnt/project-files` 挂载 + 开局读 `MEMORY.md` 索引）；BM25 检索是便利工具。**不是 RAG 模式切换**——那是 chat Projects 的机制，Code Projects 没有。（**charter 里的路径尚未锚定项目根，线程在自己的 worktree 里解析不到**——见 [`docs/GAPS.md`](docs/GAPS.md) 的 `GAP-22a`。） |
+| **项目知识（挂载式）** | 绑定文件或目录后，charter 渲染**索引**（每份文档一行：路径 + 字符数）并给出 **`Project root`**，线程按需从项目根读盘，正文永不进 prompt（对照官方的 `/mnt/project-files` 挂载 + 开局读 `MEMORY.md` 索引）。路径锚定项目根而非线程自己的 worktree，因为 worktree 只含分支切点前已提交的文件。BM25 检索是便利工具。**不是 RAG 模式切换**——那是 chat Projects 的机制，Code Projects 没有。 |
 | **自动执行与 CI/PR 自愈** | 线程自己跑测试、commit、push、开 PR。`/project heal` 与后台巡检读 `gh pr checks` / review comments，判定 `heal` / `wait` / `escalate` / `transition`。 |
 | **Overview 面板** | `project_overview` 工具与 `/project` 命令输出状态桶 + 当日配额 + 知识状态。**尚未接入会话投影**，面板不会随会话事件自动刷新——见 [`docs/GAPS.md`](docs/GAPS.md) 的 `GAP-03`。**桶目前是五类，官方是六组**——见 `GAP-04`。 |
 
@@ -63,7 +63,9 @@ cmd /c mklink /J "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-newp
 /project threads              # 所有线程及其状态
 /project thread <id> steer|respond|retry|interrupt|close|deliver [text]
 /project heal                 # 手动跑一次 CI/PR 巡检
-/project coordinate <goal>    # 拆解并启动线程（确定性；批量场景优先用工具）
+/project coordinate <goal>    # 提议拆解（命令路径没有模型，必然是兜底拆解，故只提议不启动）
+/project start [1 3]          # 启动全部或指定序号的建议线程
+/project drop                 # 丢弃建议列表
 /project knowledge            # 知识层状态：文档数、字符数、绑定路径
 /project knowledge add <path> [path...]   # 绑定文件或目录
 /project knowledge rm <path>  # 解绑
@@ -134,7 +136,7 @@ docs/              GAPS.md（差距登记簿）· REVIEW-REQUEST.md ·
                    REVIEW-RESPONSE.md / REVIEW-RESPONSE-2.md（外部复核，两轮）
 ```
 
-共 **285 项测试**（`node:test`）。除集成测试外全部跑在内存 fake 上，不需要 git 或真实子会话。
+共 **295 项测试**（`node:test`）。除集成测试外全部跑在内存 fake 上，不需要 git 或真实子会话。
 
 `src/core/` **不 import 任何 `@deepseek-ai/dsh-*`**：外部插件解析不到 Host 内部包。
 Git 与 `gh` 一律经 `CommandRunner` 端口调用，因此 SSH / 容器部署时命令在正确机器上执行。
@@ -161,7 +163,7 @@ npm test           # 只跑测试
 
 ## 已知未实现部分
 
-相对官方 Claude Code Projects 还有若干未实现的能力（会话投影、六分组 Overview、模型拆解与建议线程、goal 持久化、Library、PR 聚合、Pause/Archive、审批等）与若干有意为之的边界（重启后后台自愈停摆、云端 sandbox 差异等）。
+相对官方 Claude Code Projects 还有若干未实现的能力（会话投影、六分组 Overview、goal 持久化、Library、PR 聚合、Pause/Archive、审批等）与若干有意为之的边界（重启后后台自愈停摆、云端 sandbox 差异等）。
 
 完整清单、代码证据、依据来源与验收标准见 **[docs/GAPS.md](./docs/GAPS.md)**，按批次推进。那份文档是判断「某个能力到底有没有」的唯一依据——不要凭本文件的段落推断。
 

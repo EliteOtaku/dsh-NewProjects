@@ -177,7 +177,7 @@ describe('end-to-end project lifecycle', () => {
       '- add the form',
       '- add validation',
     ].join('\n');
-    const coordinated = await engine.coordinate(parent, goal, { limit: 4 });
+    const coordinated = await engine.coordinate(parent, goal, { limit: 4, planOnly: false });
     assert.equal(coordinated.started.length, 2, 'one thread per bullet');
     assert.equal(threads.launches.length, 2);
     // Each thread runs on its own branch, created in the real repository.
@@ -216,7 +216,7 @@ describe('end-to-end project lifecycle', () => {
     const charter = await engine.renderCharter();
     assert.ok(charter.text.includes('release-train'), 'the charter carries the decision');
     assert.ok(charter.text.includes('no hotfixes on Fridays'));
-    const later = await engine.coordinate(parent, '- add tests', { limit: 1 });
+    const later = await engine.coordinate(parent, '- add tests', { limit: 1, planOnly: false });
     assert.equal(later.started.length, 1);
     // A thread started after the decision still shares the same stable prefix.
     assert.equal((await engine.renderCharter()).text, charter.text, 'the prefix stayed stable');

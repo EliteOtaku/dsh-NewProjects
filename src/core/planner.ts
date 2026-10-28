@@ -1,20 +1,36 @@
 /**
  * Coordinator decomposition.
  *
- * Turns one high-level goal into a set of non-blocking sibling tasks. The planner
- * is deterministic text analysis, deliberately not a model call: coordination must
- * work even when the delegating model is unavailable, must be unit-testable, and
- * must never invent work the user did not ask for.
+ * Two paths, in this order:
+ *
+ * 1. **The model's own plan.** The caller (the coordinating model) states the split and it
+ *    is used as-is after validation. A coordinator that decides what becomes a thread is
+ *    the whole point of the feature; a regex re-splitting a decided plan is strictly worse.
+ * 2. **Deterministic text analysis (this file's `planTasks`).** A fallback, not the main
+ *    path: it keeps coordination working when no model plan arrives, keeps the policy
+ *    unit-testable, and never invents work the user did not ask for.
+ *
+ * The fallback is a *guess*, so callers must treat its output as a proposal rather than a
+ * decision — see `PlanOrigin` in `../types.js`.
  *
  * When the goal already contains explicit parallel markers (`-`, `1.`, `a)`), the
- * planner lifts those as task titles. Otherwise it emits a single task — splitting
- * an unmarked goal would fabricate structure.
+ * fallback lifts those as task titles. Otherwise it emits a single task — splitting an
+ * unmarked goal would fabricate structure.
  */
 
 import type { PlannedTask } from '../types.js';
 
 /** Hard cap on threads spawned from one coordination call. */
 export const MAX_PLANNED_TASKS = 8;
+
+/**
+ * How long a proposed decomposition waits for a go-ahead.
+ *
+ * A plan is written against the tree as it stands. After a day the branches it names may no
+ * longer apply, and a stale plan that still starts cleanly is worse than no plan at all — it
+ * produces threads working on work that already happened.
+ */
+export const PLAN_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Markers that mean "these lines are separate work items". */
 const BULLET = /^\s*(?:[-*+]|\d+[.)]|[a-z][.)])\s+(.*\S)\s*$/i;
@@ -65,6 +81,37 @@ function finalise(tasks: PlannedTask[]): PlannedTask[] {
     if (out.length >= MAX_PLANNED_TASKS) break;
   }
   return out;
+}
+
+/**
+ * Validate and bound a plan the calling model authored.
+ *
+ * Untrusted input: the tasks arrive as tool arguments, so anything may be missing, empty,
+ * over-long or duplicated. Each task needs a title; a missing objective falls back to the
+ * title rather than dropping the task, because dropping silently loses work the model asked
+ * for, while an over-long objective is truncated by the thread prompt budget anyway.
+ *
+ * @returns the accepted tasks; empty means the caller supplied nothing usable.
+ */
+export function normaliseTasks(raw: unknown): PlannedTask[] {
+  if (!Array.isArray(raw)) return [];
+  const candidates: PlannedTask[] = [];
+  for (const item of raw) {
+    if (item === null || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    const title = typeof record['title'] === 'string' ? record['title'].trim() : '';
+    const objective = typeof record['objective'] === 'string' ? record['objective'].trim() : '';
+    if (title.length === 0 && objective.length === 0) continue;
+    const resolvedTitle = title.length > 0 ? title : objective.slice(0, 80);
+    const scopeHint = typeof record['scopeHint'] === 'string' ? normaliseScopeHint(record['scopeHint']) : undefined;
+    candidates.push({
+      title: resolvedTitle.slice(0, 80),
+      // A bare title is a complete instruction; inventing a longer objective would be worse.
+      objective: objective.length > 0 ? objective : resolvedTitle,
+      ...(scopeHint === undefined ? {} : { scopeHint }),
+    });
+  }
+  return finalise(candidates);
 }
 
 /**

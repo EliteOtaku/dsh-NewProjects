@@ -169,6 +169,14 @@ export interface ProjectManifest {
   ciPollIntervalMs: number;
   /** Bumped on every prefix-affecting change (memory set/remove). */
   prefixVersion: number;
+  /**
+   * A decomposition proposed but not yet started.
+   *
+   * Only one at a time, matching the official single **Suggested threads** list. Cleared when
+   * every task is started or the user discards it, and dropped automatically once stale —
+   * a plan written against code that has since moved is worse than no plan.
+   */
+  plan?: ProjectPlan;
 }
 
 /** On-disk envelope, so the file format can evolve independently of the record. */
@@ -192,6 +200,28 @@ export interface PlannedTask {
   scopeHint?: string;
 }
 
+/** Who produced a decomposition. */
+export type PlanOrigin = 'model' | 'fallback';
+
+/**
+ * A decomposition waiting for the user's go-ahead.
+ *
+ * Why a plan is proposed instead of started: when the caller hands over a goal without
+ * stating the split, the coordinator has to invent one, and a guessed split costs one
+ * worktree, one branch, one child session and one quota unit per line. Proposing turns a
+ * wrong guess into "delete three rows" instead of "clean up five branches". A plan the
+ * caller authored itself (tasks passed in) is a decision, so it starts immediately.
+ */
+export interface ProjectPlan {
+  /** Local epoch ms when the plan was proposed. */
+  plannedAt: number;
+  /** Who split the goal. `fallback` means the deterministic planner guessed. */
+  origin: PlanOrigin;
+  /** Shown to the user verbatim; present when the plan needs explaining. */
+  note?: string;
+  tasks: PlannedTask[];
+}
+
 /** Result of one `project_coordinate` call. */
 export interface CoordinateResult {
   projectId: string;
@@ -199,6 +229,33 @@ export interface CoordinateResult {
   started: ProjectThreadDescriptor[];
   skipped: Array<{ task: PlannedTask; reason: string }>;
   quota: ProjectQuotaState;
+  /** True when the round proposed threads and started none. */
+  planOnly: boolean;
+  /** Who produced the plan. */
+  planOrigin: PlanOrigin;
+  /** Disclosure the caller must surface, e.g. "the model was unavailable, I guessed". */
+  planNote?: string;
+  /** Tasks still waiting for a go-ahead, when `planOnly` is true. */
+  suggested: PlannedTask[];
+}
+
+/** Result of starting previously proposed tasks. */
+export interface SuggestStartResult {
+  started: ProjectThreadDescriptor[];
+  skipped: Array<{ task: PlannedTask; reason: string }>;
+  /** Tasks still waiting; empty once everything was started. */
+  remaining: PlannedTask[];
+  quota: ProjectQuotaState;
+}
+
+/** A pending decomposition as the panel and the command show it. */
+export interface SuggestedPlanView {
+  plannedAt: number;
+  origin: PlanOrigin;
+  note?: string;
+  /** True when the plan is past its shelf life and can no longer be started. */
+  expired: boolean;
+  tasks: PlannedTask[];
 }
 
 /** Structured overview returned by the `project_overview` tool. */
@@ -211,6 +268,8 @@ export interface ProjectOverview {
   buckets: Record<OverviewBucket, ProjectThreadDescriptor[]>;
   memories: ProjectMemoryEntry[];
   prefixFingerprint: string;
+  /** The proposed decomposition, when one is waiting for a go-ahead. */
+  suggested?: SuggestedPlanView;
   totals: {
     threads: number;
     active: number;

@@ -89,11 +89,29 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
   const coordinate: HostToolDefinition = {
     name: 'project_coordinate',
     description:
-      'Split one high-level goal into non-blocking tasks and start one durable background thread per task, each bound to its own git branch. Threads keep running after this turn ends. Use for work that can proceed in parallel; use a single task when the steps must be sequential.',
+      'Split one high-level goal into non-blocking tasks and start one durable background thread per task, each bound to its own git branch. Threads keep running after this turn ends. Use for work that can proceed in parallel; use a single task when the steps must be sequential.\n\nALWAYS pass `tasks` yourself: you are the coordinator, so deciding the split is your judgement, not a text-parsing job. If you omit `tasks`, the goal is split by its bullet markers as a fallback and the result says so — and because that split is a guess, it is then proposed instead of started (see `planOnly`).',
     parameters: {
       type: 'object',
       properties: {
-        goal: { type: 'string', description: 'The goal to decompose. Use a bulleted list to control the split; separate lines become separate tasks.' },
+        goal: { type: 'string', description: 'The goal being decomposed, in the user\'s words. Recorded with the plan and shown to every thread.' },
+        tasks: {
+          type: 'array',
+          description: 'Your decomposition. Preferred over the fallback split. One thread starts per entry; order is preserved.',
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string', description: 'Short imperative title, used for the branch name.' },
+              objective: { type: 'string', description: 'Complete, self-contained instruction for that thread — it does not see this conversation.' },
+              scopeHint: { type: 'string', description: 'Optional path when the task is isolated by scope instead of a branch.' },
+            },
+            required: ['title', 'objective'],
+            additionalProperties: false,
+          },
+        },
+        planOnly: {
+          type: 'boolean',
+          description: 'Propose the threads instead of starting them. Defaults to true when `tasks` is omitted, because a bullet-split is a guess that otherwise costs one branch, worktree and session per line.',
+        },
         rootDir: { type: 'string', description: 'Project root. Defaults to the current workspace.' },
         limit: { type: 'number', description: 'Maximum threads to start in this call.' },
         scopeOnly: { type: 'boolean', description: 'Isolate by scope only, without creating git branches.' },
@@ -111,6 +129,7 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
         const limit = readInt(args, 'limit');
         const scopeOnly = readBool(args, 'scopeOnly');
         const branchNamespace = readString(args, 'branchNamespace');
+        const planOnly = readBool(args, 'planOnly');
         const result = await engine.coordinate(
           source.parentOf(exec),
           goal,
@@ -118,6 +137,8 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
             ...(limit === undefined ? {} : { limit }),
             ...(scopeOnly === undefined ? {} : { scopeOnly }),
             ...(branchNamespace === undefined ? {} : { branchNamespace }),
+            ...(planOnly === undefined ? {} : { planOnly }),
+            tasks: readArray(args, 'tasks'),
           },
           exec.signal,
         );
@@ -125,6 +146,9 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
           ok: true,
           projectId: result.projectId,
           planned: result.planned,
+          planOnly: result.planOnly,
+          planOrigin: result.planOrigin,
+          ...(result.planNote === undefined ? {} : { planNote: result.planNote }),
           started: result.started.map((thread) => ({
             threadId: thread.threadId,
             title: thread.title,
@@ -133,6 +157,12 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
             childSessionId: thread.childSessionId,
           })),
           skipped: result.skipped.map((entry) => ({ title: entry.task.title, reason: entry.reason })),
+          ...(result.planOnly
+            ? {
+                suggested: result.suggested,
+                next: 'Nothing was started. Show the user these titles, then start them with project_thread_manage action "start" (optionally with indices) once they agree.',
+              }
+            : {}),
           quota: result.quota,
         };
       } catch (error) {
@@ -222,7 +252,7 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
   const manage: HostToolDefinition = {
     name: 'project_thread_manage',
     description:
-      'Inspect or intervene in one background thread. `respond` answers a thread that is waiting for a human decision and restarts it; `steer` adds mid-course guidance to a live thread; `retry` resumes a stopped thread on its existing branch; `deliver` commits, pushes, and opens a pull request; `heal` polls CI and review comments and fixes them.',
+      'Inspect or intervene in one background thread. `respond` answers a thread that is waiting for a human decision and restarts it; `steer` adds mid-course guidance to a live thread; `retry` resumes a stopped thread on its existing branch; `deliver` commits, pushes, and opens a pull request; `heal` polls CI and review comments and fixes them. `start` launches threads from the proposed plan (all of them, or the 1-based `indices` given); `drop` discards that plan.',
     parameters: {
       type: 'object',
       properties: {
@@ -230,10 +260,15 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
         threadId: { type: 'string', description: 'Target thread id. Omit to list every thread.' },
         action: {
           type: 'string',
-          enum: ['list', 'inspect', 'steer', 'respond', 'retry', 'interrupt', 'close', 'deliver', 'heal'],
+          enum: ['list', 'inspect', 'steer', 'respond', 'retry', 'interrupt', 'close', 'deliver', 'heal', 'start', 'drop'],
           description: 'What to do. Defaults to list.',
         },
         message: { type: 'string', description: 'The message for steer/respond, or the PR body/title text for deliver.' },
+        indices: {
+          type: 'array',
+          description: 'For action "start": 1-based positions from the proposed plan. Omit to start all of them.',
+          items: { type: 'number' },
+        },
       },
       additionalProperties: false,
     },
@@ -247,11 +282,43 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
 
         if (action === 'list') {
           const threads = await engine.listThreads();
-          return { ok: true, threads: threads.map((thread) => ({ ...thread, summary: describeThread(thread) })) };
+          const pending = await engine.pendingPlan();
+          return {
+            ok: true,
+            threads: threads.map((thread) => ({ ...thread, summary: describeThread(thread) })),
+            suggested: pending.plan?.tasks ?? [],
+            suggestedExpired: pending.expired,
+          };
         }
         if (action === 'heal') {
           const sweep = await engine.healSweep(source.parentOf(exec), exec.signal);
           return { ok: true, ...sweep };
+        }
+        if (action === 'start') {
+          const indices = readArray(args, 'indices')
+            .map((value) => (typeof value === 'number' ? value : Number.parseInt(String(value), 10)))
+            .filter((value) => Number.isInteger(value));
+          const result = await engine.startSuggested(
+            source.parentOf(exec),
+            indices.length === 0 ? {} : { indices },
+            exec.signal,
+          );
+          return {
+            ok: true,
+            started: result.started.map((thread) => ({
+              threadId: thread.threadId,
+              title: thread.title,
+              status: thread.status,
+              branch: thread.branch,
+            })),
+            skipped: result.skipped.map((entry) => ({ title: entry.task.title, reason: entry.reason })),
+            remaining: result.remaining,
+            quota: result.quota,
+          };
+        }
+        if (action === 'drop') {
+          const dropped = await engine.discardSuggested();
+          return { ok: true, discarded: dropped.discarded };
         }
         if (threadId === undefined) {
           return { ok: false, code: 'INVALID_INPUT', message: `action "${action}" requires threadId` };
@@ -275,7 +342,7 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
   const overview: HostToolDefinition = {
     name: 'project_overview',
     description:
-      'Return the project overview: completed threads, pull requests awaiting review, threads waiting for a human decision, threads running or self-healing, and how many of the daily thread quota are used.',
+      'Return the project overview: completed threads, pull requests awaiting review, threads waiting for a human decision, threads running or self-healing, and how many of the daily thread quota are used. Includes any decomposition that was proposed but not started.',
     parameters: {
       type: 'object',
       properties: {

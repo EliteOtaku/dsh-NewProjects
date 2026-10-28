@@ -44,7 +44,7 @@ import {
   upsertMemory,
 } from './memory.js';
 import { buildOverview } from './overview.js';
-import { branchNameFor, planTasks } from './planner.js';
+import { branchNameFor, normaliseTasks, planTasks, PLAN_TTL_MS } from './planner.js';
 import { renderFeedbackAnswer, renderProjectCharter, renderThreadTask } from './prompt.js';
 import { normaliseQuotaMax, quotaState, quotaWarning, releaseQuota, reserveQuota, rolloverQuota } from './quota.js';
 import { QuotaLedger, defaultQuotaLedgerPath, type QuotaLedgerState } from './quotaLedger.js';
@@ -53,12 +53,15 @@ import type { Clock, IdFactory } from './util.js';
 import type {
   CoordinateResult,
   OverviewBucket,
+  PlanOrigin,
   PlannedTask,
   ProjectManifest,
   ProjectMemoryEntry,
   ProjectOverview,
+  ProjectPlan,
   ProjectReviewSnapshot,
   ProjectThreadDescriptor,
+  SuggestStartResult,
 } from '../types.js';
 import type { ThreadHandle, ThreadOutcome, ThreadRuntime } from './threads.js';
 import {
@@ -78,6 +81,9 @@ import {
 export const DEFAULT_CI_POLL_INTERVAL_MS = 60_000;
 /** Lower bound so a misconfigured value cannot hammer GitHub. */
 export const MIN_CI_POLL_INTERVAL_MS = 15_000;
+
+/** Re-exported so callers configuring a watcher can match the plan shelf life. */
+export { PLAN_TTL_MS };
 
 /** Engine dependencies. */
 export interface EngineDeps {
@@ -119,6 +125,37 @@ export interface CoordinateOptions {
   memoryKeys?: string[];
   /** Skip the daily quota check (used by tests and explicit user overrides). */
   ignoreQuota?: boolean;
+  /**
+   * The caller's own decomposition.
+   *
+   * When present it is used instead of the deterministic planner: the coordinating model
+   * deciding what becomes a thread is the feature, and re-splitting a decided plan by regex
+   * is strictly worse. Validated by {@link normaliseTasks}.
+   */
+  tasks?: unknown;
+  /**
+   * Propose the threads instead of starting them.
+   *
+   * Defaults to `true` when the tasks came from the fallback planner: that split is a guess,
+   * and each guessed line costs one worktree, one branch, one child session and one quota
+   * unit. Pass `false` to start a guessed plan anyway.
+   */
+  planOnly?: boolean;
+  /** Title used when the fallback planner is given a single unmarked goal. */
+  planTitle?: string;
+}
+
+/** Options accepted by {@link ProjectEngine.startSuggested}. */
+export interface SuggestStartOptions extends Omit<CoordinateOptions, 'tasks' | 'planOnly' | 'planTitle'> {
+  /** 1-based positions within the pending plan; absent means every task. */
+  indices?: number[];
+}
+
+/** The pending decomposition, plus whether one was dropped for age. */
+export interface PendingPlan {
+  plan?: ProjectPlan;
+  /** True when a plan existed but exceeded {@link PLAN_TTL_MS}. */
+  expired: boolean;
 }
 
 /** Result of one self-healing sweep. */
@@ -423,8 +460,34 @@ export class ProjectEngine {
     signal: AbortSignal = AbortSignal.timeout(120_000),
   ): Promise<CoordinateResult> {
     const opening = await this.requireManifest();
-    const planned = planTasks(goal);
+    const plan = this.resolvePlan(goal, options);
+    const planned = plan.tasks;
     if (planned.length === 0) throw new ProjectError('INVALID_INPUT', 'goal produced no tasks');
+
+    // A guessed split is proposed; a split the caller stated is a decision and starts.
+    const planOnly = options.planOnly ?? plan.origin === 'fallback';
+    const planNote = plan.note;
+
+    if (planOnly) {
+      const now = this.clock.now();
+      await this.store.update((draft) => {
+        draft.plan = { plannedAt: now, origin: plan.origin, ...(planNote === undefined ? {} : { note: planNote }), tasks: planned };
+        return { manifest: draft, result: undefined };
+      });
+      const finalManifest = await this.requireManifest();
+      const global = await this.ledger.snapshot(finalManifest.projectId, this.clock.now());
+      return {
+        projectId: finalManifest.projectId,
+        planned,
+        started: [],
+        skipped: [],
+        quota: { ...quotaState(finalManifest, this.clock.now()), global: { created: global.created, max: global.max } },
+        planOnly: true,
+        planOrigin: plan.origin,
+        ...(planNote === undefined ? {} : { planNote }),
+        suggested: planned,
+      };
+    }
 
     const limit = Math.max(1, Math.min(options.limit ?? planned.length, planned.length));
     const tasks = planned.slice(0, limit);
@@ -502,7 +565,189 @@ export class ProjectEngine {
       started,
       skipped,
       quota: { ...quotaState(finalManifest, this.clock.now()), global: { created: global.created, max: global.max } },
+      planOnly: false,
+      planOrigin: plan.origin,
+      ...(planNote === undefined ? {} : { planNote }),
+      suggested: [],
     };
+  }
+
+  /**
+   * Decide where a decomposition comes from.
+   *
+   * Order matters: the caller's own plan wins, because it is a decision. Only when the
+   * caller supplied nothing usable does the deterministic planner guess — and the guess is
+   * labelled as such, loudly, because a silent downgrade and a silently stale index are the
+   * same class of bug: the user cannot tell that the confident output is a guess.
+   */
+  private resolvePlan(
+    goal: string,
+    options: CoordinateOptions,
+  ): { tasks: PlannedTask[]; origin: PlanOrigin; note?: string } {
+    const stated = normaliseTasks(options.tasks);
+    if (stated.length > 0) return { tasks: stated, origin: 'model' };
+
+    const guessed = planTasks(goal.trim(), options.planTitle);
+    if (guessed.length === 0) return { tasks: [], origin: 'fallback' };
+
+    // Explain the downgrade in the caller's own units (how many items, how they were cut)
+    // rather than naming the module that did it.
+    const note =
+      `no task list was supplied, so the goal was split by its bullet markers (${guessed.length} ` +
+      `${guessed.length === 1 ? 'task' : 'tasks'}). This is a deterministic guess, not a model decision — ` +
+      `check the titles before accepting them.`;
+    return { tasks: guessed, origin: 'fallback', note };
+  }
+
+  /**
+   * Read the pending decomposition without touching the record.
+   *
+   * Expiry is reported, not enforced, here: reads (the overview panel, `/project threads`)
+   * must not become writers, or every render after the deadline would bump the revision and
+   * race whatever else is writing. The plan is actually dropped by the next mutating call —
+   * {@link startSuggested} or {@link discardSuggested}.
+   */
+  async pendingPlan(nowMs: number = this.clock.now()): Promise<PendingPlan> {
+    const manifest = await this.requireManifest();
+    const plan = manifest.plan;
+    if (plan === undefined) return { expired: false };
+    if (nowMs - plan.plannedAt > PLAN_TTL_MS) return { expired: true };
+    return { plan, expired: false };
+  }
+
+  /**
+   * Start tasks from the pending plan.
+   *
+   * Starting a subset is the normal case — that is what a suggestion list is for. Ordinals
+   * come from the position within the plan *at the moment of starting*, so the branch name of
+   * a task only shifts if an earlier task was started and removed first; the alternative
+   * (freezing an ordinal into `PlannedTask`) would put bookkeeping into a type that the model
+   * also authors.
+   */
+  async startSuggested(
+    parent: object,
+    options: SuggestStartOptions = {},
+    signal: AbortSignal = AbortSignal.timeout(120_000),
+  ): Promise<SuggestStartResult> {
+    const manifest = await this.requireManifest();
+    const plan = manifest.plan;
+    if (plan === undefined) {
+      throw new ProjectError('INVALID_INPUT', 'no suggested threads are waiting; run `coordinate` to propose some');
+    }
+    const now = this.clock.now();
+    if (now - plan.plannedAt > PLAN_TTL_MS) {
+      await this.clearPlan();
+      throw new ProjectError(
+        'INVALID_INPUT',
+        'the suggested plan is more than a day old and has been dropped; re-run `coordinate` to propose it again',
+      );
+    }
+
+    const entries = plan.tasks.map((task, ordinal) => ({ task, ordinal }));
+    let selected = entries;
+    if (options.indices !== undefined && options.indices.length > 0) {
+      const wanted = new Set<number>();
+      for (const index of options.indices) {
+        if (!Number.isInteger(index) || index < 1 || index > entries.length) {
+          throw new ProjectError(
+            'INVALID_INPUT',
+            `suggested thread ${index} does not exist; the plan has ${entries.length} (1-${entries.length})`,
+          );
+        }
+        wanted.add(index - 1);
+      }
+      selected = entries.filter((entry) => wanted.has(entry.ordinal));
+    }
+    const limit = Math.max(1, Math.min(options.limit ?? selected.length, selected.length));
+    selected = selected.slice(0, limit);
+
+    let repo: RepoFacts = { isRepo: false, ghReady: false, ghProblem: 'not inspected' };
+    try {
+      repo = await inspectRepo(this.runner, this.rootDir);
+    } catch (error) {
+      repo = { isRepo: false, ghReady: false, ghProblem: describeError(error) };
+    }
+
+    if (!this.threads.available()) {
+      throw new ProjectError('SPAWN_FAILED', this.threads.unavailableReason?.() ?? 'no subagent runtime is available');
+    }
+
+    const reserved = options.ignoreQuota === true ? 0 : selected.length;
+    if (reserved > 0) {
+      await this.ledger.reserve(manifest.projectId, reserved, now);
+      try {
+        await this.store.update((draft) => {
+          rolloverQuota(draft, dayKey(now));
+          reserveQuota(draft, reserved, now);
+          return { manifest: draft, result: undefined };
+        });
+      } catch (error) {
+        await this.ledger.release(manifest.projectId, reserved, now);
+        throw error;
+      }
+    }
+
+    const started: ProjectThreadDescriptor[] = [];
+    const skipped: Array<{ task: PlannedTask; reason: string }> = [];
+    const consumed = new Set<number>();
+    for (const { task, ordinal } of selected) {
+      try {
+        const descriptor = await this.startThread({
+          parent,
+          task,
+          ordinal,
+          repo,
+          options: { ...options, planOnly: false },
+          signal,
+        });
+        started.push(descriptor);
+        consumed.add(ordinal);
+      } catch (error) {
+        skipped.push({ task, reason: describeError(error) });
+      }
+    }
+
+    const unmatched = selected.length - started.length;
+    if (reserved > 0 && unmatched > 0) {
+      await this.store.update((draft) => {
+        releaseQuota(draft, unmatched, now);
+        return { manifest: draft, result: undefined };
+      });
+      await this.ledger.release(manifest.projectId, unmatched, now);
+    }
+
+    // Failed tasks stay in the plan so they can be retried; started ones leave it.
+    const remaining = plan.tasks.filter((_task, ordinal) => !consumed.has(ordinal));
+    await this.store.update((draft) => {
+      if (remaining.length === 0) delete draft.plan;
+      else if (draft.plan !== undefined) draft.plan.tasks = remaining;
+      return { manifest: draft, result: undefined };
+    });
+
+    const finalManifest = await this.requireManifest();
+    const global = await this.ledger.snapshot(finalManifest.projectId, this.clock.now());
+    return {
+      started,
+      skipped,
+      remaining,
+      quota: { ...quotaState(finalManifest, this.clock.now()), global: { created: global.created, max: global.max } },
+    };
+  }
+
+  /** Drop the pending decomposition; returns how many tasks were discarded. */
+  async discardSuggested(): Promise<{ discarded: number }> {
+    const manifest = await this.requireManifest();
+    const plan = manifest.plan;
+    if (plan === undefined) return { discarded: 0 };
+    await this.clearPlan();
+    return { discarded: plan.tasks.length };
+  }
+
+  private async clearPlan(): Promise<void> {
+    await this.store.update((draft) => {
+      delete draft.plan;
+      return { manifest: draft, result: undefined };
+    });
   }
 
   /** Start one thread: isolate, launch, persist. */
