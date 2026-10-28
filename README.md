@@ -5,7 +5,7 @@ Claude Code **Projects (Beta)** 式的动态协作中枢，作为 DeepSeek Harne
 把一个高层目标拆成互不阻塞的子任务，每个子任务交给一个**独立 git worktree 上的后台线程**去干；
 线程跨轮次持续运行、跨线程共享同一份项目决策记忆、CI 失败或 PR 收到审查意见时自动唤醒修复。
 
-> **复刻的是什么**：**Code Projects 这个功能本身**（概念、行为、状态语义、交互契约），规格来源是 [code.claude.com/docs/en/claude-projects](https://code.claude.com/docs/en/claude-projects)。
+> **复刻的是什么**：**Code Projects 这个功能本身**（概念、行为、状态语义、交互契约），规格来源是 [code.claude.com/docs/en/claude-projects](https://code.claude.com/docs/en/claude-projects)（[`.md` 版](https://code.claude.com/docs/en/claude-projects.md)）。
 > **不是**重建云产品：不做云端沙箱、GitHub App、账号 connectors、cloud environment、跨设备续跑。
 > 云端 sandbox 换成本地 git worktree、云端持久化会话换成 DSH 子会话、GitHub App 换成 `gh` CLI —— 这些差异是**载体差异，不是功能缺口**。
 > 判断「缺不缺」看的是**用户能不能做到这件事**，不是云端用哪个载体做的。详见 [`docs/GAPS.md`](docs/GAPS.md) 的「复刻的是什么，不是什么」。

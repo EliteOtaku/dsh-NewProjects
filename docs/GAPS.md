@@ -18,6 +18,10 @@
 
 同理，`support.claude.com` 的 RAG 专文描述的是**另一个产品**（见下节），不构成本项目的规格来源。
 
+> **官方规格原文（动手前先读）**：<https://code.claude.com/docs/en/claude-projects>　·　[`.md` 版](https://code.claude.com/docs/en/claude-projects.md)
+>
+> 本文件所有「官方说了什么」都是转述。有疑问时以原文为准 —— 第一轮就是因为只读转述、没读原文，把知识层抄成了另一个产品。
+
 ## 怎么用
 
 - **证据行号会漂移**。改动相关代码后，回来更新行号；行号失效时按符号名（函数/常量名）搜索，符号名是稳定的契约。
@@ -30,7 +34,7 @@
 | 代号 | 来源 | 说明 |
 | --- | --- | --- |
 | `SPEC` | `PROJECT_BETA_SPEC.md` | 本项目内部规格，五模块定义。**功能语义以 `OFFICIAL` 为准**，本文件写于官方文档细化之前。 |
-| `OFFICIAL` | https://code.claude.com/docs/en/claude-projects | 官方 Code Projects 文档（2026-10 拉取）。**这是本项目的唯一功能规格来源。** |
+| `OFFICIAL` | <https://code.claude.com/docs/en/claude-projects>（[`.md` 版](https://code.claude.com/docs/en/claude-projects.md)） | 官方 Code Projects 文档，2026-10 拉取。**这是本项目的唯一功能规格来源。** 判断「官方有没有」时直接读原文，本文件的转述可能错。 |
 | `RAG` | https://support.claude.com/en/articles/11473015-…-rag-for-projects | ❌ **不是本项目的规格来源，见下。** 仅作历史记录保留。 |
 
 ### `RAG` 那篇为什么被除名（2026-10-28 第一轮复核确认）

@@ -2,6 +2,28 @@
 
 这份文档是**给 Anthropic 的 Claude 复核用的**，是我们的第二轮请求。
 
+> ### 请先读原文档，再读我们的转述
+>
+> **官方规格原文：<https://code.claude.com/docs/en/claude-projects>**
+>
+> 本文里所有「官方说了什么」都是转述，可能转述错。判断某项能力官方有没有、状态语义对不对时，**请以原文档为准**。下文每个判断都标了它依据的是原文哪一节，方便你对着看。
+>
+> 建议的对照顺序：
+>
+> | 本文位置 | 对应原文小节 |
+> | --- | --- |
+> | 判断 G（六分组、状态轴） | **See what needs you in Overview**；以及 **Work in a project** 里的卡片动作 |
+> | 判断 H、I（知识机制） | **Give a project standing context** |
+> | 判断 J（拆解、提议、并发度） | **Work in a project**；**Project settings reference** |
+> | 判断 K（线程内阻塞等人） | **Unblock a thread waiting on approval**；**Troubleshooting** |
+> | 判断 L（自愈） | **Work in a project** 的 PR 与 auto-fix 段 |
+> | 判断 M（Scheduled tasks） | **Work in a project**；**Related resources** 指向 `routines.md` |
+> | 判断 G 里「哪些配置不加载」 | **How projects relate to other Claude Code features** |
+>
+> 关于**为什么知识层曾经抄错**：原文 **How projects relate to other Claude Code features** 一节有一句话点明了两个产品的关系（旧版 "groups conversations and reference files **without threads or a coordinator**"）。而我们最初用的 `support.claude.com/en/articles/11473015` RAG 专文，讲的正是那个没有 threads、没有 coordinator 的旧版。**这两篇讲的是不同的产品，这是第一轮最关键的纠正。**
+>
+> 如果你需要抓 `.md` 版本（比网页版更易引用与 diff）：<https://code.claude.com/docs/en/claude-projects.md>
+
 ## 0. 先澄清一件事：我们复刻的是什么
 
 第一轮我们没把这一点写在显眼位置，导致复核者从「Claude Code 产品经理」的角度评判，而我们的目标是工程复刻。这次先说清楚。
@@ -10,7 +32,7 @@
 | --- | --- |
 | **复刻对象** | **Claude Code 新版 Projects (Beta) 这个功能本身** —— 它的概念、行为、状态语义、交互契约。 |
 | **交付形态** | **DeepSeek Harness (DSH) 的本地插件**。跑在用户真机、真仓库，构建在 DSH 宿主的 `subagents` / `worktrees` / `tools` / `commands` / `sessionProjections` 之上。 |
-| **规格来源** | 只有 `code.claude.com/docs/en/claude-projects` 一份。 |
+| **规格来源** | 只有 [code.claude.com/docs/en/claude-projects](https://code.claude.com/docs/en/claude-projects) 一份。请直接读原文，不要只读本文转述。 |
 | **不是** | 不是重建 Anthropic 的云产品。不做云端沙箱、GitHub App、账号 connectors、cloud environment、跨设备续跑。 |
 | **载体替换** | 云端 sandbox → 本地 git worktree；云端持久化会话 → DSH 子会话 + 事件溯源 Session Log；GitHub App → `gh` CLI。 |
 

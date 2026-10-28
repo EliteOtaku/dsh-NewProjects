@@ -37,7 +37,7 @@ npm run build      # 只编译到 lib/
 
 ## 复刻边界（判断「缺不缺」之前必读）
 
-本项目**复刻的是 Claude Code 新版 Projects (Beta) 这个功能本身**（概念、行为、状态语义、交互契约），交付形态是 **DSH 本地插件**。规格来源只有 `code.claude.com/docs/en/claude-projects` 一份。
+本项目**复刻的是 Claude Code 新版 Projects (Beta) 这个功能本身**（概念、行为、状态语义、交互契约），交付形态是 **DSH 本地插件**。规格来源只有 <https://code.claude.com/docs/en/claude-projects> 一份（[`.md` 版](https://code.claude.com/docs/en/claude-projects.md)）。
 
 **不是**重建 Anthropic 的云产品。云端 sandbox、GitHub App、账号 connectors、cloud environment、跨设备续跑都不做。
 

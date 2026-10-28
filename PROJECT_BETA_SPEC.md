@@ -2,14 +2,16 @@
 
 > **实现状态与差距**：本文是**目标规范**，不是实现清单。逐项实现状态、未完成部分、已知缺陷与有意为之的边界，全部登记在 [`docs/GAPS.md`](docs/GAPS.md)，按批次推进。改动本文件前先读那份登记簿——那里的条目都带代码证据与验收标准。
 >
-> **功能语义以官方文档为准**：本文写于官方文档细化之前，与 https://code.claude.com/docs/en/claude-projects 冲突时以官方为准。具体做法见 `docs/GAPS.md` 的「依据来源」。
+> **功能语义以官方文档为准**：本文写于官方文档细化之前，与 <https://code.claude.com/docs/en/claude-projects> 冲突时以官方为准。具体做法见 `docs/GAPS.md` 的「依据来源」。
+>
+> 原文逐节对照见 `docs/REVIEW-REQUEST.md` 开头的对照表。
 
 ## 0. 复刻边界（先读这一段）
 
 | | 内容 |
 | --- | --- |
 | **复刻对象** | **Claude Code 新版 Projects (Beta) 这个功能本身** —— 它的概念、行为、状态语义与交互契约。 |
-| **规格来源** | `code.claude.com/docs/en/claude-projects`（唯一）。`support.claude.com` 的 RAG 专文讲的是**另一个产品**（claude.ai chat 的旧版 Projects，无 threads 无 coordinator），**不构成本项目规格**。 |
+| **规格来源** | <https://code.claude.com/docs/en/claude-projects>（[`.md` 版](https://code.claude.com/docs/en/claude-projects.md)，唯一）。`support.claude.com` 的 RAG 专文讲的是**另一个产品**（claude.ai chat 的旧版 Projects，无 threads 无 coordinator），**不构成本项目规格**。 |
 | **交付形态** | **DSH 本地插件**。跑在用户真机、真仓库，构建在 DSH 宿主的 `subagents` / `worktrees` / `tools` / `commands` 之上。 |
 | **不是** | 不是重建 Anthropic 的云产品 —— 不做云端沙箱、GitHub App、账号 connectors、cloud environment、跨设备续跑。 |
 | **载体替换** | 云端 sandbox → 本地 git worktree；云端持久化会话 → DSH 子会话 + 事件溯源 Session Log；GitHub App → `gh` CLI。这些差异记在 `docs/GAPS.md` 的 `ARCH` 段，**不是缺陷、不排期**。 |
