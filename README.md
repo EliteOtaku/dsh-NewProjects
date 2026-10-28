@@ -22,11 +22,11 @@ Claude Code **Projects (Beta)** 式的动态协作中枢，作为 DeepSeek Harne
 
 | 能力 | 实现 |
 | --- | --- |
-| **Coordinator + 并行 Threads** | `project_coordinate` 工具把目标按 bullet 确定性拆解（不调模型），每个任务一个 `subagents` 子会话 + 独立 `git branch` + 私有 worktree。每日配额默认 200，全有或全无地预留，启动失败自动退还。 |
+| **Coordinator + 并行 Threads** | `project_coordinate` 工具把目标按 bullet 确定性拆解（不调模型），每个任务一个 `subagents` 子会话 + 独立 `git branch` + 私有 worktree。每日配额默认 200，全有或全无地预留，启动失败自动退还。（**配额目前按项目独立计数，未做到跨项目合计**——见 [`docs/GAPS.md`](docs/GAPS.md) 的 `GAP-01`。） |
 | **跨线程共享记忆** | `project_memory_sync` 写入决策后广播到所有**正在运行**的线程；新线程启动前缀自动带上全量记忆。记忆渲染成字节稳定的 system prompt 段，命中 provider 端 prefix cache。 |
 | **项目知识（RAG）** | 绑定文件或目录后自动切分、建索引（BM25）。小项目把知识**全文**放进 system prompt；超过预算自动切换到**检索模式**，只留工具说明，由 `project_knowledge_search` 按需取回。判定看当前体积，不存 flag。 |
 | **自动执行与 CI/PR 自愈** | 线程自己跑测试、commit、push、开 PR。`/project heal` 与后台巡检读 `gh pr checks` / review comments，判定 `heal` / `wait` / `escalate` / `transition`，最多自动修 3 轮。 |
-| **Overview 面板** | `project_overview` 工具与 `/project` 命令输出五类状态桶（完成 / 待审 PR / 等反馈 / 运行中 / 失败）+ 当日配额 + 知识模式；Host-only 会话投影保持面板随会话事件更新。 |
+| **Overview 面板** | `project_overview` 工具与 `/project` 命令输出五类状态桶（完成 / 待审 PR / 等反馈 / 运行中 / 失败）+ 当日配额 + 知识模式。**尚未接入会话投影**，面板不会随会话事件自动刷新——见 [`docs/GAPS.md`](docs/GAPS.md) 的 `GAP-03`。 |
 
 
 ## 安装
@@ -131,6 +131,12 @@ npm test           # 只跑测试
 - **检索工具始终注册，不按模式增删**：项目随时可能跨过预算线，工具列表来回变会让 provider 的 prompt 缓存失效，且没有任何收益。
 - **索引是派生状态**：`.dsh-project/KNOWLEDGE_INDEX.json` 已 gitignore，随时可从绑定的文件重建；坏索引被当作「没有索引」而不是致命错误。
 - **`subprocess` 是唯一硬依赖**：其余能力（tools / commands / systemPrompt / timer + subagents）全部走 `ctx.inject` 延迟注册。`ctx.get` 只在激活那一刻采样注册表，晚挂载的服务会永久错过。
+
+## 已知未实现部分
+
+相对官方 Claude Code Projects 还有若干未实现的能力（会话投影、六分组 Overview、goal 持久化、Library、Pause/Archive、全局配额等）与若干有意为之的边界（重启后后台自愈停摆、云端 sandbox 差异等）。
+
+完整清单、代码证据、依据来源与验收标准见 **[docs/GAPS.md](./docs/GAPS.md)**，按批次推进。那份文档是判断「某个能力到底有没有」的唯一依据——不要凭本文件的段落推断。
 
 ## 许可证
 
