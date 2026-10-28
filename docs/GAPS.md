@@ -69,8 +69,8 @@
 
 | 优先级 | 含义 | 条目 |
 | --- | --- | --- |
-| **P0** | 违背规格或官方原文 | `GAP-01` |
-| **P1** | 会静默产出错误结果 | `GAP-22` `GAP-23` `GAP-24` |
+| **P0** | 违背规格或官方原文 | ~~`GAP-01`~~ ✅ 已关闭 2026-10-27 |
+| **P1** | 会静默产出错误结果 | `GAP-22`（减法已做，`GAP-22a` 未做）`GAP-23` `GAP-24` |
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | `GAP-03` `GAP-04` `GAP-05` |
 | **P3** | 官方有、我们无，独立功能 | `GAP-06` `GAP-09` ~ `GAP-13` `GAP-26` `GAP-29` |
 | **P4** | 项目管理类，缺了不能「管起来」 | `GAP-14` `GAP-15` `GAP-17` `GAP-18` `GAP-25` `GAP-28` |
@@ -82,26 +82,41 @@
 
 ## P0 — 违背原文（1 项）
 
-### GAP-01 线程配额是项目级，不是用户全局级
+### GAP-01 线程配额是项目级，不是用户全局级 — ✅ 已关闭（2026-10-27，commit `9c7ef10`）
 
-- **依据**：`SPEC` 模块 A 原文「默认限制单个用户每天**在所有项目中**最多新建 200 个线程」；`OFFICIAL`「The enforced limit is 200 new threads per day **across your projects**」。两处都说跨项目。
-- **现状**：计数器落在每份 manifest 里 —— `dailyThreadsCreated`（`src/types.ts:141`）与 `quotaDay`（`src/types.ts:148`），每个项目各记各的。三个项目各开 200 个，当天就是 600 个。
-- **为什么难**：manifest 是每项目一份，谁都不知道别的项目在哪，读文件汇总不可行。
-- **做法**：新增用户级账本，例如 `~/.dsh/dsh-newprojects/quota.json`，字段 `{ day, created, byProject: Record<projectId, number> }`。`reserveQuota` 先查账本再记项目自身计数（项目计数保留，用于 overview 展示）。账本读写要有和 `ManifestStore` 同级的串行队列 + 原子写 + CAS，否则并发拉起线程时会丢计数。
-- **要小心的**：账本路径必须能通过配置改（测试与多 profile 场景需要隔离），不要在模块内硬编码 `homedir()`。
-- **验收标准**：
-  1. 两个不同 rootDir 的项目，各自 `coordinate` 到总和超 200 时，后一个被拒且**不消耗**任何配额；
-  2. 账本跨进程可见（起两个 engine 实例读写同一账本，不丢计数）；
-  3. `quotaDay` 翻页时账本与项目计数一起重置；
-  4. 单测覆盖「超限不改账」与「翻页重置」。
+- **依据**：`SPEC` 模块 A 原文「默认限制单个用户每天**在所有项目中**最多新建 200 个线程」；`OFFICIAL` L414「The enforced limit is 200 new threads per day **across your projects**」（第二轮逐字复核通过）。
+- **两层语义已分清**（同一句的后半截是关键）：「a limit you ask for is a **preference rather than a cap**」—— 用户级账本是**硬限**，项目级 `dailyThreadQuotaMax` 是**偏好**。两者都保留，面板分别显示。
+- **曾经的现状**：计数器落在每份 manifest 里，每个项目各记各的。三个项目各开 200 个，当天就是 600 个。
+- **实现**：`src/core/quotaLedger.ts`，默认落在 `~/.dsh/dsh-newprojects/quota.json`，字段 `{ schema, day, created, byProject }`。
+  - 路径可经 `EngineDeps.quotaLedgerPath`、插件配置 `quotaLedgerPath`、环境变量 `DSH_PROJECT_QUOTA_LEDGER` 改写；模块里不把 `homedir()` 固定在调用方拿不到的地方。
+  - `coordinate` **先**预留全局、**后**预留项目；项目拒绝时退还全局，启动失败时两本都退。顺序是刻意的：被全局拒绝的批次不能在项目计数上留下凹痕。
+  - 写入取排他锁文件并**在锁内重读**，锁超过 10 秒视为进程崩溃遗留并打破。原计划写的是「和 `ManifestStore` 同级的串行队列」——**那不够**：这个文件按定义被机器上所有项目、所有 Host 进程共享，进程内队列只能序列化从来不是问题的那批写者。
+  - 坏账本／旧日账本按「今天空账本」读而不抛错：一个被截断的缓存文件不该让用户今天开不出线程。
+- **验收标准达成**：
+  1. ✅ 两个不同 rootDir 指向同一账本，第二个项目的计数接着第一个走（`test/engine.test.ts`「counts two projects against one user-wide ceiling」）；超限批次被拒且不消耗，逐字节比对文件（「refuses a batch the shared ceiling cannot cover, and spends nothing」）；
+  2. ✅ 两个 engine 实例读写同一账本，20 个并发预留不丢计数（`test/unit/quotaLedger.test.ts`）；
+  3. ✅ 翻页重置（「resets on the next calendar day」）；
+  4. ✅ 单测覆盖「超限不改账」「翻页重置」，另加「项目偏好拒绝时退还全局」与「启动失败退还全局」。
+- **面板**：`ProjectQuotaState.global` 新增，两个计数器各自到 80% 告警。只报项目数会让用户看不懂为什么被拒——一个项目停在 3/200 仍可能开不出线程。
 
 ---
 
-## P1 — 会静默出错（3 项）
+## P1 — 会静默出错（3 项；`GAP-22` 的减法已完成，正确性残留拆出 `GAP-22a`）
 
-### GAP-22 知识层应改为 paths-first（撤销 in-context / RAG 二分）
+### GAP-22 知识层应改为 paths-first（撤销 in-context / RAG 二分） — ⚠️ 部分完成（2026-10-27，commit `9c7ef10`）
 
 > **本条取代 `GAP-21`（阈值写死）、`GAP-02`（陈旧检测）、`GAP-16`（自动重建时机）三条。** 它是一个减法项：做完之后那三个问题不再存在，而不是被修好。
+
+**已完成**：第 1、5、6、7 条（减法那一半）。`grep -rn "DEFAULT_CONTEXT_BUDGET_CHARS\|knowledgeMode\|RAG_CAPACITY" src/` 为空。
+**未完成**：第 2 条（路径锚定项目根）已拆为 **`GAP-22a`**，仍是 P1；第 3 条（`tree` / `read`）与第 4 条（查询时按需重建）未做，降为 P3 能力增强。
+
+**第二轮复核对第 1 条的修正——渲染的是「索引」而不是「清单」。** `OFFICIAL` L291 逐字：「Notes Claude keeps about the project … **stored as files**. Every cloud thread reads **the index file `MEMORY.md`** when it starts and **opens the other files when it needs them**」。官方开局给的是**索引**，不是路径清单。所以 charter 里每份文档一行「路径 — 字符数」：字符数是让模型能**选**的那个信息——「读那份 2 KB 的决策记录」与「读那份 400 KB 的转录」是两个不同的决定，纯路径清单分不出来。这一句同时回答了 `REVIEW-REQUEST` §7 的第二个问题（paths-first 有没有 prompt 层引导）：**有，但引导被编码在读取协议里**（索引 eager / 正文 lazy），不是 charter 里加一句话——所以「自己加一句」那个偏离不存在。
+
+**另一条第二轮才拿到的硬数字**：`OFFICIAL` L292「Project instructions | Text sent to each new thread … **up to 16,000 characters**」。这是官方对常驻 prompt 文本唯一的明文预算。已实现为 `MAX_INSTRUCTIONS_CHARS` + `instructionsOverBudget()`，**报警不截断**（静默截断用户的 brief 是把一个静默失败换成另一个）。
+
+**收集上限改为与官方同形的条目数**：`OFFICIAL` L339「first **100 files** up to 200 MB, without any files over 30 MB」→ `MAX_KNOWLEDGE_FILES = 100` + `MAX_KNOWLEDGE_INDEX_CHARS`，`collectKnowledge` 新增 `maxFiles`，触到任一上限时 warning **指名是哪一个**。单文件仍 2 MB，比官方的 30 MB 严，注释写明这是我们的收紧（要把正文切块存进 JSON 索引）。
+
+**第 7 条（`inlineKnowledgeMaxChars` 默认 0）的处理**：整个注入路径删掉了，效果等于默认关闭，但**没有加这个配置旋钮**。正文不进 prompt 之后它只剩「小项目的 prefix cache 优化」一个用途；要加随时可加，别把它当成 paths-first 的一部分。
 
 - **依据**：`OFFICIAL` 全文 `RAG` / `retrieval` / `project knowledge` 各 **0 次**，知识是「挂在 `/mnt/project-files` 下的文件夹，线程用普通文件工具自己读」。详见 `## 依据来源`。
 - **现状**：
@@ -129,6 +144,22 @@
   4. 改一个已绑定文件后，`project_knowledge_search` 返回新内容（按需重建生效），`knowledgeState` 不写盘；
   5. `grep -rn "DEFAULT_CONTEXT_BUDGET_CHARS\|knowledgeMode\|RAG_CAPACITY" src/` 为空；
   6. `tree` / `read` 两个动作有单测，含路径越界（`../`）拒绝。
+
+### GAP-22a 知识路径没有锚定项目根，线程在 worktree 里解析不到 — ❌ 未做（P1，从 `GAP-22` 第 2 条拆出）
+
+- **为什么单独拆出来**：`GAP-22` 的其余未完成项（`tree` / `read`、按需重建）是**能力增强**，这一条是**正确性**。混在一条里会让它跟着那两项一起被降级。
+- **依据**：`OFFICIAL` L293 把两套路径并列写在同一行——「The **repositories every cloud thread clones**, the **folders and files it can read under `/mnt/project-files`**」。仓库是 clone，项目文件是**挂载**，而且挂载只有**一份共享的**，不是每线程一份副本。
+  → 第二轮复核据此裁定：判断 I 的「让线程去读项目根的绝对路径」**更贴近官方**，**不要**往每个 worktree 复制或软链。复制会引入每线程一份副本（磁盘 × 线程数）与同步问题，而官方模型里这两个问题不存在。
+- **现状（`9c7ef10` 没有改善这一点）**：charter 的索引渲染的是 `IndexedDocument.path`，即相对项目 root 的显示路径；而线程的 cwd 是它自己的 worktree（`.dsh-project/worktrees/<threadId>`），worktree 只含 baseCommit 里**已提交**的文件。于是：
+  1. 相对路径在线程里解析不到（它会相对自己的 worktree 去解）；
+  2. 根检出里**未提交**的知识文件，线程无论怎么解析都读不到。
+- **做法**：charter 里渲染能定位到项目根的形式——绝对路径，或「项目根 = `<绝对路径>`」+ 相对路径——并明确写一句「知识是项目级的，读项目根，不是读你的 worktree」。
+- **要小心的**：绝对路径会让 charter 字节随机器变，跨机器的 prefix cache 命中因此失效。两害相权取其轻：读不到文件是**错误**，缓存未命中只是**成本**。若要兼顾，可渲染一次「项目根 = <绝对路径>」再用相对路径列文档，这样变动的只有一行。
+- **验收标准**：
+  1. 线程在 worktree 里按 charter 给出的定位形式能读到根检出**已提交**的知识文件；
+  2. 未提交的知识文件有明确提示（而不是静默读不到）；
+  3. charter 二次渲染字节相同；
+  4. 单测覆盖「worktree cwd + charter 路径 → 命中项目根文件」。
 
 ### GAP-23 自愈计数应统计「连续失败」而不是生命周期总数
 
@@ -197,12 +228,28 @@
   2. `bucketOf` 改两处：`failed` 并入 `waiting_for_feedback`；新增 `landing` / `idle` / `resolved` 的 case；
   3. `BUCKET_ORDER` / `BUCKET_LABELS` 各增两项、删 `failed` 一项；`totals.failed` 改成**按 status 数**而不是按桶数（桶里已经混了 `needs_feedback`）。
   - 预期量：**二十行以内**。`stateVersion` 不需要升，落盘数据不需要迁移，测试只动数桶的那几条。
+- **互斥性已裁定（第二轮复核，`docs/REVIEW-RESPONSE-2.md` §问题一）**：✅ 互斥，不要改成多维标签。根据是「groups threads by **state**」——分组是 state 的投影，一个线程一个桶。
+  - 你们问的那个具体线程（「PR 开着、CI 绿、等 reviewer」）落 **`Ready for review`**。两条理由都在原文里：`Waiting on you` 的 "approval" 指**权限审批**而不是 PR approval（`OFFICIAL` L247-251 有专节）；而且它写的是 "need **your** reply or approval"，而 reviewer 不必是项目所有者。
+  - 让六条定义彼此排开的是 `Idle` 的 "finished and **aren't waiting on anything**"——一条排除子句就把它和三个「在等」的组隔开。
+- **`bucketOf` 必须写成带优先级的映射，不是一张平的映射表**：
+
+  ```
+  human-blocking（needs_feedback / failed / 等权限审批）
+    > PR 生命周期位置（landing > awaiting_review）
+    > 运行中（working）
+    > 终态（idle > resolved）
+  ```
+
+  **为什么人阻塞必须优先**：一个线程可以同时「PR 开着等 review」和「在线程内卡住等权限审批」，两条定义同真，官方表格没裁定。但 Overview 的定义裁定了——`OFFICIAL` L193「the **Overview** button … **shows a dot when a thread is waiting on you**」。若这种线程归进 `Ready for review`，点不亮；而官方明说「Telling Claude in the project conversation to go ahead **doesn't reach it**」，于是没人会去解锁它——线程永久卡死，面板显示一切正常。按平表写就会掉进这个坑。
+  - 更弱的一个碰撞：GitHub 上 PR 可被一人 approve 而仍等另一人，`approved` 与 `awaiting review` 同真。建议取 `Landing`，并在 `bucketOf` 注释里写明这是**我们的裁定**而非原文。
 - **要小心的**：`isActiveStatus`（`src/core/overview.ts`）当前是 `['queued','running','ci_fixing']`。`landing` 加进来后**不应**算作 active（球已经踢出去了），但**必须**仍在 `healSweep` 候选里以便发现合并完成。这两个判断现在写在不同地方，容易漏一个。
 - **验收标准**：
   1. 六个分组与官方命名一一对应（键名对应，中文文案自行决定）；
-  2. `failed` 不再单独成桶，"or that failed" 的合并语义有测试断言；
-  3. `Resolved` 的线程不再进入 `healSweep` 候选，且可被重新打开；
-  4. 旧的五桶断言全部更新，不允许留双重语义。
+  2. 一个线程恰好出现在一个桶里 —— 互斥性要有断言，不能只在实现里成立；
+  3. `failed` 不再单独成桶，"or that failed" 的合并语义有测试断言；
+  4. 同时命中「等权限审批」与「PR 等 review」的线程落在 `Waiting on you`，且 Overview 的「有你的事」信号为真；
+  5. `Resolved` 的线程不再进入 `healSweep` 候选，且可被重新打开；
+  6. 旧的五桶断言全部更新，不允许留双重语义。
 
 ### GAP-05 线程没有终态与归档
 
@@ -495,10 +542,16 @@
 - **判断：这不是债，是超额实现。** 只推 `busy`、不推 `idle`（省 token）那个取舍是对的。
 - **若要动，方向是删**（去掉实时广播，省一条代码路径和一类竞态），**不是补**。不要把它当缺口排期。
 
-### BOUND-3 `quotaWarning()` 是死代码
+### BOUND-3 `quotaWarning()` 是死代码 — ✅ 已解决（2026-10-27，随 `GAP-01`）
 
-- `src/index.ts` 的 `overview()` 内联写了 80% 判断，而导出的 `quotaWarning()` 无人调用（只有单测用到）。
-- **判断**：`GAP-01` 重写配额时一并处理 —— 要么让 overview 改用它，要么删掉。**不要**为了「消除未使用导出」单独改，会与配额改造冲突。
+`quotaWarning()` 新增 `label` 参数，`ProjectEngine.overview()` 改为调用它**两次**——一次给项目偏好、一次给用户全局账本。内联的 80% 判断已删除，两个计数器用同一把尺子，且各自说清是哪一本账。
+
+### BOUND-5 记忆仍整段渲进 charter，而官方记忆也是 paths-first
+
+- **一条取证错误**（第二轮复核，`docs/REVIEW-RESPONSE-2.md` §取证错误）：历来把「记忆放在 system prompt 固定槽位以命中缓存」当成已对上官方，引的是 `OFFICIAL` L22「**Set context once**: every new thread starts with the project's **instructions**」。引文逐字无误，**但它讲的是 instructions，不是 memory**。
+- **官方的 memory 是 paths-first**（L291）：「Notes Claude keeps about the project … **stored as files**. Every cloud thread reads the index file `MEMORY.md` when it starts and **opens the other files when it needs them**」。也就是说**官方对记忆和对知识用的是同一套机制**，而 `GAP-22` 只把知识改了，记忆还整段渲进 charter（`renderMemoryPrefix`）。
+- **为什么列为 BOUND 而不是 GAP**：⚠️ 这是判断而非依据——记忆是**决策**而不是**文档**，每条都短、每条都该被读到，lazy 读取反而会让线程漏掉约束；而 16,000 字符的预算对它绰绰有余。所以保留槽位是**我们的取舍**。
+- **要做的只有记账**：别再把它当「有据的基线」（`REVIEW-REQUEST` §1 那一行应改掉），并用 `MAX_INSTRUCTIONS_CHARS` 同一把尺子给记忆段也设一个报警阈值。若将来记忆长到会挤掉 instructions，再按官方形状改成文件 + 索引。
 
 ### BOUND-4 单进程内一个 root 恰好一个 turn-end 订阅
 
@@ -518,7 +571,8 @@
 | `GAP-16` | **撤销** | 「知识自动重建的时机」。并入 `GAP-22` 第 4 条（查询时按需重建） |
 | `GAP-21` | **撤销** | 知识阈值写死。阈值本身随模式二分一起消失。并入 `GAP-22` |
 
-**新增编号**（本轮加入）：`GAP-22` ~ `GAP-29`。
+**新增编号**（第一轮加入）：`GAP-22` ~ `GAP-29`。
+**新增编号**（第二轮加入）：`GAP-22a`（从 `GAP-22` 第 2 条拆出，见该条）、`BOUND-5`（记忆仍在 charter 槽位里，取舍而非缺陷）。
 
 ## 已修正的错误判断
 
@@ -540,6 +594,13 @@
 | 2026-10-28 | 「记忆广播给运行中线程是过度实现，可能要删」 | **反问句的答案是：不删**。官方只影响新线程，我们做得比官方多；只推 `busy` 的取舍正确（→ `BOUND-2`）。 | 第一轮复核 §3 §5.3 |
 | 2026-10-28 | 「拆解不调模型是可以接受的取舍」 | **是技术债，且它不在原六批计划里**。排序规则（「会不会安静地出错」）把它过滤掉了，因为拆解烂是**用户一眼看得见**的。但拆解质量是所有后续批次的**输入**（→ `GAP-26`）。 | 第一轮复核 §4 |
 | 2026-10-28 | 「审批要挂在线程上、阻塞线程」 | **在 DSH 上做不到**。`userQuestions.ask` 对 owned agent 抛 `DELEGATED_CALLER`；`approval.request` 只服务单次工具调用且要求 open turn。必须改译为「根会话问人、线程执行」（→ `GAP-18`）。 | 本轮 Host 契约核对 |
+| 2026-10-27 | 「知识预算应由上下文窗口派生」（第一轮回执给的建议） | **有明文数字，不需要推**。`OFFICIAL` L292：project instructions「up to **16,000 characters**」。比窗口派生出来的数小两个数量级，而且是写明的。第一轮建议的双阈值 hysteresis 也随之不需要——没有阈值就没有抖动。 | 第二轮复核 §问题二 ④ |
+| 2026-10-27 | 「paths-first 就是把路径**清单**渲进 charter」 | **形状差一级**。`OFFICIAL` L291：官方开局给的是**索引文件**（`MEMORY.md`），正文按需打开。只给路径，模型得先 `ls` 或先读一遍才知道哪份相关；给索引（路径 + 规模），它才能**选**。已按索引实现。 | 同上 ③ |
+| 2026-10-27 | 「paths-first 没有 prompt 层引导，我们得自己加一句，那是偏离」 | **担心不成立**。引导存在，但被编码在**读取协议**里（索引 eager / 正文 lazy），不是 charter 里一句话。所以不要自己加句子，要加索引——加了就不是偏离，是照抄。 | 同上 ①② |
+| 2026-10-27 | 「`OFFICIAL` 全文 `RAG`/`retrieval`/`project knowledge` 各 0 次」 | **比这更强：四个 0**。`knowledge` 这个词本身也是 0 次。Code Projects 连「知识」都不用，只有「挂载给线程读的文件」与「线程自己记的 memory 文件」。 | 同上 ② |
+| 2026-10-27 | 「六分组可能重叠，也许要改成多维标签」 | **互斥，不要改**。但互斥是**按构造**成立（「groups threads by state」），所以两条定义同真时必须自己定优先级：**人阻塞优先于 PR 生命周期位置**，否则等审批的线程会被 PR 状态掩埋而面板一切正常（→ `GAP-04`）。 | 同上 §问题一 |
+| 2026-10-27 | 「账本用和 `ManifestStore` 同级的串行队列就够」 | **不够**。这个文件按定义被机器上所有项目、所有 Host 进程共享，进程内队列只能序列化从来不是问题的那批写者。实现改为排他锁文件 + 锁内重读 + 陈旧锁打破（→ `GAP-01`）。 | 本批实现 |
+| 2026-10-27 | `test/engine.test.ts` 的 `quotaDay` 断言 | **测试写错**，不是实现错。`dayKey` 取**本地**日历日，而固定时钟 `2026-01-02T03:04:05Z` 在任何比 UTC 晚 3 小时以上的时区都落在 01-01。硬编码字面量在欧洲过、在加州挂（已在改动前的 HEAD 上复现确认）。改为 `dayKey(fixedClock().now())`。 | 本批 `npm run verify` |
 
 ---
 
@@ -551,7 +612,7 @@
 
 | 批次 | 条目 | 依赖 | 说明 |
 | --- | --- | --- | --- |
-| **第一批 让输出可信** | `GAP-01` 全局配额 + `GAP-22` 知识 paths-first | 无 | 22 是**减法**：删代码为主，净减不增 |
+| **第一批 让输出可信** | `GAP-01` 全局配额 ✅ + `GAP-22` 知识 paths-first ⚠️ | 无 | 2026-10-27 `9c7ef10`：`GAP-01` 关闭；`GAP-22` 的减法做完（确实净减），**但 `GAP-22a`（路径锚定项目根）未做，仍是 P1 —— 第一批的收尾** |
 | **第二批 让拆解可信** | `GAP-26` 模型优先拆解 + Suggested threads | 无（可与一批并行） | 后者是前者的保险，必须同批 |
 | **第三批 让报回可用** | `GAP-03` 投影 + `GAP-04` 六分组 + `GAP-05` 终态 + `GAP-10` Library + `GAP-11` PR 聚合 | 03 与 04 **可同批**（原判断的串行约束不成立） | 状态部分是加法，不是重构 |
 | **第四批 让裁定可用** | `GAP-12` 卡片动作 + `GAP-18` 审批 + `GAP-14` Pause + `GAP-24` 退订 + `GAP-19` worktree 回收 + `GAP-25` 禁令 | 19 依赖 10（先有清单再删目录） | **不可逆动作（19）与它的防护同批**，不推到最后 |
@@ -560,6 +621,8 @@
 | **按需** | `GAP-23` 自愈计数、`GAP-28` 并发偏好 | 无 | 23 属 P1，若第三/四批之间有空档应先插队 |
 
 > **第一批为什么不含 `GAP-23`（P1 却在按需）**：它的触发条件是「PR 被多轮评审」，只有真的跑起来才会遇到；而 21/22/24 在**第一次自愈**就可能出错。若第一批做完还有余量，`GAP-23` 应第一个补上。
+
+> **第一批的收尾（2026-10-27）**：`GAP-22a` 是第一批唯一的正确性残留，它应当在开第二批之前做掉 —— `GAP-22` 的其余未完成项（`tree` / `read`、查询时按需重建）是能力增强，可以等；而 `GAP-22a` 意味着线程现在**读不到** charter 指给它的知识文件，也就是说第一批「让输出可信」这个目标还差最后一步。
 
 **验证方式（每批都要走）**：
 

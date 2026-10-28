@@ -9,11 +9,13 @@
 
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 
 import { ProjectEngine } from '../src/core/engine.js';
 import { isProjectError } from '../src/core/errors.js';
 import { PROJECT_DIR } from '../src/core/manifest.js';
+import { dayKey } from '../src/core/util.js';
 import type { ProjectManifest } from '../src/types.js';
 import { FakeRunner, FakeThreads, fixedClock, sequentialIds } from './helpers.js';
 
@@ -55,6 +57,7 @@ async function harness(): Promise<{
     threads,
     clock,
     ids: sequentialIds(),
+    quotaLedgerPath: join(root, 'quota-ledger.json'),
   });
   return { engine, runner, threads, root, clock };
 }
@@ -88,9 +91,12 @@ describe('init / deinit', () => {
     // writer that reads it has a non-zero expectation to compare against.
     assert.equal(created.revision, 1);
     assert.equal(created.dailyThreadsCreated, 0);
-    assert.equal(created.quotaDay, '2026-01-02');
+    // Derived, not hard-coded: `dayKey` is a *local* calendar day, and the fixture clock
+    // (2026-01-02T03:04:05Z) falls on 2026-01-01 anywhere behind UTC by more than three
+    // hours. A literal here passes in Europe and fails in California.
+    assert.equal(created.quotaDay, dayKey(fixedClock().now()));
 
-    const reopened = new ProjectEngine(root, { runner: new FakeRunner(), threads: new FakeThreads(), clock: fixedClock() });
+    const reopened = new ProjectEngine(root, { runner: new FakeRunner(), threads: new FakeThreads(), clock: fixedClock(), quotaLedgerPath: join(root, 'quota-ledger.json') });
     const read = await reopened.requireManifest();
     assert.equal(read.projectId, created.projectId);
     assert.equal(read.name, 'demo');
@@ -220,6 +226,107 @@ describe('coordinate', () => {
     assert.equal(Object.keys(manifest.threads).length, 0);
   });
 
+  it('counts two projects against one user-wide ceiling', async () => {
+    // GAP-01. The enforced quota is "200 new threads per day across your projects", so two
+    // projects must not get two budgets. Both engines point at one ledger, which is what
+    // happens in production: the ledger lives outside any project root.
+    const ledger = join(await freshRoot(), 'shared-ledger.json');
+    const build = async (): Promise<{ engine: ProjectEngine; runner: FakeRunner }> => {
+      const root = await freshRoot();
+      const runner = new FakeRunner();
+      const engine = new ProjectEngine(root, {
+        runner,
+        threads: new FakeThreads(),
+        clock: fixedClock(),
+        ids: sequentialIds(),
+        quotaLedgerPath: ledger,
+      });
+      return { engine, runner };
+    };
+
+    const first = await build();
+    await first.engine.init({ name: 'one' });
+    repoReady(first.runner);
+    const started = await first.engine.coordinate(PARENT, '- a\n- b\n- c', {});
+    assert.equal(started.started.length, 3);
+    assert.equal(started.quota.global?.created, 3);
+
+    const second = await build();
+    await second.engine.init({ name: 'two' });
+    repoReady(second.runner);
+    const also = await second.engine.coordinate(PARENT, '- d', {});
+    // The second project's own counter starts at zero, but the shared one carries on.
+    assert.equal((await second.engine.requireManifest()).dailyThreadsCreated, 1);
+    assert.equal(also.quota.global?.created, 4);
+  });
+
+  it('refuses a batch the shared ceiling cannot cover, and spends nothing', async () => {
+    const ledger = join(await freshRoot(), 'full-ledger.json');
+    // Fill the day from somewhere else entirely, then ask this project for one more.
+    const { GLOBAL_DAILY_THREAD_LIMIT, QuotaLedger } = await import('../src/core/quotaLedger.js');
+    await new QuotaLedger(ledger).reserve('someone-else', GLOBAL_DAILY_THREAD_LIMIT, fixedClock().now());
+
+    const root = await freshRoot();
+    const runner = new FakeRunner();
+    const engine = new ProjectEngine(root, {
+      runner,
+      threads: new FakeThreads(),
+      clock: fixedClock(),
+      ids: sequentialIds(),
+      quotaLedgerPath: ledger,
+    });
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    await assert.rejects(
+      () => engine.coordinate(PARENT, '- one', {}),
+      (error: unknown) => isProjectError(error) && error.code === 'QUOTA_EXCEEDED',
+    );
+    const manifest = await engine.requireManifest();
+    assert.equal(manifest.dailyThreadsCreated, 0, 'a batch refused by the shared ledger must not dent the project');
+    assert.equal(Object.keys(manifest.threads).length, 0);
+  });
+
+  it('refunds the shared ledger when the per-project preference refuses the batch', async () => {
+    // Ordering matters here: the shared ledger is reserved first, so a refusal from the
+    // project's own ceiling has to hand that reservation back or the user's day leaks.
+    const ledger = join(await freshRoot(), 'refund-ledger.json');
+    const root = await freshRoot();
+    const runner = new FakeRunner();
+    const engine = new ProjectEngine(root, {
+      runner,
+      threads: new FakeThreads(),
+      clock: fixedClock(),
+      ids: sequentialIds(),
+      quotaLedgerPath: ledger,
+    });
+    await engine.init({ name: 'demo', dailyThreadQuotaMax: 2 });
+    repoReady(runner);
+    await assert.rejects(() => engine.coordinate(PARENT, '- one\n- two\n- three', {}));
+    const { QuotaLedger } = await import('../src/core/quotaLedger.js');
+    const after = await new QuotaLedger(ledger).snapshot('any', fixedClock().now());
+    assert.equal(after.created, 0, 'the global reservation must be refunded');
+  });
+
+  it('gives back the shared reservation for a task that failed to start', async () => {
+    const ledger = join(await freshRoot(), 'leak-ledger.json');
+    const root = await freshRoot();
+    const runner = new FakeRunner();
+    const threads = new FakeThreads();
+    const engine = new ProjectEngine(root, {
+      runner,
+      threads,
+      clock: fixedClock(),
+      ids: sequentialIds(),
+      quotaLedgerPath: ledger,
+    });
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    threads.failNextLaunch = 'provider unavailable';
+    const result = await engine.coordinate(PARENT, '- one\n- two', {});
+    assert.equal(result.started.length, 1);
+    assert.equal(result.quota.global?.created, 1, 'the failed task must not keep its shared reservation');
+  });
+
   it('honours the limit without planning more work than it starts', async () => {
     const { engine, runner } = await harness();
     await engine.init({ name: 'demo' });
@@ -244,10 +351,12 @@ describe('coordinate', () => {
 
   it('fails loudly when no thread runtime is available', async () => {
     const { UnavailableThreadRuntime } = await import('../src/core/threads.js');
-    const unavailable = new ProjectEngine(await freshRoot(), {
+    const unavailableRoot = await freshRoot();
+    const unavailable = new ProjectEngine(unavailableRoot, {
       runner: new FakeRunner(),
       threads: new UnavailableThreadRuntime('no subagents here'),
       clock: fixedClock(),
+      quotaLedgerPath: join(unavailableRoot, 'quota-ledger.json'),
     });
     await unavailable.init();
     await assert.rejects(
@@ -508,7 +617,7 @@ describe('manifest durability', () => {
     // write here would silently drop a thread descriptor.
     const { engine, root } = await harness();
     await engine.init();
-    const second = new ProjectEngine(root, { runner: new FakeRunner(), threads: new FakeThreads(), clock: fixedClock() });
+    const second = new ProjectEngine(root, { runner: new FakeRunner(), threads: new FakeThreads(), clock: fixedClock(), quotaLedgerPath: join(root, 'quota-ledger.json') });
     await engine.setMemory(undefined, { key: 'a', decision: 'first' });
     const merged: ProjectManifest = await second.requireManifest();
     assert.equal(merged.memories['a']?.decision, 'first');

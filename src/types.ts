@@ -114,10 +114,27 @@ export interface ProjectThreadDescriptor {
 export interface ProjectQuotaState {
   /** Local calendar day, `YYYY-MM-DD`. */
   day: string;
-  /** Threads created on `day`. */
+  /** Threads created by *this project* on `day`. */
   created: number;
-  /** Hard ceiling, default 200 (aligned with the Projects Beta quota). */
+  /**
+   * This project's own ceiling.
+   *
+   * A preference, not the enforced cap: the official wording is that "a limit you ask for is
+   * a preference rather than a cap", and the enforced figure is the user-wide one in
+   * {@link ProjectQuotaState.global}.
+   */
   max: number;
+  /**
+   * The user-wide ledger reading: "200 new threads per day across your projects".
+   *
+   * Absent on the synchronous project-only view, which cannot read the shared ledger file.
+   */
+  global?: {
+    /** Threads created across every project on this machine today. */
+    created: number;
+    /** The enforced daily ceiling. */
+    max: number;
+  };
 }
 
 /**

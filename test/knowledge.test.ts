@@ -4,8 +4,8 @@
  * These run against a real temporary directory because indexing reads real files and the
  * index is written with a rename; a fake filesystem would test the mock instead of the store.
  * What matters here is the wiring the unit tests cannot see: the manifest owns the bound
- * paths, the charter changes when the mode changes, and a rebuild is what makes new content
- * visible to a thread that already has its prompt.
+ * paths, the charter lists the catalogue without ever carrying a document body, and a
+ * rebuild is what makes a newly added file appear in that catalogue.
  */
 
 import assert from 'node:assert/strict';
@@ -38,6 +38,7 @@ function harness(root: string): { engine: ProjectEngine; runner: FakeRunner } {
     threads: new FakeThreads(),
     clock: fixedClock(),
     ids: sequentialIds(),
+    quotaLedgerPath: join(root, 'quota-ledger.json'),
   });
   return { engine, runner };
 }
@@ -65,7 +66,8 @@ describe('knowledge binding', () => {
     await engine.init({ name: 'demo' });
     const { index, state } = await engine.knowledgeState();
     assert.equal(index.docs.length, 0);
-    assert.equal(state.mode, 'context');
+    assert.equal(state.docs, 0);
+    assert.equal(state.totalChars, 0);
   });
 
   it('binds a folder and indexes every readable file', async () => {
@@ -128,8 +130,8 @@ describe('knowledge binding', () => {
   });
 });
 
-describe('automatic mode switching', () => {
-  it('stays in context mode for a small project and puts the content in the charter', async () => {
+describe('paths-first knowledge', () => {
+  it('lists each document in the charter and never its body', async () => {
     const root = await freshRoot();
     const { engine } = harness(root);
     await engine.init({ name: 'demo' });
@@ -138,40 +140,50 @@ describe('automatic mode switching', () => {
 
     const charter = await engine.renderCharter();
     assert.match(charter.text, /Project knowledge/);
-    assert.match(charter.text, /release window is Tuesday/);
+    // The catalogue entry is there...
+    assert.match(charter.text, /`note\.md` — \d+ chars/);
+    // ...and the body is not. This is the whole of paths-first: a thread reads the file, so
+    // a file edited after the last rebuild cannot produce a stale answer from the prefix.
+    assert.doesNotMatch(charter.text, /release window is Tuesday/);
   });
 
-  it('switches to retrieval once the knowledge exceeds the budget, and drops the content', async () => {
+  it('keeps the charter the same size as the knowledge grows', async () => {
     const root = await freshRoot();
     const { engine } = harness(root);
     await engine.init({ name: 'demo' });
-    await projectWithKnowledge(engine, 3, 400, 'secretword');
-    await engine.setKnowledgePaths(['kb']);
-    // A budget far below the content forces retrieval mode; the point is that nothing flips a
-    // stored flag, the size alone decides.
-    const state = await engine.buildKnowledge({ budgetChars: 100 });
-    assert.equal(state.mode, 'rag');
+    await writeFile(join(root, 'small.md'), 'tiny', 'utf8');
+    await engine.setKnowledgePaths(['small.md']);
+    const small = (await engine.renderCharter()).text.length;
 
+    // Two orders of magnitude more content, same single document: the charter must not grow
+    // with it, because the body never enters the prompt. Under the old context mode this
+    // assertion was false by construction.
+    await writeFile(join(root, 'small.md'), 'detail '.repeat(20_000), 'utf8');
+    await engine.buildKnowledge();
+    const large = (await engine.renderCharter()).text.length;
+
+    // Only the character count in the catalogue line differs.
+    assert.ok(large - small < 40, `charter grew by ${String(large - small)} chars`);
+  });
+
+  it('falls back to the bare path list when nothing has been indexed yet', async () => {
+    const root = await freshRoot();
+    const { engine } = harness(root);
+    await engine.init({ name: 'demo', knowledgePaths: ['kb'] });
     const charter = await engine.renderCharter();
-    assert.match(charter.text, /retrieval mode/);
-    assert.match(charter.text, /project_knowledge_search/);
-    // The content must be gone from the prompt: otherwise retrieval buys no capacity.
-    assert.doesNotMatch(charter.text, /secretword/);
+    assert.match(charter.text, /Project knowledge/);
+    assert.match(charter.text, /`kb`/);
   });
 
-  it('converts back to context mode when the knowledge shrinks', async () => {
+  it('points the thread at the file rather than at the index', async () => {
     const root = await freshRoot();
     const { engine } = harness(root);
     await engine.init({ name: 'demo' });
-    await projectWithKnowledge(engine, 3, 400, 'shrinksignal');
-    await engine.setKnowledgePaths(['kb']);
-    const rag = await engine.buildKnowledge({ budgetChars: 100 });
-    assert.equal(rag.mode, 'rag');
-
-    // Drop every bound path: the project now holds nothing, so it cannot still be in RAG mode.
-    const after = await engine.setKnowledgePaths([]);
-    assert.equal(after.mode, 'context');
-    assert.equal(after.docs, 0);
+    await writeFile(join(root, 'note.md'), 'anything', 'utf8');
+    await engine.setKnowledgePaths(['note.md']);
+    const charter = await engine.renderCharter();
+    assert.match(charter.text, /file on disk is authoritative/);
+    assert.match(charter.text, /project_knowledge_search/);
   });
 
   it('rebuilds so new content becomes visible without restarting', async () => {
@@ -189,10 +201,23 @@ describe('automatic mode switching', () => {
     const hits = await engine.searchProjectKnowledge('freshdoc');
     assert.ok(hits.hits.length > 0);
   });
+
+  it('drops the section entirely once every path is unbound', async () => {
+    const root = await freshRoot();
+    const { engine } = harness(root);
+    await engine.init({ name: 'demo' });
+    await projectWithKnowledge(engine, 2, 40, 'gonesoon');
+    await engine.setKnowledgePaths(['kb']);
+    assert.match((await engine.renderCharter()).text, /Project knowledge/);
+
+    const after = await engine.setKnowledgePaths([]);
+    assert.equal(after.docs, 0);
+    assert.doesNotMatch((await engine.renderCharter()).text, /Project knowledge/);
+  });
 });
 
 describe('search through the engine', () => {
-  it('finds a passage and reports the mode it searched in', async () => {
+  it('finds a passage and cites the file it came from', async () => {
     const root = await freshRoot();
     const { engine } = harness(root);
     await engine.init({ name: 'demo' });
@@ -201,7 +226,6 @@ describe('search through the engine', () => {
     await engine.setKnowledgePaths(['deploy.md', 'auth.md']);
 
     const result = await engine.searchProjectKnowledge('release window');
-    assert.equal(result.state.mode, 'context');
     assert.ok(result.hits.length > 0);
     assert.equal(result.hits[0]?.path, 'deploy.md');
   });
@@ -226,7 +250,7 @@ describe('search through the engine', () => {
 });
 
 describe('overview', () => {
-  it('reports knowledge mode and a summary on the panel payload', async () => {
+  it('reports the knowledge catalogue and a summary on the panel payload', async () => {
     const root = await freshRoot();
     const { engine } = harness(root);
     await engine.init({ name: 'demo' });
@@ -234,10 +258,13 @@ describe('overview', () => {
     await engine.setKnowledgePaths(['note.md']);
 
     const json = await engine.overviewJson();
-    const knowledge = json.knowledge as { mode: string; docs: number; summary: string } | undefined;
+    const knowledge = json.knowledge as { docs: number; summary: string; builtAt: number } | undefined;
     assert.ok(knowledge !== undefined);
-    assert.equal(knowledge.mode, 'context');
     assert.equal(knowledge.docs, 1);
-    assert.match(knowledge.summary, /loaded in full/);
+    assert.ok(knowledge.builtAt > 0);
+    assert.match(knowledge.summary, /read from disk on demand/);
+    // No mode, no budget, no capacity: the payload cannot report a dimension that is gone.
+    assert.equal((knowledge as Record<string, unknown>).mode, undefined);
+    assert.equal((knowledge as Record<string, unknown>).budgetChars, undefined);
   });
 });

@@ -53,6 +53,7 @@ async function harness(): Promise<{ engine: ProjectEngine; runner: FakeRunner; t
     threads,
     clock: fixedClock(),
     ids: sequentialIds(),
+    quotaLedgerPath: join(root, 'quota-ledger.json'),
   });
   return { engine, runner, threads };
 }

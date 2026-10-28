@@ -22,9 +22,9 @@ import type { CommandRunner } from './exec.js';
 import { decideHealAction, mergeSnapshot, toCheckStates, toReviewComments, type HealAction } from './healing.js';
 import {
   buildIndex,
-  DEFAULT_CONTEXT_BUDGET_CHARS,
+  MAX_KNOWLEDGE_FILES,
+  MAX_KNOWLEDGE_INDEX_CHARS,
   emptyIndex,
-  knowledgeCapacity,
   describeKnowledge,
   resolveKnowledgeState,
   searchKnowledge,
@@ -46,7 +46,8 @@ import {
 import { buildOverview } from './overview.js';
 import { branchNameFor, planTasks } from './planner.js';
 import { renderFeedbackAnswer, renderProjectCharter, renderThreadTask } from './prompt.js';
-import { normaliseQuotaMax, quotaState, releaseQuota, reserveQuota, rolloverQuota } from './quota.js';
+import { normaliseQuotaMax, quotaState, quotaWarning, releaseQuota, reserveQuota, rolloverQuota } from './quota.js';
+import { QuotaLedger, defaultQuotaLedgerPath, type QuotaLedgerState } from './quotaLedger.js';
 import { systemClock, systemIds, dayKey } from './util.js';
 import type { Clock, IdFactory } from './util.js';
 import type {
@@ -86,6 +87,15 @@ export interface EngineDeps {
   ids?: IdFactory;
   /** Per-key watermark map of memory revisions already delivered, keyed by child session. */
   memoryWatermarks?: Map<string, Record<string, number>>;
+  /**
+   * Where the user-wide thread ledger lives.
+   *
+   * Defaults to {@link defaultQuotaLedgerPath}. Tests and multi-profile setups must be able
+   * to point this somewhere isolated: the ledger is shared by every project on the machine
+   * by design, so a test that used the real one would both pollute the user's budget and
+   * couple test cases to each other.
+   */
+  quotaLedgerPath?: string;
 }
 
 /** Options accepted by {@link ProjectEngine.init}. */
@@ -145,6 +155,8 @@ export class ProjectEngine {
    * index file on every render. Invalidated by every knowledge mutation.
    */
   private knowledgeCache: { index: KnowledgeIndex; state: KnowledgeState } | undefined;
+  /** The user-wide daily thread ledger; the enforced cap lives here, not in the manifest. */
+  private readonly ledger: QuotaLedger;
 
   constructor(
     readonly rootDir: string,
@@ -156,6 +168,13 @@ export class ProjectEngine {
     this.ids = deps.ids ?? systemIds;
     this.watermarks = deps.memoryWatermarks ?? new Map();
     this.store = new ManifestStore(rootDir, this.clock);
+    this.ledger = new QuotaLedger(deps.quotaLedgerPath ?? defaultQuotaLedgerPath());
+  }
+
+  /** Today's user-wide ledger reading for this project. */
+  async globalQuotaState(): Promise<QuotaLedgerState> {
+    const manifest = await this.requireManifest();
+    return this.ledger.snapshot(manifest.projectId, this.clock.now());
   }
 
   /**
@@ -403,7 +422,7 @@ export class ProjectEngine {
     options: CoordinateOptions = {},
     signal: AbortSignal = AbortSignal.timeout(120_000),
   ): Promise<CoordinateResult> {
-    await this.requireManifest();
+    const opening = await this.requireManifest();
     const planned = planTasks(goal);
     if (planned.length === 0) throw new ProjectError('INVALID_INPUT', 'goal produced no tasks');
 
@@ -424,13 +443,25 @@ export class ProjectEngine {
     }
 
     // Reserve the whole batch up front so a mid-round failure cannot overshoot the cap.
+    //
+    // Two ledgers, in this order. The user-wide one is the enforced cap ("200 new threads per
+    // day across your projects") and is checked first, because a batch rejected there must
+    // not leave a dent in the project's own counter. The manifest counter is the per-project
+    // *preference*; it is the cheaper check but the weaker claim, so it goes second and its
+    // failure refunds the global reservation.
     const reserved = options.ignoreQuota === true ? 0 : tasks.length;
     if (reserved > 0) {
-      await this.store.update((draft) => {
-        rolloverQuota(draft, dayKey(now));
-        reserveQuota(draft, reserved, now);
-        return { manifest: draft, result: undefined };
-      });
+      await this.ledger.reserve(opening.projectId, reserved, now);
+      try {
+        await this.store.update((draft) => {
+          rolloverQuota(draft, dayKey(now));
+          reserveQuota(draft, reserved, now);
+          return { manifest: draft, result: undefined };
+        });
+      } catch (error) {
+        await this.ledger.release(opening.projectId, reserved, now);
+        throw error;
+      }
     }
 
     const started: ProjectThreadDescriptor[] = [];
@@ -452,22 +483,25 @@ export class ProjectEngine {
       }
     }
 
-    // Give back reservations for tasks that never became threads.
+    // Give back reservations for tasks that never became threads — in both ledgers, or the
+    // user's daily budget would leak on every failed launch.
     const unmatched = tasks.length - started.length;
     if (reserved > 0 && unmatched > 0) {
       await this.store.update((draft) => {
         releaseQuota(draft, unmatched, now);
         return { manifest: draft, result: undefined };
       });
+      await this.ledger.release(opening.projectId, unmatched, now);
     }
 
     const finalManifest = await this.requireManifest();
+    const global = await this.ledger.snapshot(finalManifest.projectId, this.clock.now());
     return {
       projectId: finalManifest.projectId,
       planned: tasks,
       started,
       skipped,
-      quota: quotaState(finalManifest, this.clock.now()),
+      quota: { ...quotaState(finalManifest, this.clock.now()), global: { created: global.created, max: global.max } },
     };
   }
 
@@ -883,25 +917,24 @@ export class ProjectEngine {
   // ---------------------------------------------------------------------------
 
   // ---------------------------------------------------------------------------
-  // Project knowledge (RAG)
+  // Project knowledge
   // ---------------------------------------------------------------------------
 
   /**
-   * Rebuild the retrieval index from the bound knowledge paths.
+   * Rebuild the search index from the bound knowledge paths.
    *
-   * The index is derived state: it is rewritten from the files every time and never edited by
-   * hand. `mode` is not stored — {@link ProjectEngine.knowledgeState} derives it from the
-   * current size, so a project that grows past its budget flips to retrieval and one that
-   * shrinks flips back, without anyone (or any earlier run) leaving a flag behind.
+   * The index is derived state: rewritten from the files every time, never edited by hand,
+   * and never the source a thread answers from. It feeds two things — the catalogue the
+   * charter lists, and `project_knowledge_search` — while the bodies stay on disk, which is
+   * why there is no context budget here and nothing to switch between.
    */
-  async buildKnowledge(options: { budgetChars?: number; signal?: AbortSignal } = {}): Promise<KnowledgeState> {
+  async buildKnowledge(options: { signal?: AbortSignal } = {}): Promise<KnowledgeState> {
     const manifest = await this.requireManifest();
-    const budget = options.budgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS;
-    const capacity = knowledgeCapacity(budget);
 
     const collected = await collectKnowledge(manifest.knowledgePaths, {
       rootDir: manifest.rootDir,
-      maxChars: capacity,
+      maxChars: MAX_KNOWLEDGE_INDEX_CHARS,
+      maxFiles: MAX_KNOWLEDGE_FILES,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
 
@@ -913,18 +946,17 @@ export class ProjectEngine {
       );
     }
     await writeIndexFile(this.store.paths.knowledgeIndexPath, index);
-    this.knowledgeCache = { index, state: resolveKnowledgeState(index, budget, warnings) };
-    // The charter embeds knowledge in context mode, so a rebuild must change the prefix.
+    this.knowledgeCache = { index, state: resolveKnowledgeState(index, warnings) };
+    // The charter lists the catalogue, so a rebuild changes the prefix.
     await this.renderCharter().catch(() => undefined);
     return this.knowledgeCache.state;
   }
 
   /** Read the built index from disk without collecting files. */
-  async loadKnowledge(budgetChars?: number): Promise<KnowledgeState> {
-    const budget = budgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS;
+  async loadKnowledge(): Promise<KnowledgeState> {
     const stored = await readIndexFile(this.store.paths.knowledgeIndexPath);
     const index = stored ?? emptyIndex([], this.clock.now());
-    const state = resolveKnowledgeState(index, budget);
+    const state = resolveKnowledgeState(index);
     this.knowledgeCache = { index, state };
     return state;
   }
@@ -934,26 +966,24 @@ export class ProjectEngine {
    *
    * Cheap enough to call on every overview render: after the first call it is memory-only.
    */
-  async knowledgeState(budgetChars?: number): Promise<{ index: KnowledgeIndex; state: KnowledgeState }> {
-    if (this.knowledgeCache !== undefined && budgetChars === undefined) return this.knowledgeCache;
-    const budget = budgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS;
+  async knowledgeState(): Promise<{ index: KnowledgeIndex; state: KnowledgeState }> {
+    if (this.knowledgeCache !== undefined) return this.knowledgeCache;
     const stored = await readIndexFile(this.store.paths.knowledgeIndexPath);
     const index = stored ?? emptyIndex([], this.clock.now());
-    const state = resolveKnowledgeState(index, budget);
-    this.knowledgeCache = { index, state };
+    this.knowledgeCache = { index, state: resolveKnowledgeState(index) };
     return this.knowledgeCache;
   }
 
   /** Retrieve the passages most relevant to `query`. */
   async searchProjectKnowledge(
     query: string,
-    options: { limit?: number; budgetChars?: number } = {},
+    options: { limit?: number } = {},
   ): Promise<{ hits: KnowledgeHit[]; state: KnowledgeState }> {
     const trimmed = query.trim();
     if (trimmed.length === 0) {
       throw new ProjectError('INVALID_INPUT', 'query must not be empty');
     }
-    const { index, state } = await this.knowledgeState(options.budgetChars);
+    const { index, state } = await this.knowledgeState();
     const hits = searchKnowledge(index, trimmed, {
       ...(options.limit === undefined ? {} : { limit: options.limit }),
     });
@@ -1012,11 +1042,22 @@ export class ProjectEngine {
       const reason = this.threads.unavailableReason?.();
       if (reason !== undefined) collected.push(reason);
     }
-    const quota = quotaState(manifest, this.clock.now());
-    if (quota.created / Math.max(1, quota.max) >= 0.8) {
-      collected.push(`daily thread quota at ${String(quota.created)}/${String(quota.max)}`);
+    const now = this.clock.now();
+    const projectWarning = quotaWarning(quotaState(manifest, now), "this project's daily thread preference");
+    if (projectWarning !== undefined) collected.push(projectWarning);
+    // The enforced cap is user-wide, so the panel has to warn on the shared ledger too: a
+    // project sitting at 3/200 of its own preference can still be unable to start a thread.
+    const global = await this.ledger.snapshot(manifest.projectId, now).catch(() => undefined);
+    if (global !== undefined) {
+      const globalWarning = quotaWarning(
+        { day: global.day, created: global.created, max: global.max },
+        'daily thread quota across all projects',
+      );
+      if (globalWarning !== undefined) collected.push(globalWarning);
     }
-    return buildOverview(manifest, this.clock.now(), collected);
+    const overview = buildOverview(manifest, this.clock.now(), collected);
+    if (global === undefined) return overview;
+    return { ...overview, quota: { ...overview.quota, global: { created: global.created, max: global.max } } };
   }
 
   /** Buckets plus thread descriptors as a plain JSON value (tool output). */
@@ -1035,12 +1076,10 @@ export class ProjectEngine {
       warnings: overview.warnings,
       memories: overview.memories,
       knowledge: knowledge === undefined ? undefined : {
-        mode: knowledge.state.mode,
         docs: knowledge.state.docs,
         chunks: knowledge.state.chunks,
         totalChars: knowledge.state.totalChars,
-        budgetChars: knowledge.state.budgetChars,
-        capacityChars: knowledge.state.capacityChars,
+        builtAt: knowledge.state.builtAt,
         sources: knowledge.state.sources,
         summary: describeKnowledge(knowledge.state),
       },

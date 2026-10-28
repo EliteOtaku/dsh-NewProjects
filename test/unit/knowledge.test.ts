@@ -1,10 +1,10 @@
 /**
- * The knowledge layer: chunking, retrieval, and the automatic mode switch.
+ * The knowledge layer: chunking, retrieval, and the index that reaches the prompt.
  *
- * The behaviour under test comes straight from how Projects describes itself: knowledge is
- * loaded in full while it fits, retrieval takes over automatically once it approaches the
- * limit, and it converts back when the content shrinks. A stored flag would break the last
- * part, so these tests change only sizes and assert the mode follows.
+ * The behaviour under test is paths-first, which is what Claude Code Projects actually does:
+ * a thread is given a catalogue and a readable filesystem, and it opens what it needs. So the
+ * load-bearing assertions here are about what the rendered section does *not* contain. There
+ * is no mode and no context budget to test, because removing both is the point.
  */
 
 import assert from 'node:assert/strict';
@@ -16,19 +16,15 @@ import { after, describe, it } from 'node:test';
 import {
   buildIndex,
   chunkText,
-  DEFAULT_CONTEXT_BUDGET_CHARS,
   describeKnowledge,
   emptyIndex,
   indexDocument,
-  knowledgeCapacity,
-  knowledgeMode,
   MAX_CHUNK_CHARS,
+  MAX_KNOWLEDGE_FILES,
   MAX_SEARCH_LIMIT,
   parseIndex,
-  RAG_CAPACITY_MULTIPLIER,
   renderHits,
-  renderKnowledgeContextSection,
-  renderKnowledgeRagNotice,
+  renderKnowledgeIndexSection,
   resolveKnowledgeState,
   searchKnowledge,
   serialiseIndex,
@@ -47,32 +43,11 @@ async function tempRoot(): Promise<string> {
   return root;
 }
 
-describe('mode switch', () => {
-  it('stays in context mode while the knowledge fits the budget', () => {
-    assert.equal(knowledgeMode(100, DEFAULT_CONTEXT_BUDGET_CHARS), 'context');
-    assert.equal(knowledgeMode(DEFAULT_CONTEXT_BUDGET_CHARS, DEFAULT_CONTEXT_BUDGET_CHARS), 'context');
-  });
-
-  it('switches to retrieval the moment the budget is exceeded', () => {
-    assert.equal(knowledgeMode(DEFAULT_CONTEXT_BUDGET_CHARS + 1, DEFAULT_CONTEXT_BUDGET_CHARS), 'rag');
-  });
-
-  it('converts back when the knowledge shrinks again', () => {
-    // The whole point of deriving the mode instead of storing it: no earlier state can keep a
-    // now-small project in retrieval mode.
-    const budget = 1_000;
-    assert.equal(knowledgeMode(5_000, budget), 'rag');
-    assert.equal(knowledgeMode(500, budget), 'context');
-  });
-
-  it('expands capacity by the documented multiplier', () => {
-    assert.equal(knowledgeCapacity(1_000), 1_000 * RAG_CAPACITY_MULTIPLIER);
-    assert.equal(RAG_CAPACITY_MULTIPLIER, 10);
-  });
-
-  it('never divides by a zero or negative budget', () => {
-    assert.equal(knowledgeMode(10, 0), 'rag');
-    assert.equal(knowledgeCapacity(0), RAG_CAPACITY_MULTIPLIER);
+describe('collection limits', () => {
+  it('bounds the index by file count, the way the official limit is phrased', () => {
+    // "its first 100 files up to 200 MB" — the entry count is the documented bound, and it
+    // replaces the old `budget x 10` figure that was derived from a context budget.
+    assert.equal(MAX_KNOWLEDGE_FILES, 100);
   });
 });
 
@@ -276,27 +251,29 @@ describe('retrieval', () => {
 });
 
 describe('state and rendering', () => {
-  it('derives the mode from size and reports capacity', () => {
-    const small = resolveKnowledgeState(buildIndex([{ path: 'a', text: 'aaa' }], [], 1), 1_000);
-    assert.equal(small.mode, 'context');
-    assert.equal(small.capacityChars, 10_000);
-    const large = resolveKnowledgeState(buildIndex([{ path: 'a', text: 'x'.repeat(2_000) }], [], 1), 1_000);
-    assert.equal(large.mode, 'rag');
+  it('reports sizes without a mode, a budget, or a capacity', () => {
+    const state = resolveKnowledgeState(buildIndex([{ path: 'a', text: 'aaa' }], [], 7));
+    assert.equal(state.docs, 1);
+    assert.equal(state.totalChars, 3);
+    assert.equal(state.builtAt, 7);
+    // The three fields the old two-mode design needed are gone from the type; this asserts
+    // they are gone from the value too, so nothing reads a stale shape off a parsed index.
+    const loose = state as unknown as Record<string, unknown>;
+    assert.equal(loose.mode, undefined);
+    assert.equal(loose.budgetChars, undefined);
+    assert.equal(loose.capacityChars, undefined);
   });
 
   it('describes an empty project as actionable, not as an error', () => {
-    const state = resolveKnowledgeState(emptyIndex(), DEFAULT_CONTEXT_BUDGET_CHARS);
-    assert.match(describeKnowledge(state), /no project knowledge yet/);
+    assert.match(describeKnowledge(resolveKnowledgeState(emptyIndex())), /no project knowledge yet/);
   });
 
-  it('says context mode loads everything and retrieval mode does not', () => {
-    const small = resolveKnowledgeState(buildIndex([{ path: 'a', text: 'aaa' }], [], 1), 1_000);
-    assert.match(describeKnowledge(small), /loaded in full/);
-    const large = resolveKnowledgeState(buildIndex([{ path: 'a', text: 'x'.repeat(2_000) }], [], 1), 1_000);
-    assert.match(describeKnowledge(large), /project_knowledge_search/);
+  it('describes a bound project as read-on-demand', () => {
+    const state = resolveKnowledgeState(buildIndex([{ path: 'a', text: 'aaa' }], [], 1));
+    assert.match(describeKnowledge(state), /read from disk on demand/);
   });
 
-  it('renders the full content in context mode, sorted by path', () => {
+  it('lists every document with its size, sorted by path', () => {
     // Sorting keeps the prefix byte-identical across runs; filesystem order would not.
     const index = buildIndex(
       [
@@ -306,22 +283,52 @@ describe('state and rendering', () => {
       [],
       1,
     );
-    const rendered = renderKnowledgeContextSection(index, resolveKnowledgeState(index, 1_000));
+    const rendered = renderKnowledgeIndexSection(index, resolveKnowledgeState(index));
     assert.ok(rendered.indexOf('a.md') < rendered.indexOf('z.md'));
-    assert.match(rendered, /first/);
-    assert.match(rendered, /last/);
+    assert.match(rendered, /`a\.md` — 5 chars/);
+    assert.match(rendered, /`z\.md` — 4 chars/);
   });
 
-  it('renders a retrieval notice that mentions the tool but carries no content', () => {
+  it('never puts a document body in the rendered section', () => {
     const index = buildIndex([{ path: 'secret.md', text: 'the passphrase is hunter2' }], ['secret.md'], 1);
-    const notice = renderKnowledgeRagNotice(resolveKnowledgeState(index, 1));
-    assert.match(notice, /project_knowledge_search/);
-    // The notice must not leak content: if it did, the mode would give no capacity at all.
-    assert.doesNotMatch(notice, /hunter2/);
+    const rendered = renderKnowledgeIndexSection(index, resolveKnowledgeState(index));
+    assert.match(rendered, /`secret\.md`/);
+    // The one invariant the whole batch rests on. If this ever fails, the context budget and
+    // the staleness problem are both back.
+    assert.doesNotMatch(rendered, /hunter2/);
+  });
+
+  it('is the same bytes however large the document is', () => {
+    const small = buildIndex([{ path: 'a.md', text: 'x'.repeat(100) }], ['a.md'], 1);
+    const large = buildIndex([{ path: 'a.md', text: 'x'.repeat(100_000) }], ['a.md'], 1);
+    const a = renderKnowledgeIndexSection(small, resolveKnowledgeState(small));
+    const b = renderKnowledgeIndexSection(large, resolveKnowledgeState(large));
+    // Only the character count differs, so the section grows logarithmically with content
+    // rather than linearly. That is what makes the context budget unnecessary.
+    assert.ok(Math.abs(a.length - b.length) < 10);
+  });
+
+  it('points at the file as authoritative over the index', () => {
+    const index = buildIndex([{ path: 'a.md', text: 'body' }], ['a.md'], 1);
+    const rendered = renderKnowledgeIndexSection(index, resolveKnowledgeState(index));
+    assert.match(rendered, /file on disk is authoritative/);
+    assert.match(rendered, /project_knowledge_search/);
+  });
+
+  it('falls back to the bound paths when nothing is indexed', () => {
+    const rendered = renderKnowledgeIndexSection(emptyIndex(['kb', 'spec.md']), resolveKnowledgeState(emptyIndex()), {
+      boundPaths: ['kb', 'spec.md'],
+    });
+    assert.match(rendered, /`kb`/);
+    assert.match(rendered, /`spec\.md`/);
+  });
+
+  it('renders nothing at all when the project has no knowledge', () => {
+    assert.equal(renderKnowledgeIndexSection(emptyIndex(), resolveKnowledgeState(emptyIndex())), '');
   });
 
   it('carries warnings through to the state', () => {
-    const state = resolveKnowledgeState(emptyIndex(), 1_000, ['skipped big.bin']);
+    const state = resolveKnowledgeState(emptyIndex(), ['skipped big.bin']);
     assert.deepEqual(state.warnings, ['skipped big.bin']);
   });
 });
@@ -334,6 +341,20 @@ describe('collecting from disk', () => {
     assert.equal(result.documents.length, 1);
     assert.equal(result.documents[0]?.path, 'note.md');
     assert.equal(result.totalChars, 13);
+  });
+
+  it('stops at the file limit and names the limit it hit', async () => {
+    const root = await tempRoot();
+    await mkdir(join(root, 'many'), { recursive: true });
+    for (let index = 0; index < 6; index += 1) {
+      await writeFile(join(root, 'many', `n${String(index)}.md`), `doc ${String(index)}`, 'utf8');
+    }
+    const result = await collectKnowledge(['many'], { rootDir: root, maxChars: 1_000_000, maxFiles: 3 });
+    assert.equal(result.documents.length, 3);
+    assert.ok(result.truncated);
+    // Saying which ceiling stopped the walk is the difference between an actionable warning
+    // and one the user has to guess at: split a file, or drop one?
+    assert.match(result.warnings.join('\n'), /3-file limit/);
   });
 
   it('descends a bound folder and skips dependency and build directories', async () => {

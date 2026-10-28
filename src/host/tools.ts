@@ -303,16 +303,16 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
 
 
   /**
-   * `project_knowledge_search` — the retrieval half of Projects' RAG mode.
+   * `project_knowledge_search` — ranked entry point into the bound documents.
    *
-   * Only meaningful in retrieval mode, but always registered: a project can cross the budget
-   * between two turns, and a tool that appears and disappears depending on size would make
-   * the model's tool list unstable (and break prefix caching) for no benefit.
+   * A convenience, not the mechanism: the charter lists every document and a thread can read
+   * any of them directly. This tool exists for the case where the thread does not yet know
+   * which file to open, and its hits cite `path:line` so the next step is a file read.
    */
   const knowledgeSearch: HostToolDefinition = {
     name: 'project_knowledge_search',
     description:
-      'Search the project knowledge base and return the most relevant passages. Use this before answering questions about project documentation, specifications, or design decisions when the project charter says knowledge is in retrieval mode.',
+      'Search the project knowledge base and return the most relevant passages, each cited as path:line. Use it when you do not know which of the documents listed in the project charter answers your question; then read that file, which is authoritative over this index.',
     parameters: {
       type: 'object',
       properties: {
@@ -339,12 +339,9 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
         return {
           ok: true,
           query,
-          mode: result.state.mode,
           hits: result.hits,
           text: renderHits(result.hits),
-          ...(result.state.mode === 'context'
-            ? { hint: 'This project is small enough that its knowledge is already in the prompt; a search is only needed if the passage above is not enough.' }
-            : {}),
+          hint: 'Passages come from the search index, which is rebuilt on demand. Open the cited file for its current contents.',
         };
       } catch (error) {
         return asToolResult(error);
@@ -356,7 +353,7 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
   const knowledgeManage: HostToolDefinition = {
     name: 'project_knowledge',
     description:
-      'Manage the project knowledge base: list what is indexed and which mode it is in, add or remove bound files/folders, or rebuild the index after the files changed.',
+      'Manage the project knowledge base: list what is indexed, add or remove bound files/folders, or rebuild the search index after the files changed.',
     parameters: {
       type: 'object',
       properties: {

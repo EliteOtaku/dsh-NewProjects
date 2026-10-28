@@ -29,9 +29,9 @@ Claude Code **Projects (Beta)** 式的动态协作中枢，作为 DeepSeek Harne
 
 | 能力 | 实现 |
 | --- | --- |
-| **Coordinator + 并行 Threads** | `project_coordinate` 工具拆解目标，每个任务一个 `subagents` 子会话 + 独立 `git branch` + 私有 worktree。每日配额默认 200，全有或全无地预留，启动失败自动退还。（**配额目前按项目独立计数，未做到跨项目合计**——见 [`docs/GAPS.md`](docs/GAPS.md) 的 `GAP-01`。**拆解目前是确定性 bullet 分析，未用模型**——见 `GAP-26`。） |
+| **Coordinator + 并行 Threads** | `project_coordinate` 工具拆解目标，每个任务一个 `subagents` 子会话 + 独立 `git branch` + 私有 worktree。每日配额 200，**按用户跨项目合计**（账本在 `~/.dsh/dsh-newprojects/quota.json`，路径可配），全有或全无地预留，启动失败自动退还；项目自己的 `dailyThreadQuotaMax` 是偏好而非硬限。（**拆解目前是确定性 bullet 分析，未用模型**——见 [`docs/GAPS.md`](docs/GAPS.md) 的 `GAP-26`。） |
 | **跨线程共享记忆** | `project_memory_sync` 写入决策后广播到所有**正在运行**的线程；新线程启动前缀自动带上全量记忆。记忆渲染成字节稳定的 system prompt 段，命中 provider 端 prefix cache。 |
-| **项目知识（挂载式）** | 绑定文件或目录后，charter 渲染**清单**让线程自己读（对照官方的 `/mnt/project-files` 挂载模型）；另提供 BM25 检索与目录树/精确读取作为便利工具。**不是 RAG 模式切换**——那是 chat Projects 的机制，Code Projects 没有。 |
+| **项目知识（挂载式）** | 绑定文件或目录后，charter 渲染**索引**（每份文档一行：路径 + 字符数）让线程自己读盘，正文永不进 prompt（对照官方的 `/mnt/project-files` 挂载 + 开局读 `MEMORY.md` 索引）；BM25 检索是便利工具。**不是 RAG 模式切换**——那是 chat Projects 的机制，Code Projects 没有。（**charter 里的路径尚未锚定项目根，线程在自己的 worktree 里解析不到**——见 [`docs/GAPS.md`](docs/GAPS.md) 的 `GAP-22a`。） |
 | **自动执行与 CI/PR 自愈** | 线程自己跑测试、commit、push、开 PR。`/project heal` 与后台巡检读 `gh pr checks` / review comments，判定 `heal` / `wait` / `escalate` / `transition`。 |
 | **Overview 面板** | `project_overview` 工具与 `/project` 命令输出状态桶 + 当日配额 + 知识状态。**尚未接入会话投影**，面板不会随会话事件自动刷新——见 [`docs/GAPS.md`](docs/GAPS.md) 的 `GAP-03`。**桶目前是五类，官方是六组**——见 `GAP-04`。 |
 
@@ -79,14 +79,26 @@ cmd /c mklink /J "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-newp
 官方 Code Projects 的知识机制是**把项目文件挂载成文件夹**（`/mnt/project-files`），线程用普通文件工具自己读。
 `code.claude.com` 全文里 `RAG`／`retrieval`／`project knowledge` **各出现 0 次**——那套「全文 vs 检索」的二分属于 **claude.ai chat 的旧版 Projects**（无 threads、无 coordinator）。
 
-因此本实现采用 **paths-first**：
+官方给线程的另一半是**一份开局就读的索引**：「Every cloud thread reads the index file `MEMORY.md` when it starts and **opens the other files when it needs them**」。
+引导在**读取协议**里（索引 eager / 正文 lazy），不是 prompt 里一句「回答前先查知识」。
 
-- **charter 渲染清单**，线程按需读取；路径锚定项目根，因为线程 cwd 在自己的 worktree 里，那里只有 baseCommit 已提交的文件；
-- **导航优先**：`project_knowledge` 的 `tree` / `read` 动作比「一次检索命中」更贴近挂载模型；
-- **BM25 检索是便利工具**，索引在查询时按需重建，不是一种「模式」；
-- **全文注入是可选优化**，配置 `inlineKnowledgeMaxChars`（默认关闭），低于该值时才注入正文以命中 prefix cache。它是优化，不是机制。
+因此本实现采用 **paths-first**。**已实现**：
 
-> 原本的实现（阈值常量 + 全文/检索二分 + 陈旧检测）建立在错误的产品前提上，已在 `docs/GAPS.md` 的 `GAP-22` 中撤销。那一轮复核的证据见 `docs/REVIEW-RESPONSE.md`。
+- **charter 渲染索引**：每份已索引文档一行「路径 — 字符数」，加一句「文件为准、索引可能滞后」。**正文永不进 prompt**。字符数是让模型能*选*的那个信息——读 2 KB 的决策记录和读 400 KB 的转录是两个不同的决定。
+- **没有上下文预算**。正文不进前缀，所以什么都不随模型窗口变。唯一有明文的常驻文本预算是 project instructions 的 **16 000 字符**，在 charter 装配处**报警而不截断**。
+- **没有陈旧问题**。线程读盘上当前内容，所以改了文件不重建索引也不会得到旧答案。索引本身可能滞后，但它只影响搜索排序：命中给出 `path:行号`，线程照样去读当前文件。
+- **没有模式**。没有 `context`/`rag` 二分，就没有阈值抖动，也没有会被遗留的 flag。
+- **收集上限与官方同形，是条目数而不是字符数**：最多 100 份文档（官方 folders 是「first 100 files」），单文件 2 MB（比官方的 30 MB 严，因为我们要把正文切块存进一个 JSON 索引），索引总量 2 000 万字符。触到任一上限就停下并记 warning，说明是**哪一个**上限。
+- **BM25 检索是便利工具**，不是一种「模式」。
+
+**尚未实现**（见 `docs/GAPS.md`）：
+
+- ⚠️ **路径还没锚定项目根**（`GAP-22a`，P1）：charter 给的是相对项目 root 的路径，而线程 cwd 在自己的 worktree 里，所以它**现在解析不到**那些路径。这是第一批的收尾项。
+- `project_knowledge` 的 `tree` / `read` 导航动作（`GAP-22` 第 3 条）。
+- 索引在查询时按需重建（`GAP-22` 第 4 条）；目前需要显式 `/project knowledge rebuild`。
+- `inlineKnowledgeMaxChars`（`GAP-22` 第 7 条）：注入路径整个删掉了，效果等于默认关闭，但没有这个旋钮。
+
+> 原本的实现（阈值常量 + 全文/检索二分 + 陈旧检测）建立在错误的产品前提上，已在 `docs/GAPS.md` 的 `GAP-22` 中撤销。两轮复核的证据见 `docs/REVIEW-RESPONSE.md` 与 `docs/REVIEW-RESPONSE-2.md`。
 
 检索中文按重叠 bigram 切词（`项目知识` → `项目` / `目知` / `知识`），所以中文查询不需要分词器也能命中。
 结果按 `path:起止行` 引用，排序稳定（同分按路径与行号），两次相同查询结果完全一致——否则 prompt 前缀缓存会失效。
@@ -109,18 +121,20 @@ cmd /c mklink /J "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-newp
 ## 目录布局
 
 ```
-src/core/          纯逻辑：manifest / quota / memory / planner / healing / overview / vcs /
-                   knowledge（切分·BM25）/ knowledgeSource（唯一碰文件） / engine
+src/core/          纯逻辑：manifest / quota（项目偏好）/ quotaLedger（用户级跨项目硬限）/
+                   memory / planner / healing / overview / vcs /
+                   knowledge（切分·BM25·索引渲染）/ knowledgeSource（唯一碰文件） / engine
 src/host/          Host 适配：subprocess 命令行、subagents 线程、tools、commands、类型声明
 test/unit/         纯逻辑单测（内存 fake）
 test/engine.test.ts 全链路：真实临时目录 + fake git / fake 线程
-test/knowledge.test.ts 知识层接入：真实文件、真实索引文件
+test/knowledge.test.ts 知识层接入：真实文件、真实索引文件、charter 只含索引不含正文
 test/integration/  真实 git 集成：真仓库、真 worktree、真 push（无 git 时自动 skip）
 test/commands|tools|index.test.ts  适配层与插件入口
-docs/              GAPS.md（差距登记簿）· REVIEW-REQUEST.md · REVIEW-RESPONSE.md（外部复核）
+docs/              GAPS.md（差距登记簿）· REVIEW-REQUEST.md ·
+                   REVIEW-RESPONSE.md / REVIEW-RESPONSE-2.md（外部复核，两轮）
 ```
 
-共 **261 项测试**（`node:test`）。除集成测试外全部跑在内存 fake 上，不需要 git 或真实子会话。
+共 **285 项测试**（`node:test`）。除集成测试外全部跑在内存 fake 上，不需要 git 或真实子会话。
 
 `src/core/` **不 import 任何 `@deepseek-ai/dsh-*`**：外部插件解析不到 Host 内部包。
 Git 与 `gh` 一律经 `CommandRunner` 端口调用，因此 SSH / 容器部署时命令在正确机器上执行。
@@ -147,7 +161,7 @@ npm test           # 只跑测试
 
 ## 已知未实现部分
 
-相对官方 Claude Code Projects 还有若干未实现的能力（会话投影、六分组 Overview、模型拆解与建议线程、goal 持久化、Library、PR 聚合、Pause/Archive、全局配额、审批等）与若干有意为之的边界（重启后后台自愈停摆、云端 sandbox 差异等）。
+相对官方 Claude Code Projects 还有若干未实现的能力（会话投影、六分组 Overview、模型拆解与建议线程、goal 持久化、Library、PR 聚合、Pause/Archive、审批等）与若干有意为之的边界（重启后后台自愈停摆、云端 sandbox 差异等）。
 
 完整清单、代码证据、依据来源与验收标准见 **[docs/GAPS.md](./docs/GAPS.md)**，按批次推进。那份文档是判断「某个能力到底有没有」的唯一依据——不要凭本文件的段落推断。
 

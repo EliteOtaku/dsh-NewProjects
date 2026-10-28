@@ -111,7 +111,10 @@ export function renderOverviewMarkdown(overview: ProjectOverview): string {
   lines.push(`# ${overview.name}`, '');
   lines.push(`- project: \`${overview.projectId}\` (r${overview.revision})`);
   lines.push(`- root: \`${overview.rootDir}\``);
-  lines.push(`- quota: ${overview.quota.created}/${overview.quota.max} threads on ${overview.quota.day}`);
+  lines.push(`- quota: ${overview.quota.created}/${overview.quota.max} threads from this project on ${overview.quota.day}`);
+  if (overview.quota.global !== undefined) {
+    lines.push(`- quota (enforced, all projects): ${overview.quota.global.created}/${overview.quota.global.max}`);
+  }
   lines.push(`- memory: ${overview.memories.length} decisions, prefix \`${overview.prefixFingerprint}\``);
   lines.push(`- threads: ${overview.totals.threads} total, ${overview.totals.active} active`);
   for (const warning of overview.warnings) lines.push(`- WARNING: ${warning}`);

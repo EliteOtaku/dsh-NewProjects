@@ -153,7 +153,15 @@ describe('end-to-end project lifecycle', () => {
     const runner = new HybridRunner();
     const threads = new FakeThreads();
     const clock = fixedClock();
-    const engine = new ProjectEngine(root, { runner, threads, clock, ids: sequentialIds() });
+    const engine = new ProjectEngine(root, {
+      runner,
+      threads,
+      clock,
+      ids: sequentialIds(),
+      // The user-wide ledger is shared by every project by design, so a test must point it
+      // somewhere disposable or it would spend the real daily budget.
+      quotaLedgerPath: join(root, 'quota-ledger.json'),
+    });
     const detach = engine.attach();
     cleanups.push(async () => {
       detach();
