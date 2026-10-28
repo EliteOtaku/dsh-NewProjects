@@ -190,6 +190,71 @@ export async function createPullRequest(
 }
 
 /** One CI check from `gh pr checks --json`. */
+/**
+ * Meaning of a `gh` failure for the polling loop.
+ *
+ * The distinction exists because the two kinds must not share a code path: a merged pull
+ * request whose branch was deleted answers "no pull requests found", which is the *end*
+ * of monitoring and should settle the thread, while an expired token answers the same
+ * way to a naive caller and must not settle anything. Reporting both as one error list
+ * (the earlier behaviour) leaves a finished thread stuck in `awaiting_review` forever and
+ * tells the user nothing about either case.
+ *
+ * - `benign`: not a failure — no CI is configured, nothing has run yet.
+ * - `retryable`: network, auth expiry, rate limiting, unknown. Keep polling, and surface
+ *   the message so a broken token does not look like a quiet pull request.
+ * - `terminal`: the pull request or branch is gone. Stop polling this thread.
+ */
+export type GhFailureKind = 'benign' | 'retryable' | 'terminal';
+
+const BENIGN_FAILURES = ['no checks reported', 'no checks on this branch'];
+const RETRYABLE_FAILURES = [
+  'http 401',
+  'http 403',
+  'http 429',
+  'http 5',
+  'bad credentials',
+  'rate limit',
+  'abuse detection',
+  'timeout',
+  'timed out',
+  'etimedout',
+  'econnrefused',
+  'econnreset',
+  'enotfound',
+  'network',
+  'temporarily unavailable',
+  'could not connect',
+  'bad gateway',
+  'server error',
+];
+const TERMINAL_FAILURES = [
+  'no pull requests found',
+  'could not resolve to a pullrequest',
+  'could not resolve to a repository',
+  'pull request not found',
+  'http 404',
+  'not found',
+  'does not exist',
+  'no commits between',
+  'repository not found',
+  'unknown revision',
+  'no such remote',
+  'couldn\'t find',
+];
+
+/** Classify one `gh` failure message. Unknown messages stay `retryable` on purpose. */
+export function classifyGhFailure(message: string): GhFailureKind {
+  const value = message.trim().toLowerCase();
+  if (value.length === 0) return 'benign';
+  for (const marker of BENIGN_FAILURES) if (value.includes(marker)) return 'benign';
+  for (const marker of RETRYABLE_FAILURES) if (value.includes(marker)) return 'retryable';
+  for (const marker of TERMINAL_FAILURES) if (value.includes(marker)) return 'terminal';
+  // Default to retryable: an unclassified failure that quietly unsubscribed a thread
+  // would stop monitoring on a message nobody has seen before, and stop permanently.
+  return 'retryable';
+}
+
 export interface RawCheck {
   name: string;
   state: string;

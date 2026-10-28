@@ -15,6 +15,7 @@ import {
   buildHealPrompt,
   consumeComments,
   decideHealAction,
+  failureSignature,
   hasActionableSignal,
   mergeSnapshot,
   normaliseConclusion,
@@ -121,6 +122,7 @@ describe('decideHealAction', () => {
       comments: [comment('c1')],
       consumedCommentIds: [],
       healAttempts: 0,
+      consecutiveFails: 0,
       threadTitle: 'login',
     });
     assert.equal(action.kind, 'transition');
@@ -135,6 +137,7 @@ describe('decideHealAction', () => {
       comments: [],
       consumedCommentIds: [],
       healAttempts: 0,
+      consecutiveFails: 0,
       threadTitle: 'login',
     });
     assert.equal(action.kind, 'transition');
@@ -149,6 +152,7 @@ describe('decideHealAction', () => {
       comments: [],
       consumedCommentIds: [],
       healAttempts: 0,
+      consecutiveFails: 0,
       threadTitle: 'login',
     });
     // Acting mid-run would fix a failure the pipeline is about to re-report, and burn one
@@ -164,6 +168,7 @@ describe('decideHealAction', () => {
       comments: [],
       consumedCommentIds: [],
       healAttempts: 0,
+      consecutiveFails: 0,
       threadTitle: 'login',
     });
     assert.equal(action.kind, 'none');
@@ -177,6 +182,7 @@ describe('decideHealAction', () => {
       comments: [],
       consumedCommentIds: [],
       healAttempts: 0,
+      consecutiveFails: 0,
       threadTitle: 'login',
     });
     assert.equal(action.kind, 'heal');
@@ -191,6 +197,7 @@ describe('decideHealAction', () => {
       comments: [comment('c1')],
       consumedCommentIds: [],
       healAttempts: 0,
+      consecutiveFails: 0,
       threadTitle: 'login',
     });
     assert.equal(action.kind, 'heal');
@@ -204,6 +211,7 @@ describe('decideHealAction', () => {
       comments: [comment('c1')],
       consumedCommentIds: ['c1'],
       healAttempts: 1,
+      consecutiveFails: 1,
       threadTitle: 'login',
     });
     assert.equal(action.kind, 'none');
@@ -217,6 +225,7 @@ describe('decideHealAction', () => {
       comments: [],
       consumedCommentIds: [],
       healAttempts: MAX_HEAL_ATTEMPTS,
+      consecutiveFails: MAX_HEAL_ATTEMPTS,
       threadTitle: 'login',
     });
     assert.equal(action.kind, 'escalate');
@@ -233,6 +242,7 @@ describe('decideHealAction', () => {
       comments: [],
       consumedCommentIds: [],
       healAttempts: MAX_HEAL_ATTEMPTS,
+      consecutiveFails: MAX_HEAL_ATTEMPTS,
       threadTitle: 'login',
     });
     assert.equal(action.kind, 'transition');
@@ -246,6 +256,7 @@ describe('decideHealAction', () => {
       comments: [],
       consumedCommentIds: [],
       healAttempts: 0,
+      consecutiveFails: 0,
       threadTitle: 'login',
     });
     assert.equal(action.kind, 'heal');
@@ -269,6 +280,7 @@ describe('buildHealPrompt', () => {
     comments: [],
     consumedCommentIds: [],
     healAttempts: 1,
+    consecutiveFails: 1,
     threadTitle: 'login',
   };
 
@@ -347,5 +359,80 @@ describe('mergeSnapshot / consumeComments', () => {
       comment('c'),
     ]);
     assert.deepEqual([...second].sort(), ['a', 'b', 'c']);
+  });
+});
+
+describe('failureSignature', () => {
+  it('names the failing checks in a stable order', () => {
+    assert.equal(failureSignature([check('unit', 'fail'), check('build', 'fail')]), 'build|unit');
+    // Reversing the input must not look like a different problem.
+    assert.equal(failureSignature([check('build', 'fail'), check('unit', 'fail')]), 'build|unit');
+  });
+
+  it('ignores checks that are passing, pending or skipped', () => {
+    assert.equal(
+      failureSignature([check('build', 'pass'), check('unit', 'pending'), check('lint', 'skipped')]),
+      '',
+    );
+  });
+
+  it('changes when one more check starts failing', () => {
+    assert.notEqual(failureSignature([check('build', 'fail')]), failureSignature([check('build', 'fail'), check('unit', 'fail')]));
+  });
+
+  it('is empty for an empty list', () => {
+    assert.equal(failureSignature([]), '');
+  });
+});
+
+describe('decideHealAction: consecutive-failure budget', () => {
+  it('escalates once the same failure has survived the budget', () => {
+    const action = decideHealAction({
+      prRef: '7',
+      prState: 'open',
+      checks: [check('build', 'fail')],
+      comments: [],
+      consumedCommentIds: [],
+      healAttempts: MAX_HEAL_ATTEMPTS,
+      consecutiveFails: MAX_HEAL_ATTEMPTS,
+      threadTitle: 'login',
+    });
+    assert.equal(action.kind, 'escalate');
+    assert.match(action.kind === 'escalate' ? action.question : '', /same failure/);
+    assert.match(action.kind === 'escalate' ? action.reason : '', /survived/);
+  });
+
+  it('keeps healing while the lifetime count is high but the streak is low', () => {
+    // Six review rounds, each one new: a lifetime budget would have given up here, which
+    // is exactly the case this split exists for.
+    const action = decideHealAction({
+      prRef: '7',
+      prState: 'open',
+      checks: [check('build', 'fail')],
+      comments: [comment('c9')],
+      consumedCommentIds: [],
+      healAttempts: 9,
+      consecutiveFails: 0,
+      threadTitle: 'login',
+    });
+    assert.equal(action.kind, 'heal');
+  });
+
+  it('names the streak length honestly when escalating', () => {
+    const action = decideHealAction({
+      prRef: '7',
+      prState: 'open',
+      checks: [check('build', 'fail'), check('unit', 'fail')],
+      comments: [],
+      consumedCommentIds: [],
+      healAttempts: 7,
+      consecutiveFails: 3,
+      threadTitle: 'login',
+    });
+    assert.equal(action.kind, 'escalate');
+    const question = action.kind === 'escalate' ? action.question : '';
+    assert.match(question, /3 automatic repairs in a row/);
+    assert.match(question, /7 round\(s\) total/);
+    assert.match(question, /build, unit/);
   });
 });

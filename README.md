@@ -32,7 +32,7 @@ Claude Code **Projects (Beta)** 式的动态协作中枢，作为 DeepSeek Harne
 | **Coordinator + 并行 Threads** | 协调者（就是调用工具的那个模型）自己给出拆解，经 `project_coordinate` 的 `tasks` 参数传入后直接启动；没给就降级为正则兜底，而**猜出来的拆解一律先提议不启动**（`Suggested threads`，`/project start` 才起，24 小时过期自动丢弃）。每个任务一个 `subagents` 子会话 + 独立 `git branch` + 私有 worktree。每日配额 200，**按用户跨项目合计**（账本在 `~/.dsh/dsh-newprojects/quota.json`，路径可配），全有或全无地预留，启动失败自动退还；项目自己的 `dailyThreadQuotaMax` 是偏好而非硬限。 |
 | **跨线程共享记忆** | `project_memory_sync` 写入决策后广播到所有**正在运行**的线程；新线程启动前缀自动带上全量记忆。记忆渲染成字节稳定的 system prompt 段，命中 provider 端 prefix cache。 |
 | **项目知识（挂载式）** | 绑定文件或目录后，charter 渲染**索引**（每份文档一行：路径 + 字符数）并给出 **`Project root`**，线程按需从项目根读盘，正文永不进 prompt（对照官方的 `/mnt/project-files` 挂载 + 开局读 `MEMORY.md` 索引）。路径锚定项目根而非线程自己的 worktree，因为 worktree 只含分支切点前已提交的文件。BM25 检索是便利工具。**不是 RAG 模式切换**——那是 chat Projects 的机制，Code Projects 没有。 |
-| **自动执行与 CI/PR 自愈** | 线程自己跑测试、commit、push、开 PR。`/project heal` 与后台巡检读 `gh pr checks` / review comments，判定 `heal` / `wait` / `escalate` / `transition`。 |
+| **自动执行与 CI/PR 自愈** | 线程自己跑测试、commit、push、开 PR。`/project heal` 与后台巡检读 `gh pr checks` / review comments，判定 `heal` / `wait` / `escalate` / `transition`。修复预算按**同一组检查连续失败**计（3 次后升级，出现进展即归零）；`gh` 失败分「终局」与「可重试」——终局（PR/分支已不存在）不记 error，改为重读 PR 终态并自动退订，可重试（网络/限流/认证）记 error 且不退订；`/project thread <id> unwatch\|watch` 可手动退订与恢复。 |
 | **Overview 面板** | `project_overview` 工具与 `/project` 命令输出状态桶 + 当日配额 + 知识状态。**尚未接入会话投影**，面板不会随会话事件自动刷新——见 [`docs/GAPS.md`](docs/GAPS.md) 的 `GAP-03`。**桶目前是五类，官方是六组**——见 `GAP-04`。 |
 
 ## 安装
@@ -136,7 +136,7 @@ docs/              GAPS.md（差距登记簿）· REVIEW-REQUEST.md ·
                    REVIEW-RESPONSE.md / REVIEW-RESPONSE-2.md（外部复核，两轮）
 ```
 
-共 **295 项测试**（`node:test`）。除集成测试外全部跑在内存 fake 上，不需要 git 或真实子会话。
+共 **318 项测试**（`node:test`）。除集成测试外全部跑在内存 fake 上，不需要 git 或真实子会话。
 
 `src/core/` **不 import 任何 `@deepseek-ai/dsh-*`**：外部插件解析不到 Host 内部包。
 Git 与 `gh` 一律经 `CommandRunner` 端口调用，因此 SSH / 容器部署时命令在正确机器上执行。
@@ -156,6 +156,8 @@ npm test           # 只跑测试
 - **一轮结束 ≠ 已交付**：线程收尾消息里没有 PR 链接时进入 `needs_feedback`，而不是给一个声称产物存在的 `completed` 徽章。
 - **广播只推正在跑的线程**：给 idle 子会话发消息会新起一轮，把所有已完成线程都唤醒会白烧 token。官方**根本不给运行中线程更新**，所以这条属于超额实现，不是缺口。
 - **未知 CI 状态算 `pending`，不算通过**：假绿是自愈器绝不能产生的输出。
+- **修复预算按连续失败计，不按生命周期累计**：PR 开两周、被评审四轮、每轮都是新意见时，累计计数会在第四轮误报「修不好」，而那四轮里一次都没重复。签名变化或新评论到达即归零。
+- **「读不到 PR」不等于「PR 没问题」**：`gh` 失败必须分类。把一次 401 当成「没有检查也没有评论」，线程会永远安静地留在 `awaiting_review`。
 - **不可逆动作与它的防护同批**：删 worktree、归档项目这类动作不该排在最后——在它之前每一次操作都在那个风险上。
 - **检索工具始终注册，不随状态增删**：项目随时可能变，工具列表来回变会让 provider 的 prompt 缓存失效，且没有任何收益。
 - **索引是派生状态**：`.dsh-project/KNOWLEDGE_INDEX.json` 已 gitignore，随时可从绑定的文件重建；坏索引被当作「没有索引」而不是致命错误。

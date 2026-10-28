@@ -70,7 +70,7 @@
 | 优先级 | 含义 | 条目 |
 | --- | --- | --- |
 | **P0** | 违背规格或官方原文 | ~~`GAP-01`~~ ✅ 已关闭 2026-10-27 |
-| **P1** | 会静默产出错误结果 | `GAP-23` `GAP-24`（`GAP-22` / `GAP-22a` 已关闭） |
+| **P1** | 会静默产出错误结果 | ~~`GAP-23`~~ ✅ ~~`GAP-24`~~ ✅（`GAP-22` / `GAP-22a` 已关闭）—— **P1 已清空** |
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | `GAP-03` `GAP-04` `GAP-05` |
 | **P3** | 官方有、我们无，独立功能 | `GAP-06` `GAP-09` ~ `GAP-13` `GAP-29` |
 | **P4** | 项目管理类，缺了不能「管起来」 | `GAP-14` `GAP-15` `GAP-17` `GAP-18` `GAP-25` `GAP-28` |
@@ -169,40 +169,44 @@
   4. ✅ 单测覆盖「worktree cwd + charter 路径 → 命中项目根文件」—— 同第 1 条
   5. ✅ 检索结果带 root —— 「carries the root on search hits, because a citation is only usable with it」
 
-### GAP-23 自愈计数应统计「连续失败」而不是生命周期总数
+### GAP-23 自愈计数应统计「连续失败」而不是生命周期总数 ✅ 已做
 
 - **依据**：`OFFICIAL` 把「线程持续监视它的 PR」当成**预期成本**列出：「Threads watching a pull request: an idle thread wakes up and uses your plan again when CI fails or a review comment arrives on its pull request.」
-- **现状**：`MAX_HEAL_ATTEMPTS = 3`（`src/core/healing.ts:20`，注释写「Maximum automatic healing rounds before the thread escalates to the user」）是**线程生命周期内的累计次数**，每轮自愈 `+1`（`src/core/engine.ts:874`），只有用户手动 `retry` 才清零（`:730`）。
+- **原状**：`MAX_HEAL_ATTEMPTS = 3` 是**线程生命周期内的累计次数**，每轮自愈 `+1`，只有用户手动 `retry` 才清零。
 - **为什么是 P1**：一个 PR 开两周、被 review 四轮、每轮都带来合理的新意见 —— 第四轮会撞上限升 `needs_feedback`，但那四轮里没有一次是「修不好」，它们是四件不同的事。**把正常的评审节奏误判成失败**，而且用户看到的提示是「修不好，需要你介入」。
-- **做法**：改成**连续失败计数**，有进展时清零。进展的判定用现成数据：
-  - 一轮之后失败的 check 集合变了（有 check 从 `fail` 转 `pass`，或失败集合不再相同）→ 清零；
-  - 本轮处理的是**新来的** review comment（`consumedCommentIds` 已有，`ProjectReviewSnapshot` 里存着）→ 清零；
-  - 同一组 check 连续 3 次 `fail` → 升级给人。
-- **要小心的**：
-  - 字段名要改（`healAttempts` → 建议 `consecutiveFails` + 保留一个只读的 `healRounds` 用于展示），否则老数据与老语义混在一起；
-  - 升级文案要说清是「同一组检查连续失败」，不是「修了三次」。
-- **验收标准**：
-  1. 失败集合变化后计数归零（单测）；
-  2. 新评论到达后计数归零（单测）；
-  3. 同一组失败连续 3 次 → `needs_feedback` 且文案含检查名；
-  4. 四轮不同意见的自愈不会撞上限。
+- **实际做法（2026-10-29 关闭）**：
+  1. `MAX_HEAL_ATTEMPTS = 3` 保留含义但改为**连续**：`src/core/healing.ts:22` 的注释改为「Consecutive rounds against an unchanged failure signature before escalating」，模块头补了为什么不是生命周期的完整理由（四周新意见 vs 三次修不好）。
+  2. 新增 `failureSignature(checks)`（`src/core/healing.ts:102`）：只取**失败**项的名字、排序后 `|` 连接。空串 = 没有失败，也用作复位信号。排序让「同一组检查换了个顺序」不算新问题；加入新失败项则算新问题。
+  3. `HealInput` 增加必填 `consecutiveFails`，`healAttempts` 降级为**仅展示**（`src/core/healing.ts:113-121`）。`decideHealAction` 的门槛改看 `consecutiveFails >= MAX_HEAL_ATTEMPTS`（`:191`），升级文案改为「N automatic repairs in a row left the same failure in place（M round(s) total）」，并列出仍在失败的检查名。
+  4. `ProjectThreadDescriptor` 增加 `consecutiveFails` / `failureSignature`（`src/types.ts:103-113`）。`observeOne` 计算 `continuing = 失败签名非空 && 与上次相同 && 没有新评论`（`src/core/engine.ts:1148-1151`），`continuing` 才累加，否则从 0 起；heal 后写回 `consecutiveFails + 1` 与本次签名（`:1210-1212`）。`retry` 一并清零三项（`:1013-1015`）。
+  5. 预算的语义仍是「最多 3 次自动修复」：0→heal(1)、1→heal(2)、2→heal(3)、3→escalate。
+- **验收标准（全部已有测试）**：
+  1. ✅ 失败集合变化后计数归零 —— `test/engine.test.ts` `healSweep: consecutive-failure budget` → 「resets the counter when the failure set changes」（断言 `consecutiveFails === 1`、`failureSignature === 'lint'`、`healAttempts === 3`）。
+  2. ✅ 新评论到达后计数归零 —— 同组「resets the counter when a new review comment arrives」。
+  3. ✅ 同一组失败连续 3 次 → `needs_feedback` 且文案含检查名 —— 「heals the same unchanged failure three times, then escalates」（断言 `feedbackPrompt` 匹配 `/same failure/`）。
+  4. ✅ 四轮不同意见不会撞上限 —— 「does not escalate on a long review that keeps producing new comments」（五轮全部 heal，`consecutiveFails === 1`、`healAttempts === 5`）。
+  5. ✅ 纯函数层 —— `test/unit/healing.test.ts` `failureSignature` 4 项与 `decideHealAction: consecutive-failure budget` 3 项（含「lifetime 9 但连续 0 → 仍 heal」）。
 
-### GAP-24 `healSweep` 分不清「PR 已终局」与「GitHub 挂了」，且没有显式退订
+### GAP-24 `healSweep` 分不清「PR 已终局」与「GitHub 挂了」，且没有显式退订 ✅ 已做
 
-- **现状**：
-  - `healSweep` 的候选是 `branch !== undefined && status ∈ {awaiting_review, ci_fixing, running}`（`src/core/engine.ts:759`），**没有「已终局」的概念**；
-  - 每线程一轮 `gh` 调用，任何异常都进 `result.errors`（`:783-784`）并被 `describeError` 压成一行文本 —— **「PR 被合并后分支被删了」和「网络/认证挂了」走同一条路径**；
+- **原状**：
+  - `healSweep` 的候选只看 `branch !== undefined && status ∈ {awaiting_review, ci_fixing, running}`，**没有「已终局」的概念**；
+  - `readChecks` / `readReviewComments` 把 `gh` 失败当成 `error` 字符串返回，而 `observeOne` **从不看这个字段** —— 于是一次 401、一次限流、一个已被删除的分支，全都变成「这个 PR 没有检查也没有评论」，线程被永远安静地留在 `awaiting_review`；
   - 合并后之所以还能被扫到，是因为状态要等某次成功轮询才知道变 `merged`；而那次轮询本身往往先报错。
 - **依据**：`OFFICIAL`「an idle thread wakes up … when CI fails or a review comment arrives on **its** pull request」+ 官方的止损手段是显式退订：「**To stop that, ask in the thread for it to stop watching the pull request.**」
-- **做法**：
-  1. 把 `gh` 失败分成两类：**终局**（PR 不存在 / 分支不存在 / 无权访问该 ref —— 应转去查 PR 终态，大概率 `merged` → `resolved`）与**可重试**（网络、限流、认证过期）。终局不是 error，可重试才是。
-  2. 加**显式退订**：descriptor 增加 `unwatchAt?: number`（或 `watching: boolean`）。合并后、转 `resolved` 后、项目归档后自动退订；提供 `unwatch` 动作。`healSweep` 跳过已退订线程。
-  3. 现有的「状态不在候选集就不扫」是**隐式**退订，要保留但不能当唯一手段。
-- **验收标准**：
-  1. PR 合并 + 分支删除后，下一轮 sweep 不报 error，线程转终态；
-  2. 网络失败仍报 error 且不影响其他线程；
-  3. 退订后 sweep 不再访问该 PR（用 fake runner 断言零 `gh` 调用）；
-  4. 合并 → 退订的链路有集成测试。
+- **实际做法（2026-10-29 关闭）**：
+  1. 新增纯函数 `classifyGhFailure(message)`（`src/core/vcs.ts:200-247`），三档：`benign`（没配 CI / 还没跑，「no checks reported」）、`retryable`（401/403/429/5xx、限流、超时、DNS、网络）、`terminal`（PR 不存在、分支/仓库不存在、404、no commits between）。**未识别的消息默认 `retryable`**，理由写进代码：悄悄退订一个从未见过的失败会永久失去监视，重试是可恢复的错误。
+  2. `observeOne` 收集 `checks.error` / `inline.error` / `verdicts.error`（`src/core/engine.ts:1120-1145`）：`terminal` → `settleUnreachable`；`retryable` → 抛 `ProjectError('VCS_FAILED', ...)` 进 `result.errors`；只有 `benign` 才继续走判定。
+  3. 新增 `settleUnreachable`（`:1070-1100`）：先按编号重读一次 PR 终态 —— `merged` → `completed`、`closed` → `failed`（并记 `lastError`），**都自动退订**；读不出来（`unknown`）则升 `needs_feedback` 并把原始消息写进问题，同时退订，文案提示可用 `watch` 恢复。不猜 `merged`：猜对了省一次询问，猜错了把「仓库挂了」报成「已完成」。
+  4. `ProjectThreadDescriptor.unwatchAt`（`src/types.ts:114-120`）；`healSweep` 候选增加 `unwatchAt === undefined`（`src/core/engine.ts:1042`）；`transition`（merged/closed）写入 `unwatchAt`（`:1177-1184`）。
+  5. 动作层：`ThreadAction` 增加 `watch` / `unwatch`（`src/core/engine.ts:172`），`manageThread` 实现（`:1025-1045`，`watch` 同时把 `consecutiveFails` 归零）；`project_thread_manage` 的 enum 与描述同步（`src/host/tools.ts:263`）；`/project thread <id> unwatch|watch` 可用，且命令层现在**先校验动词**再派发（`src/host/commands.ts:44-48`、`:236-240`）—— 之前未知动词会穿过 `as` 断言进到没有 `default` 的 switch，调用方随后解引用 `undefined`。
+- **验收标准（全部已有测试）**：
+  1. ✅ 合并 + 分支删除后不报 error 且转终态 —— `test/engine.test.ts` `healSweep: unreachable pull requests` → 「settles a thread whose branch was deleted after the PR merged」（`errors` 为空、`settled` 1、`status === 'completed'`、`unwatchAt` 已设）。
+  2. ✅ 网络/认证失败仍报 error 且不改变状态、不退订 —— 同组「reports an authentication failure instead of reading it as a quiet pull request」。
+  3. ✅ 终态读不出来时提问而不猜测 —— 「asks rather than guessing when the pull request is gone and its state is unreadable」。
+  4. ✅ 退订后不再访问该 PR —— `healSweep: manual subscription` → 「stops polling after `unwatch` and resumes after `watch`」（`observed === 0`，恢复后 `observed === 1` 且 runner 见到 `gh pr checks`）。
+  5. ✅ 退订后 `settled` 线程下一轮不再被扫 —— 见验收 1 的第二段断言（`second.observed === 0`）。
+  6. ✅ 分类器本身 —— `test/unit/ghFailures.test.ts`（8 项，覆盖 deleted branch / 404 / 无 token / 限流 / DNS 超时 / 无 CI / 未识别消息）。
 
 ---
 
@@ -656,12 +660,12 @@
 | **第一批 让输出可信** | `GAP-01` 全局配额 ✅ + `GAP-22` 知识 paths-first ✅ | 无 | 2026-10-27 `9c7ef10`：`GAP-01` 关闭，`GAP-22` 的减法做完（确实净减）；2026-10-29：`GAP-22a`（路径锚定项目根）关闭 —— **第一批完成** |
 | **第二批 让拆解可信** | `GAP-26` 模型优先拆解 + Suggested threads ✅ | 无（可与一批并行） | 后者是前者的保险，必须同批。2026-10-29 关闭 —— **第二批完成** |
 | **第三批 让报回可用** | `GAP-03` 投影 + `GAP-04` 六分组 + `GAP-05` 终态 + `GAP-10` Library + `GAP-11` PR 聚合 | 03 与 04 **可同批**（原判断的串行约束不成立） | 状态部分是加法，不是重构 |
-| **第四批 让裁定可用** | `GAP-12` 卡片动作 + `GAP-18` 审批 + `GAP-14` Pause + `GAP-24` 退订 + `GAP-19` worktree 回收 + `GAP-25` 禁令 | 19 依赖 10（先有清单再删目录） | **不可逆动作（19）与它的防护同批**，不推到最后 |
+| **第四批 让裁定可用** | `GAP-12` 卡片动作 + `GAP-18` 审批 + `GAP-14` Pause + `GAP-19` worktree 回收 + `GAP-25` 禁令 | 19 依赖 10（先有清单再删目录） | **不可逆动作（19）与它的防护同批**，不推到最后。~~`GAP-24` 退订~~ ✅ 已于 2026-10-29 提前做完 |
 | **第五批 减少重复交代** | `GAP-06` goal + `GAP-09` 仓库约定 + `GAP-29` 三件套 | 无 | |
 | **第六批 卫生** | `GAP-13` Usage + `GAP-15` Archive + `GAP-17` 超时 + `GAP-20` purge + `GAP-27` 锁重试 | 无 | |
-| **按需** | `GAP-23` 自愈计数、`GAP-28` 并发偏好 | 无 | 23 属 P1，若第三/四批之间有空档应先插队 |
+| **按需** | `GAP-28` 并发偏好 | 无 | ~~`GAP-23`~~ ✅ 已于 2026-10-29 提前做完 |
 
-> **第一批为什么不含 `GAP-23`（P1 却在按需）**：它的触发条件是「PR 被多轮评审」，只有真的跑起来才会遇到；而 21/22/24 在**第一次自愈**就可能出错。若第一批做完还有余量，`GAP-23` 应第一个补上。
+> **`GAP-23` / `GAP-24` 为什么提前做了（2026-10-29）**：原计划把它们放在第四批与「按需」，理由是触发条件要等到真的跑起来。实际复核后发现 `GAP-24` 的触发条件比预想近得多 —— 只要一个 PR 合并后分支被删，下一轮 sweep 就会安静地失败，而这是**每个正常收尾的 PR 都会走的路**；`GAP-23` 与它共用 `observeOne` 的同一段代码，分开做要改两遍。两项一起做，`observeOne` 的判断只落一次。
 
 > **第一批已完成（2026-10-29）**：`GAP-22a` 曾是第一批唯一的正确性残留——线程**读不到** charter 指给它的知识文件，也就是「让输出可信」还差最后一步。该条已在方案 A 下关闭（charter 渲染 `Project root` + 相对路径 + worktree 说明，检索结果带 root），**不要再按旧状态把它当未完成项**。`GAP-22` 的其余未完成项（`tree` / `read`、查询时按需重建）是能力增强，留在 P3。
 

@@ -758,3 +758,187 @@ describe('healSweep', () => {
     assert.equal(sweep.healed.length, 0);
   });
 });
+
+/**
+ * Routes that make one thread reachable as an open pull request.
+ *
+ * `deliverThread` is the honest way to produce an `awaiting_review` thread: it is the same
+ * path a real thread takes, so the PR reference, the branch and the status cannot drift
+ * from what the polling loop will later read.
+ */
+async function awaitingThread(): Promise<{
+  engine: ProjectEngine;
+  runner: FakeRunner;
+  threads: FakeThreads;
+  threadId: string;
+  branch: string;
+  prNumber: number;
+}> {
+  const { engine, runner, threads } = await harness();
+  await engine.init({ name: 'demo' });
+  repoReady(runner);
+  // A commit exists, otherwise `deliverThread` correctly answers "nothing to commit".
+  runner.on('git status --porcelain', { stdout: ' M src/a.ts\n' });
+  runner.on('git commit', { stdout: '[main abc1234] work\n' });
+  const started = await engine.coordinate(PARENT, '- one', { planOnly: false });
+  const first = started.started[0];
+  const threadId = first?.threadId;
+  const branch = first?.branch;
+  assert.ok(threadId !== undefined, 'the thread must have started');
+  assert.ok(branch !== undefined, 'the thread must have its own branch');
+
+  const prNumber = 7;
+  runner.on('gh pr create', { stdout: `https://github.com/acme/demo/pull/${prNumber}\n` });
+  runner.on(`gh pr view ${branch}`, {
+    stdout: JSON.stringify({
+      number: prNumber,
+      url: `https://github.com/acme/demo/pull/${prNumber}`,
+      state: 'OPEN',
+      isDraft: false,
+      headRefName: branch,
+      reviewDecision: '',
+      mergeable: 'MERGEABLE',
+    }),
+  });
+  runner.on(`gh api repos/{owner}/{repo}/pulls/${String(prNumber)}/comments`, { stdout: '[]' });
+  runner.on(`gh api repos/{owner}/{repo}/pulls/${String(prNumber)}/reviews`, { stdout: '[]' });
+  runner.on(`gh pr view ${String(prNumber)}`, { stdout: JSON.stringify({ state: 'OPEN', isDraft: false }) });
+
+  const delivered = await engine.deliverThread(threadId, {});
+  assert.ok(delivered.prRef !== undefined, 'delivery must record a pull request');
+  return { engine, runner, threads, threadId, branch, prNumber };
+}
+
+describe('healSweep: consecutive-failure budget', () => {
+  it('heals the same unchanged failure three times, then escalates', async () => {
+    const { engine, runner, threadId } = await awaitingThread();
+    runner.on('gh pr checks', { stdout: JSON.stringify([{ name: 'build', state: 'FAILURE' }]) });
+
+    for (const round of [1, 2, 3]) {
+      const sweep = await engine.healSweep(PARENT, AbortSignal.timeout(5000));
+      assert.equal(sweep.healed.length, 1, `round ${String(round)} must heal`);
+      assert.equal(sweep.escalated.length, 0, `round ${String(round)} must not escalate`);
+    }
+
+    const fourth = await engine.healSweep(PARENT, AbortSignal.timeout(5000));
+    assert.equal(fourth.healed.length, 0, 'a fourth identical round must not spend another attempt');
+    assert.equal(fourth.escalated.length, 1);
+    const thread = await engine.requireThread(threadId);
+    assert.equal(thread.status, 'needs_feedback');
+    assert.equal(thread.consecutiveFails, 3);
+    assert.match(thread.feedbackPrompt ?? '', /same failure/);
+  });
+
+  it('resets the counter when the failure set changes', async () => {
+    const { engine, runner, threadId } = await awaitingThread();
+    runner.on('gh pr checks', { stdout: JSON.stringify([{ name: 'build', state: 'FAILURE' }]) });
+    await engine.healSweep(PARENT, AbortSignal.timeout(5000));
+    await engine.healSweep(PARENT, AbortSignal.timeout(5000));
+
+    // A different check fails: the earlier rounds did move the problem along, so the
+    // budget must start over instead of escalating a thread that is making progress.
+    runner.on('gh pr checks', { stdout: JSON.stringify([{ name: 'lint', state: 'FAILURE' }]) });
+    const sweep = await engine.healSweep(PARENT, AbortSignal.timeout(5000));
+    assert.equal(sweep.healed.length, 1);
+    assert.equal(sweep.escalated.length, 0);
+    const thread = await engine.requireThread(threadId);
+    assert.equal(thread.consecutiveFails, 1);
+    assert.equal(thread.failureSignature, 'lint');
+    assert.equal(thread.healAttempts, 3, 'the lifetime counter still records every round');
+  });
+
+  it('resets the counter when a new review comment arrives', async () => {
+    const { engine, runner, threadId, prNumber } = await awaitingThread();
+    runner.on('gh pr checks', { stdout: JSON.stringify([{ name: 'build', state: 'FAILURE' }]) });
+    await engine.healSweep(PARENT, AbortSignal.timeout(5000));
+    await engine.healSweep(PARENT, AbortSignal.timeout(5000));
+
+    runner.on(`gh api repos/{owner}/{repo}/pulls/${String(prNumber)}/comments`, {
+      stdout: JSON.stringify([{ id: 41, user: { login: 'bob' }, body: 'rename the helper', path: 'src/a.ts', line: 3 }]),
+    });
+    const sweep = await engine.healSweep(PARENT, AbortSignal.timeout(5000));
+    assert.equal(sweep.healed.length, 1, 'a new comment is new information, not a repeat failure');
+    const thread = await engine.requireThread(threadId);
+    assert.equal(thread.consecutiveFails, 1);
+  });
+
+  it('does not escalate on a long review that keeps producing new comments', async () => {
+    const { engine, runner, threadId, prNumber } = await awaitingThread();
+    runner.on('gh pr checks', { stdout: JSON.stringify([{ name: 'build', state: 'FAILURE' }]) });
+    // Five rounds, each with a comment nobody has seen before: this is the case a lifetime
+    // budget punished — six weeks of review would have "exhausted" three attempts.
+    for (let round = 1; round <= 5; round += 1) {
+      runner.on(`gh api repos/{owner}/{repo}/pulls/${String(prNumber)}/comments`, {
+        stdout: JSON.stringify([{ id: 100 + round, user: { login: 'bob' }, body: `round ${String(round)}` }]),
+      });
+      const sweep = await engine.healSweep(PARENT, AbortSignal.timeout(5000));
+      assert.equal(sweep.healed.length, 1, `round ${String(round)} must heal`);
+      assert.equal(sweep.escalated.length, 0, `round ${String(round)} must not escalate`);
+    }
+    const thread = await engine.requireThread(threadId);
+    assert.equal(thread.status, 'ci_fixing');
+    assert.equal(thread.consecutiveFails, 1);
+    assert.equal(thread.healAttempts, 5);
+  });
+});
+
+describe('healSweep: unreachable pull requests', () => {
+  it('settles a thread whose branch was deleted after the PR merged', async () => {
+    const { engine, runner, threadId } = await awaitingThread();
+    runner.on('gh pr checks', { exitCode: 1, stderr: 'no pull requests found for branch "project/demo/1-one"' });
+    runner.on('gh pr view 7', { stdout: JSON.stringify({ state: 'MERGED', isDraft: false }) });
+
+    const sweep = await engine.healSweep(PARENT, AbortSignal.timeout(5000));
+    assert.deepEqual(sweep.errors, [], 'a merged pull request is not an error');
+    assert.equal(sweep.settled.length, 1);
+    const thread = await engine.requireThread(threadId);
+    assert.equal(thread.status, 'completed');
+    assert.ok(thread.unwatchAt !== undefined, 'a merged PR cannot change again, so polling stops');
+
+    const second = await engine.healSweep(PARENT, AbortSignal.timeout(5000));
+    assert.equal(second.observed, 0, 'a settled thread is not polled again');
+  });
+
+  it('reports an authentication failure instead of reading it as a quiet pull request', async () => {
+    const { engine, runner, threadId } = await awaitingThread();
+    runner.on('gh pr checks', { exitCode: 1, stderr: 'HTTP 401: Bad credentials (https://api.github.com)' });
+
+    const sweep = await engine.healSweep(PARENT, AbortSignal.timeout(5000));
+    assert.equal(sweep.errors.length, 1);
+    assert.match(sweep.errors[0]?.message ?? '', /401/);
+    const thread = await engine.requireThread(threadId);
+    assert.equal(thread.status, 'awaiting_review', 'a broken token must not settle or heal anything');
+    assert.equal(thread.unwatchAt, undefined, 'and it must not stop watching either');
+  });
+
+  it('asks rather than guessing when the pull request is gone and its state is unreadable', async () => {
+    const { engine, runner, threadId } = await awaitingThread();
+    runner.on('gh pr checks', { exitCode: 1, stderr: 'no pull requests found for branch "project/demo/1-one"' });
+    runner.on('gh pr view 7', { exitCode: 1, stderr: 'HTTP 404: Not Found' });
+
+    const sweep = await engine.healSweep(PARENT, AbortSignal.timeout(5000));
+    assert.equal(sweep.escalated.length, 1);
+    const thread = await engine.requireThread(threadId);
+    assert.equal(thread.status, 'needs_feedback');
+    assert.match(thread.feedbackPrompt ?? '', /no longer be reached/);
+    assert.ok(thread.unwatchAt !== undefined);
+  });
+});
+
+describe('healSweep: manual subscription', () => {
+  it('stops polling after `unwatch` and resumes after `watch`', async () => {
+    const { engine, runner, threadId } = await awaitingThread();
+    runner.on('gh pr checks', { stdout: JSON.stringify([{ name: 'build', state: 'SUCCESS' }]) });
+
+    const off = await engine.manageThread(PARENT, threadId, 'unwatch', undefined, AbortSignal.timeout(5000));
+    assert.match(off.message, /stopped polling/);
+    assert.equal((await engine.healSweep(PARENT, AbortSignal.timeout(5000))).observed, 0);
+
+    const on = await engine.manageThread(PARENT, threadId, 'watch', undefined, AbortSignal.timeout(5000));
+    assert.match(on.message, /resumed polling/);
+    const sweep = await engine.healSweep(PARENT, AbortSignal.timeout(5000));
+    assert.equal(sweep.observed, 1);
+    assert.ok(runner.saw('gh pr checks'), 'watching again means one `gh` round again');
+  });
+});
+

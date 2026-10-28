@@ -10,10 +10,16 @@
 
 import type { ProjectEngine } from '../core/engine.js';
 import { describeThread } from '../core/engine.js';
+import type { ThreadAction } from '../core/engine.js';
 import { describeError, isProjectError } from '../core/errors.js';
 import { describeKnowledge } from '../core/knowledge.js';
 import { renderOverviewMarkdown } from '../core/overview.js';
 import type { HostCommandDefinition, HostCommandDefinition as CommandDef } from './hostTypes.js';
+
+/** Every management verb the `thread` sub-command accepts, validated before dispatch. */
+type ThreadVerb = ThreadAction;
+
+const THREAD_VERBS: readonly ThreadVerb[] = ['inspect', 'steer', 'respond', 'retry', 'interrupt', 'close', 'watch', 'unwatch'];
 
 /** Where commands get their engine from. */
 export interface CommandContextSource {
@@ -34,7 +40,7 @@ export const PROJECT_USAGE = [
   '- `/project memory <key> = <decision>` — write one decision and broadcast it',
   '- `/project memory rm <key>` — delete one decision',
   '- `/project threads` — every thread with its status',
-  '- `/project thread <id> [steer|respond|retry|interrupt|close|deliver] <text>` — act on one thread',
+  '- `/project thread <id> [steer|respond|retry|interrupt|close|deliver|watch|unwatch] <text>` — act on one thread',
   '- `/project knowledge` — what is indexed and whether it is in context or retrieval mode',
   '- `/project knowledge add <path...>` — bind files or folders and reindex',
   '- `/project knowledge rm <path...>` — unbind paths and reindex',
@@ -225,10 +231,15 @@ export function buildProjectCommand(source: CommandContextSource): CommandDef {
               const delivered = await engine.deliverThread(threadId, inner.rest.length === 0 ? {} : { body: inner.rest });
               return { kind: 'success', text: delivered.message };
             }
+            // Validate here instead of casting: an unknown verb used to reach the engine,
+            // whose switch has no default, and the caller then dereferenced `undefined`.
+            if (!THREAD_VERBS.includes(action as ThreadVerb)) {
+              return { kind: 'error', text: `unknown thread action \`${action}\`\n${PROJECT_USAGE}` };
+            }
             const outcome = await engine.manageThread(
               invocation.agent,
               threadId,
-              action as 'inspect' | 'steer' | 'respond' | 'retry' | 'interrupt' | 'close',
+              action as ThreadVerb,
               inner.rest.length === 0 ? undefined : inner.rest,
               invocation.signal,
             );

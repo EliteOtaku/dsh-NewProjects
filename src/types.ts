@@ -100,8 +100,21 @@ export interface ProjectThreadDescriptor {
   branch?: string;
   /** Base revision the branch was cut from. */
   baseCommit?: string;
-  /** Number of self-healing rounds already attempted. */
+  /** Number of self-healing rounds already attempted over the thread's lifetime. */
   healAttempts?: number;
+  /**
+   * Healing rounds already spent against the *current* failure signature. Reset when the
+   * failure set changes or new review comments arrive, so a long review does not exhaust
+   * a budget that is meant to bound a stuck repair.
+   */
+  consecutiveFails?: number;
+  /** Sorted names of the failing checks the last healing round was issued against. */
+  failureSignature?: string;
+  /**
+   * Set when the thread stops being polled for CI/review state. Merged or closed pull
+   * requests set it automatically; `unwatch` sets it by hand. Cleared by `watch`.
+   */
+  unwatchAt?: number;
   /** Last observed CI/review snapshot. */
   review?: ProjectReviewSnapshot;
   /** Last error string, for `failed` threads and diagnostics. */

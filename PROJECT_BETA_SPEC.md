@@ -60,7 +60,9 @@
   - **不得 `force-push`**（重写他人可能已拉取的历史，不属于「分支上 push 完全可逆」那一类）；
   - **不得修改 CI 配置来让检查通过**——这是自愈线程最省力也最有害的「修法」，必须停下来问人。官方项目指令示范原文：「Don't merge, **force-push**, or **change CI configuration** without asking me in the thread.」见 `GAP-25`。
   - **修复计数的轴是「连续失败」而不是「生命周期总数」**：一个 PR 被多轮评审带来多轮不同意见属正常节奏，不该在第四轮被当成「修不好」。有进展（失败集合变化 / 处理了新评论）即清零。见 `GAP-23`。
+  - **实现注记（2026-10-29 落地）**：`failureSignature(checks)` 取失败项名字排序后拼接作签名，签名变化或出现新评论即复位；`consecutiveFails >= 3` 才升级，`healAttempts` 降级为只读展示；升级文案写明「同一组检查连续 N 轮仍在失败（共 M 轮）」并列出检查名。
 - **退订是一等动作**：官方止损手段是「ask in the thread for it to stop watching the pull request」。合并后、转终态后、项目归档后都应**显式退订**，不能只靠「状态不在候选集就不扫」这种隐式行为。见 `GAP-24`。
+  - **实现注记（2026-10-29 落地）**：`gh` 失败先经 `classifyGhFailure` 分三档 —— `benign`（没配 CI）/ `retryable`（网络、限流、认证 → 记 error，不退订、不改状态）/ `terminal`（PR 或分支已不存在 → 不记 error，先按编号重读 PR 终态：`merged` 转 `completed`、`closed` 转 `failed`，两者都自动退订；读不出来则升 `needs_feedback` 并附原始消息）；未识别的消息**默认 `retryable`**，因为悄悄退订会永久失去监视。`unwatchAt` 是 descriptor 上的显式字段，`/project thread <id> unwatch|watch` 可手动开关。
 
 ### 模块 E：Overview Panel（集中总览面板）
 

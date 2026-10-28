@@ -19,7 +19,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { describeError, isProjectError, ProjectError } from './errors.js';
 import { CommandError } from './exec.js';
 import type { CommandRunner } from './exec.js';
-import { decideHealAction, mergeSnapshot, toCheckStates, toReviewComments, type HealAction } from './healing.js';
+import { decideHealAction, failureSignature, mergeSnapshot, toCheckStates, toReviewComments, type HealAction } from './healing.js';
 import {
   buildIndex,
   MAX_KNOWLEDGE_FILES,
@@ -62,9 +62,11 @@ import type {
   ProjectReviewSnapshot,
   ProjectThreadDescriptor,
   SuggestStartResult,
+  ThreadStatus,
 } from '../types.js';
 import type { ThreadHandle, ThreadOutcome, ThreadRuntime } from './threads.js';
 import {
+  classifyGhFailure,
   commitAll,
   createBranch,
   createPullRequest,
@@ -169,7 +171,7 @@ export interface HealSweepResult {
 }
 
 /** Thread-management verbs exposed to the model and the `/project` command. */
-export type ThreadAction = 'inspect' | 'steer' | 'respond' | 'interrupt' | 'retry' | 'close';
+export type ThreadAction = 'inspect' | 'steer' | 'respond' | 'interrupt' | 'retry' | 'close' | 'watch' | 'unwatch';
 
 /** The orchestration core. */
 export class ProjectEngine {
@@ -1007,6 +1009,8 @@ export class ProjectEngine {
           draft.lastError = undefined;
           draft.updatedAt = this.clock.now();
           draft.healAttempts = 0;
+          draft.consecutiveFails = 0;
+          draft.failureSignature = undefined;
         });
         return { thread: updated, message: `retried ${threadId}` };
       }
@@ -1018,6 +1022,24 @@ export class ProjectEngine {
         });
         return { thread: updated, message: `closed ${threadId}` };
       }
+      case 'unwatch': {
+        // Polling is the only thing this stops: the branch, the PR and the descriptor all
+        // stay. A merged pull request whose branch was deleted is the usual reason to want
+        // this by hand, and re-enabling it must not require recreating the thread.
+        const updated = await this.updateThread(threadId, (draft) => {
+          draft.unwatchAt = this.clock.now();
+          draft.updatedAt = this.clock.now();
+        });
+        return { thread: updated, message: `stopped polling ${threadId} for CI and review state` };
+      }
+      case 'watch': {
+        const updated = await this.updateThread(threadId, (draft) => {
+          draft.unwatchAt = undefined;
+          draft.consecutiveFails = 0;
+          draft.updatedAt = this.clock.now();
+        });
+        return { thread: updated, message: `resumed polling ${threadId} for CI and review state` };
+      }
     }
   }
 
@@ -1028,14 +1050,19 @@ export class ProjectEngine {
   /**
    * Poll every thread that has a PR and act on what it finds.
    *
-   * One sweep = one `gh` round per thread. Network failures are collected, not
-   * thrown: a flaky GitHub must never take the whole watcher down.
+   * One sweep = one `gh` round per thread. Network failures are collected, not thrown:
+   * a flaky GitHub must never take the whole watcher down. Threads the user (or a merge)
+   * unsubscribed are skipped before any command runs, because polling a finished pull
+   * request forever is how a watcher turns into a source of noise and rate limits.
    */
   async healSweep(parent: object, signal: AbortSignal = AbortSignal.timeout(120_000)): Promise<HealSweepResult> {
     const manifest = await this.requireManifest();
     const result: HealSweepResult = { observed: 0, healed: [], escalated: [], settled: [], waiting: [], errors: [] };
     const candidates = Object.values(manifest.threads).filter(
-      (thread) => thread.branch !== undefined && (thread.status === 'awaiting_review' || thread.status === 'ci_fixing' || thread.status === 'running'),
+      (thread) =>
+        thread.unwatchAt === undefined &&
+        thread.branch !== undefined &&
+        (thread.status === 'awaiting_review' || thread.status === 'ci_fixing' || thread.status === 'running'),
     );
 
     for (const thread of candidates) {
@@ -1066,6 +1093,44 @@ export class ProjectEngine {
     return result;
   }
 
+  /**
+   * Settle a thread whose pull request can no longer be read.
+   *
+   * Reaching here means `gh` said the pull request or branch is gone, which in practice is
+   * what a merged pull request with a deleted branch looks like. Guessing "merged" would be
+   * convenient and occasionally wrong, so the state is re-read by number first and only a
+   * real `merged`/`closed` answer settles the thread automatically. Anything else becomes a
+   * question with the raw message attached, and polling stops either way.
+   */
+  private async settleUnreachable(thread: ProjectThreadDescriptor, prRef: string, message: string): Promise<HealAction> {
+    const cwd = thread.worktreePath ?? this.rootDir;
+    const prNumber = Number.parseInt(/\/(\d+)(?:$|\?)/.exec(prRef)?.[1] ?? '', 10);
+    let state: ProjectReviewSnapshot['state'] = 'unknown';
+    if (Number.isFinite(prNumber)) {
+      const raw = await readPrState(this.runner, cwd, prNumber).catch(() => undefined);
+      if (raw !== undefined) state = normalisePrState(raw);
+    }
+    const now = this.clock.now();
+    if (state === 'merged' || state === 'closed') {
+      const status: ThreadStatus = state === 'merged' ? 'completed' : 'failed';
+      await this.updateThread(thread.threadId, (draft) => {
+        draft.status = status;
+        draft.unwatchAt = now;
+        draft.lastError = status === 'failed' ? `pull request ${prRef} was closed without merging` : undefined;
+        draft.updatedAt = now;
+      });
+      return { kind: 'transition', status, reason: `pull request ${prRef} is ${state}` };
+    }
+    const question = `the pull request for this thread (${prRef}) can no longer be reached: ${message.trim()}. It was probably merged with its branch deleted. Reply with the outcome to settle the thread, or run \`/project thread ${thread.threadId} watch\` to resume polling.`;
+    await this.updateThread(thread.threadId, (draft) => {
+      draft.status = 'needs_feedback';
+      draft.feedbackPrompt = question;
+      draft.unwatchAt = now;
+      draft.updatedAt = now;
+    });
+    return { kind: 'escalate', reason: `pull request ${prRef} is unreachable: ${message.trim()}`, question };
+  }
+
   /** Observe one thread's PR and apply the decided action. */
   private async observeOne(parent: object, thread: ProjectThreadDescriptor, signal: AbortSignal): Promise<HealAction> {
     const cwd = thread.worktreePath ?? this.rootDir;
@@ -1079,12 +1144,16 @@ export class ProjectEngine {
 
     let comments: ProjectReviewSnapshot['comments'] = [];
     let prState: ProjectReviewSnapshot['state'] = 'open';
+    const ghFailures: string[] = [];
+    if (checks.error !== undefined) ghFailures.push(checks.error);
     if (Number.isFinite(prNumber)) {
       const [inline, verdicts, state] = await Promise.all([
         readReviewComments(this.runner, cwd, prNumber),
         readReviewVerdicts(this.runner, cwd, prNumber),
         readPrState(this.runner, cwd, prNumber),
       ]);
+      if (inline.error !== undefined) ghFailures.push(inline.error);
+      if (verdicts.error !== undefined) ghFailures.push(verdicts.error);
       if (state !== undefined) prState = normalisePrState(state);
       comments = toReviewComments(inline.comments);
       const changed = verdicts.reviews.filter((review) => review.state === 'CHANGES_REQUESTED');
@@ -1099,6 +1168,23 @@ export class ProjectEngine {
       }
     }
 
+    // A `gh` failure is not the same event as "nothing to report". Before this split, an
+    // expired token, a rate limit and a deleted branch all arrived as the same empty string
+    // list, and each one read as a healthy pull request with no checks — a thread stuck in
+    // `awaiting_review` for good, with nothing recorded to explain it.
+    if (ghFailures.length > 0) {
+      const terminal = ghFailures.filter((message) => classifyGhFailure(message) === 'terminal');
+      if (terminal.length > 0) return this.settleUnreachable(thread, prRef, terminal.join('; '));
+      const retryable = ghFailures.filter((message) => classifyGhFailure(message) === 'retryable');
+      if (retryable.length > 0) {
+        throw new ProjectError(
+          'VCS_FAILED',
+          `could not read pull request state for ${thread.threadId}: ${retryable.join('; ')}`,
+        );
+      }
+      // Only benign messages (no CI configured, nothing run yet) reach the decision below.
+    }
+
     // A PR that was merged or closed settles the thread before check noise matters.
     const previous = thread.review;
     const snapshot = mergeSnapshot(previous, {
@@ -1109,11 +1195,18 @@ export class ProjectEngine {
       now: this.clock.now(),
     });
 
+    const signature = failureSignature(snapshot.checks);
+    const freshComment = snapshot.comments.some((comment) => !snapshot.consumedCommentIds.includes(comment.id));
+    // Same failing set with nothing new said about it means the last round did not fix it.
+    // A different set, or a new comment, means the previous round moved the problem along.
+    const continuing = signature.length > 0 && signature === thread.failureSignature && !freshComment;
+
     const input = {
       prState: snapshot.state,
       checks: snapshot.checks,
       comments: snapshot.comments,
       consumedCommentIds: snapshot.consumedCommentIds,
+      consecutiveFails: continuing ? (thread.consecutiveFails ?? 0) : 0,
       healAttempts: thread.healAttempts ?? 0,
       threadTitle: thread.title,
       prRef,
@@ -1124,6 +1217,10 @@ export class ProjectEngine {
       await this.updateThread(thread.threadId, (draft) => {
         draft.status = action.status;
         draft.review = snapshot;
+        // Merged and closed are end states: the pull request cannot change again, so
+        // continuing to poll it costs a `gh` round per sweep forever and can only report
+        // the same answer.
+        draft.unwatchAt = this.clock.now();
         draft.updatedAt = this.clock.now();
       });
       return action;
@@ -1151,6 +1248,8 @@ export class ProjectEngine {
     await this.updateThread(thread.threadId, (draft) => {
       draft.status = 'ci_fixing';
       draft.healAttempts = (draft.healAttempts ?? 0) + 1;
+      draft.consecutiveFails = input.consecutiveFails + 1;
+      draft.failureSignature = signature;
       draft.review = { ...snapshot, consumedCommentIds: consumed };
       draft.updatedAt = this.clock.now();
     });

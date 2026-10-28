@@ -8,15 +8,22 @@
  * The policy is deliberately conservative:
  *
  * - Failing checks or unaddressed review comments -> heal (bounded retries).
- * - Exhausted retries, or a request that needs a product decision -> escalate to
- *   `needs_feedback` instead of guessing. A wrong autonomous fix is worse than a
- *   question.
+ * - The same failure surviving several rounds in a row -> escalate to `needs_feedback`
+ *   instead of guessing. A wrong autonomous fix is worse than a question.
+ * - A request that needs a product decision -> escalate rather than invent an answer.
  * - Merged PR -> `completed`. Closed PR -> `failed`.
+ *
+ * The retry budget counts *consecutive rounds against the same failure signature*, not
+ * rounds over the thread's lifetime. A pull request under review for two weeks collects
+ * four rounds of genuinely new comments; a lifetime counter would have escalated on the
+ * fourth and reported "repair failed three times" when no repair had ever failed twice.
+ * The counter resets whenever the failure set changes or new review comments arrive,
+ * because at that point the previous round did make progress.
  */
 
 import type { ProjectCheckState, ProjectReviewComment, ProjectReviewSnapshot, ThreadStatus } from '../types.js';
 
-/** Maximum automatic healing rounds before the thread escalates to the user. */
+/** Consecutive rounds against an unchanged failure signature before escalating. */
 export const MAX_HEAL_ATTEMPTS = 3;
 
 /** Conclusion words that mean "this check failed". */
@@ -92,6 +99,23 @@ export type HealAction =
   | { kind: 'escalate'; reason: string; question: string }
   | { kind: 'transition'; status: ThreadStatus; reason: string };
 
+/**
+ * Stable identity of "which checks are failing right now".
+ *
+ * Consecutive-failure counting needs to tell "the thread failed to fix the build three
+ * times" apart from "the build, then a lint rule, then a flaky test failed in turn". The
+ * signature covers the failing names only, sorted, so a run that adds a new failing check
+ * counts as a different problem — and so the same set reported in a different order does
+ * not. Empty means nothing is failing, which is the reset signal.
+ */
+export function failureSignature(checks: ReadonlyArray<ProjectCheckState>): string {
+  return checks
+    .filter((check) => check.conclusion === 'fail')
+    .map((check) => check.name)
+    .sort()
+    .join('|');
+}
+
 /** Inputs for one decision round. */
 export interface HealInput {
   prState: ProjectReviewSnapshot['state'];
@@ -99,7 +123,12 @@ export interface HealInput {
   comments: ProjectReviewComment[];
   /** Comment ids already consumed by earlier healing rounds. */
   consumedCommentIds: string[];
-  /** Healing rounds already spent. */
+  /**
+   * Rounds already spent against the *current* failure signature. Reset by the caller
+   * whenever the signature changes or new review comments arrive.
+   */
+  consecutiveFails: number;
+  /** Total healing rounds over the thread's lifetime. Display only; never gates a decision. */
   healAttempts: number;
   threadTitle: string;
   prRef: string;
@@ -185,14 +214,14 @@ export function decideHealAction(input: HealInput): HealAction {
     };
   }
 
-  if (input.healAttempts >= MAX_HEAL_ATTEMPTS) {
+  if (input.consecutiveFails >= MAX_HEAL_ATTEMPTS) {
     const parts: string[] = [];
-    if (failures.length > 0) parts.push(`${String(failures.length)} failing check(s): ${failures.map((check) => check.name).join(', ')}`);
+    if (failures.length > 0) parts.push(`${String(failures.length)} check(s) still failing: ${failures.map((check) => check.name).join(', ')}`);
     if (fresh.length > 0) parts.push(`${String(fresh.length)} unaddressed review comment(s)`);
     return {
       kind: 'escalate',
-      reason: `automatic healing exhausted after ${String(input.healAttempts)} attempt(s)`,
-      question: `${input.threadTitle}: ${parts.join('; ')}. Automatic repair failed ${String(input.healAttempts)} times. How should this be resolved?`,
+      reason: `the same failure survived ${String(input.consecutiveFails)} healing round(s)`,
+      question: `${input.threadTitle}: ${parts.join('; ')}. ${String(input.consecutiveFails)} automatic repairs in a row left the same failure in place (${String(input.healAttempts)} round(s) total). How should this be resolved?`,
     };
   }
 
