@@ -19,15 +19,16 @@
 | --- | --- | --- |
 | `SPEC` | `PROJECT_BETA_SPEC.md` | 本项目内部规格，五模块定义 |
 | `OFFICIAL` | https://code.claude.com/docs/en/claude-projects | 官方 Claude Code Projects 文档（2026-10 拉取），比 `support.claude.com` 那篇「什么是项目」详细得多 |
+| `RAG` | https://support.claude.com/en/articles/11473015-retrieval-augmented-generation-rag-for-projects | 官方 RAG 专文。**知识模式阈值口径只在这里**（「approaches or exceeds the context window limits」），`code.claude.com` 全文不含 RAG 字样 |
 
-`support.claude.com` 那篇只覆盖旧版项目知识库 + RAG，正文明确写着「本文的其余部分介绍项目的当前版本」，新版细节全部指向 `code.claude.com`。
+`support.claude.com` 那篇「什么是项目」只覆盖旧版项目知识库 + RAG，正文明确写着「本文的其余部分介绍项目的当前版本」，新版细节全部指向 `code.claude.com`。引用知识模式语义时用 `RAG`，引用线程/Overview 语义时用 `OFFICIAL`——两者不要混引。
 
 ## 优先级总览
 
 | 优先级 | 含义 | 条目 |
 | --- | --- | --- |
 | **P0** | 违背规格或官方原文 | `GAP-01` |
-| **P1** | 会静默产出错误结果 | `GAP-02` |
+| **P1** | 会静默产出错误结果 | `GAP-02` `GAP-21` |
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | `GAP-03` `GAP-04` `GAP-05` |
 | **P3** | 官方有、我们无，独立功能 | `GAP-06` ~ `GAP-13` |
 | **P4** | 项目管理类，缺了不能「管起来」 | `GAP-14` ~ `GAP-18` |
@@ -54,7 +55,7 @@
 
 ---
 
-## P1 — 会静默出错（1 项）
+## P1 — 会静默出错（2 项）
 
 ### GAP-02 项目知识没有变更检测
 
@@ -70,6 +71,31 @@
   2. 未改动时不出现提示（不产生假阳性 —— 每次查询都警告等于没有警告）；
   3. 新增/删除文件同样能检出；
   4. 单测覆盖「改了→警告」「没改→不警告」「rebuild 后警告消失」。
+
+---
+
+### GAP-21 知识模式阈值写死成常量，与「上下文窗口」脱钩
+
+- **依据**：`RAG` 专文原文两处 —— 「RAG automatically activates when your project **approaches or exceeds the context window limits**」/「RAG activation is handled automatically **based on the size of your project knowledge**」。阈值口径是**上下文窗口**，且「up to 10x」是相对该窗口。
+- **现状**：`DEFAULT_CONTEXT_BUDGET_CHARS = 96_000`（`src/core/knowledge.ts:32`）是**硬编码常量**，`engine.buildKnowledge` / `loadKnowledge` / `knowledgeState` 全部默认取它（`src/core/engine.ts:899`、`:924`、`:939`），没有读模型窗口的任何路径。`knowledgeCapacity = budget × 10`（`:58`）因此也钉在 96 万字符。
+- **后果（为什么算 P1 而不是「配置项缺失」）**：
+  1. **与换模型脱钩**。同一项目可以在 `Coordinator model` 与 `Thread model` 上是两个不同窗口的模型，但知识模式只有一个。用户把模型换成大窗口后，知识仍在 9.6 万字符处切到检索模式 —— **明明能全文装下却去检索，是质量损失且用户无从察觉**。
+  2. **换小了会超窗**。反向换到小窗口模型时，9.6 万字符的知识 + 对话 + 工具结果可能一起超过真实窗口，表现为上下文截断或报错，而系统仍认为自己在「context 模式」。
+  3. **24k tokens 本身偏保守**。9.6 万字符 ≈ 24k tokens，只占 200k 窗口的 12%，预留 88% 给其他内容是过度保守。
+- **做法**：
+  1. 预算改为**由窗口派生**：`budgetChars = windowTokens × CHARS_PER_TOKEN × ratio`，`ratio` 默认 0.5~0.7（知识要跟对话、system prompt、工具结果抢同一个窗口）。窗口来源按优先级：项目配置显式值 → 协调者模型的窗口（Host 有 `agentDefaultModel` / `subagentModelSelection` 可查）→ 兜底常量。
+  2. `DEFAULT_CONTEXT_BUDGET_CHARS` 保留为**兜底值**而非默认值，注释改清楚。
+  3. 预算变化必须推进 `prefixVersion` 并触发 charter 重渲染，否则 `context`/`rag` 切换后 prompt 前缀不更新。
+  4. **与 `GAP-04` 的耦合**：若同一项目里协调者与线程用不同窗口，需要决定「按谁的窗口算」。建议按**协调者**（它就是装配 charter 的那个），并在 charter 里注明知识模式，让线程知道自己拿到的是全文还是只有检索工具。
+- **要小心的**：
+  - 不要按线程模型各自算 —— 会让同一个项目的 `prefixVersion` 分叉，缓存命中率下降，且同一份知识在不同线程里一个是全文一个是检索，行为不可预期。
+  - 窗口数字如果拿不到（未知 provider/model），必须**回退而不是抛错**，否则换模型即崩。
+- **验收标准**：
+  1. 换到一个窗口更大的模型后，同样的知识量从 `rag` 回到 `context`；
+  2. 换到小窗口模型时预算相应缩小，不会出现「自认为 context 但超窗」；
+  3. 拿不到窗口时回退常量且不抛错；
+  4. 预算变化引起 charter 变化（字节不同），预算不变时 charter 字节稳定；
+  5. 单测覆盖「窗口未知→回退」「窗口变化→模式切换」「预算不变→charter 稳定」。
 
 ---
 
@@ -335,6 +361,7 @@
 | 2026-10 | 「review verdicts 没接入」 | **判断错误**，已接入。`readReviewVerdicts`（`src/core/engine.ts:806`）把 `CHANGES_REQUESTED` 的 review 正文转成 `review-<id>` 的待消费评论参与自愈。 | 代码核对 |
 | 2026-10 | README 称「Host-only 会话投影保持面板随会话事件更新」 | **文档虚述**，投影未实现。修 `GAP-03` 时一并改。 | `README.md:29` |
 | 2026-10 | 「项目知识 RAG 未实现」 | 后来已补齐（`src/core/knowledge.ts` + `knowledgeSource.ts`，261 项测试）。**不是缺口**，此条仅作历史记录。 | commit `71cac2e` |
+| 2026-10 | 知识模式按体积切换「已对上官方，无需复核」 | **只对了一半**。切换这个**行为**对上了 `RAG` 专文，但**阈值口径错了**：官方说「context window limits」，我们写死 96,000 字符常量。已据此新增 `GAP-21`。 | 复核取证 m01844 |
 
 ---
 
@@ -344,12 +371,14 @@
 
 | 批次 | 条目 | 依赖 | 预计量 |
 | --- | --- | --- | --- |
-| **第一批** | `GAP-01` 全局配额 + `GAP-02` 知识陈旧检测 | 无 | 小（~300 行 + 测试） |
+| **第一批** | `GAP-01` 全局配额 + `GAP-02` 知识陈旧检测 + `GAP-21` 知识阈值按窗口派生 | 无 | 中（~500 行 + 测试） |
 | **第二批** | `GAP-03` 会话投影 → `GAP-04` 六分组 → `GAP-05` 归档 | 04/05 必须等 03（状态要能进事件流） | 中偏大 |
 | **第三批** | `GAP-06` goal + `GAP-07` 会话绑定 + `GAP-10` Library + `GAP-11` PR 聚合 | 07 需先定「项目绑哪个会话」的设计 | 中 |
 | **第四批** | `GAP-08` 建议线程 + `GAP-09` 仓库约定 + `GAP-12` 卡片动作 | 08 依赖 07 的消息路由思路 | 中 |
 | **第五批** | `GAP-14` Pause + `GAP-15` Archive + `GAP-17` 超时 + `GAP-19` worktree 回收（需 10 先完成） | 19 依赖 10 | 小 |
 | **按需** | `GAP-13` Usage、`GAP-18` approval 开关、`GAP-20` purge、`GAP-16` 自动重建决策 | — | 小 |
+
+> **第一批为什么把 `GAP-21` 也放进来**：它和 `GAP-02` 都在 `knowledge.ts`/`engine.ts` 的同几行上（`DEFAULT_CONTEXT_BUDGET_CHARS` 的三个调用点），分开做要改两遍同样的位置、跑两遍同样的测试。而且两项都属于「知识层给出错误或不完整答案」，验收方式一致。
 
 **验证方式（每批都要走）**：
 
