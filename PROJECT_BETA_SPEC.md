@@ -46,7 +46,8 @@
 - **全局决策同步**：维护项目级持久化共享记忆存储（含 CAS 版本号 `revision`）。当用户向 Coordinator 交代全局决策、规则或背景信息（例如“发布日改到周五”或架构约束变更）时，写入共享记忆库。
 - **零重复交代**：未来新建的线程通过**启动前缀装配**获取最新共享记忆；正在运行的 `busy` 线程通过 steer 感知增量。
   - *实现注记（2026-10）*：官方**不给运行中的线程任何更新**（「Changes to instructions, repositories, plugins, and environment in Project settings reach new threads, **not threads already running**」）。所以给运行中线程广播属于**超额实现**，不是缺口；只推 `busy`、不推 `idle`（省 token）的取舍不变。见 `docs/GAPS.md` 的 `BOUND-2`。
-- **KV Cache 优化**：固定共享记忆在 System Prompt 中的挂载槽位，利用 DeepSeek-V4.1-Flash 的高压缩 KV Cache 实现跨轮次前缀高命中率。**前缀必须字节稳定**——不含时间戳、线程 id、计数器，按 key 排序。
+- **KV Cache 优化（我们的取舍，不是官方基线）**：把共享记忆固定挂在 System Prompt 的槽位里，以复用 provider 端的 prefix cache。**前缀必须字节稳定**——不含时间戳、线程 id、计数器，按 key 排序。
+  - *措辞校正（2026-10-29）*：最初把这一条写成「对上官方」，属于取证错误。`OFFICIAL` L22「**Set context once**: every new thread starts with the project's **instructions**」讲的是 instructions，不是 memory；官方的记忆是 paths-first（L291：存成文件，线程启动时读 `MEMORY.md` 索引，需要时再打开其余文件）。我们选择整段留在槽位，是因为记忆是**决策**而不是**文档**——每条都短、每条都该被读到，lazy 读取反而会让线程漏掉约束，且 16,000 字符预算对它绰绰有余。这是取舍，记为 `BOUND-5`。
 
 ### 模块 D：Auto-Execution & Self-Healing（自主执行、PR 与 CI 自动修复）
 

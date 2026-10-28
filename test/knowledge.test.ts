@@ -9,7 +9,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -266,5 +266,82 @@ describe('overview', () => {
     // No mode, no budget, no capacity: the payload cannot report a dimension that is gone.
     assert.equal((knowledge as Record<string, unknown>).mode, undefined);
     assert.equal((knowledge as Record<string, unknown>).budgetChars, undefined);
+  });
+});
+
+/**
+ * GAP-22a — the catalogue must be reachable from a thread's working directory.
+ *
+ * A thread runs in its own worktree, and a worktree holds only what was committed when the
+ * branch was cut. So the failure this guards against is not "the path is spelled oddly"; it is
+ * that the same relative path means two different things in the two directories, and only the
+ * project root is guaranteed to have the file.
+ */
+describe('knowledge paths are anchored to the project root', () => {
+  /** Pull the stated root and the catalogued documents back out of a rendered charter. */
+  function parseCharter(charter: string): { root: string; docs: string[] } {
+    const root = /Project root: `([^`]+)`/.exec(charter)?.[1];
+    assert.ok(root !== undefined, 'the charter must state the project root');
+    const docs: string[] = [];
+    for (const match of charter.matchAll(/^- `(.+?)` — \d+ chars$/gm)) {
+      if (match[1] !== undefined) docs.push(match[1]);
+    }
+    return { root, docs };
+  }
+
+  it('lets a thread in a worktree reach every catalogued document', async () => {
+    const root = await freshRoot();
+    const { engine } = harness(root);
+    await engine.init({ name: 'anchor-demo' });
+
+    await mkdir(join(root, 'kb'), { recursive: true });
+    await writeFile(join(root, 'kb', 'arch.md'), 'the architecture', 'utf8');
+    await writeFile(join(root, 'kb', 'ops.md'), 'how to deploy', 'utf8');
+    await engine.setKnowledgePaths(['kb']);
+
+    const charter = (await engine.renderCharter()).text;
+    const { root: stated, docs } = parseCharter(charter);
+    assert.ok(docs.length >= 2, 'both documents should be catalogued');
+
+    // A worktree cut before those files were committed: the same relative paths are absent
+    // there. This is the state every thread starts in when the knowledge was added afterwards.
+    const worktree = join(root, '.dsh-project', 'worktrees', 'thr-1');
+    await mkdir(worktree, { recursive: true });
+
+    for (const doc of docs) {
+      const atRoot = await stat(join(stated, doc)).catch(() => undefined);
+      assert.ok(atRoot?.isFile() === true, `${doc} must be readable under the stated root`);
+      const inWorktree = await stat(join(worktree, doc)).catch(() => undefined);
+      assert.equal(inWorktree, undefined, `${doc} should not exist in the worktree, which is why the anchor matters`);
+    }
+  });
+
+  it('states the root even when nothing has been indexed yet', async () => {
+    const root = await freshRoot();
+    const { engine } = harness(root);
+    await engine.init({ name: 'anchor-demo' });
+    // Bound but never indexed: the fallback branch is what a thread sees before the first
+    // rebuild, and it is the one that used to be a bare list of unresolvable relatives.
+    await engine.setKnowledgePaths(['kb']);
+
+    const charter = (await engine.renderCharter()).text;
+    assert.match(charter, /Project root: `/);
+    assert.match(charter, /- `kb`/);
+  });
+
+  it('carries the root on search hits, because a citation is only usable with it', async () => {
+    const root = await freshRoot();
+    const { engine } = harness(root);
+    await engine.init({ name: 'anchor-demo' });
+    await writeFile(join(root, 'kb.md'), 'the deployment runbook', 'utf8');
+    await engine.setKnowledgePaths(['kb.md']);
+
+    const result = await engine.searchProjectKnowledge('deployment');
+    assert.equal(result.rootDir, root);
+    assert.ok(result.hits.length > 0);
+    const hit = result.hits[0];
+    assert.ok(hit !== undefined);
+    const resolved = await stat(join(result.rootDir, hit.path)).catch(() => undefined);
+    assert.ok(resolved?.isFile() === true, 'a cited path must resolve under the returned root');
   });
 });

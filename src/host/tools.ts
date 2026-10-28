@@ -339,9 +339,10 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
         return {
           ok: true,
           query,
+          root: result.rootDir,
           hits: result.hits,
           text: renderHits(result.hits),
-          hint: 'Passages come from the search index, which is rebuilt on demand. Open the cited file for its current contents.',
+          hint: `Cited paths are relative to the project root \`${result.rootDir}\`, not to your working directory — your checkout is a worktree that holds only what was committed when your branch was cut. Open the cited file under the project root for its current contents; the index is rebuilt on demand and may lag.`,
         };
       } catch (error) {
         return asToolResult(error);

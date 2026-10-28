@@ -19,6 +19,7 @@ import {
   describeKnowledge,
   emptyIndex,
   indexDocument,
+  isAbsoluteKnowledgePath,
   MAX_CHUNK_CHARS,
   MAX_KNOWLEDGE_FILES,
   MAX_SEARCH_LIMIT,
@@ -28,6 +29,7 @@ import {
   resolveKnowledgeState,
   searchKnowledge,
   serialiseIndex,
+  toDisplayPath,
   tokenise,
 } from '../../src/core/knowledge.js';
 import { collectKnowledge, readIndexFile, writeIndexFile } from '../../src/core/knowledgeSource.js';
@@ -433,5 +435,64 @@ describe('collecting from disk', () => {
   it('returns undefined for a missing index file', async () => {
     const root = await tempRoot();
     assert.equal(await readIndexFile(join(root, 'absent.json')), undefined);
+  });
+});
+
+describe('anchoring the catalogue to the project root', () => {
+  it('recognises absolute paths in every dialect it will meet', () => {
+    for (const path of ['/srv/app', 'C:\\app', 'C:/app', '\\\\server\\share']) {
+      assert.equal(isAbsoluteKnowledgePath(path), true, path);
+    }
+    for (const path of ['kb', 'kb/a.md', './a.md', '..', '']) {
+      assert.equal(isAbsoluteKnowledgePath(path), false, path);
+    }
+  });
+
+  it('rewrites separators only where a backslash is one', () => {
+    // Windows absolute: a backslash separates segments, so rendering it forward-slashed keeps
+    // the path readable and still resolvable.
+    assert.equal(toDisplayPath('C:\\app\\kb'), 'C:/app/kb');
+    assert.equal(toDisplayPath('\\\\server\\share\\kb'), '//server/share/kb');
+    // POSIX: a backslash is a legal filename character. Rewriting it would rename the file the
+    // prompt points at, so it must survive untouched.
+    assert.equal(toDisplayPath('/srv/a\\b.md'), '/srv/a\\b.md');
+    assert.equal(toDisplayPath('kb/a.md'), 'kb/a.md');
+  });
+
+  it('states the project root and warns against resolving in the worktree', () => {
+    const index = buildIndex([{ path: 'kb/a.md', text: 'body' }], ['kb'], 1);
+    const rendered = renderKnowledgeIndexSection(index, resolveKnowledgeState(index), { rootDir: '/srv/app' });
+    assert.match(rendered, /Project root: `\/srv\/app`/);
+    assert.match(rendered, /not\*\* against your own working directory/);
+    assert.match(rendered, /worktree/);
+  });
+
+  it('omits the root when the caller cannot supply an absolute one', () => {
+    // A relative root rendered into a shared prefix would point every thread at a different
+    // directory depending on its cwd — worse than saying nothing.
+    const index = buildIndex([{ path: 'kb/a.md', text: 'body' }], ['kb'], 1);
+    const rendered = renderKnowledgeIndexSection(index, resolveKnowledgeState(index), { rootDir: 'relative/root' });
+    assert.doesNotMatch(rendered, /Project root:/);
+    assert.match(rendered, /`kb\/a\.md`/);
+  });
+
+  it('stays byte-identical across renders with the same root', () => {
+    const index = buildIndex([{ path: 'kb/a.md', text: 'body' }], ['kb'], 1);
+    const state = resolveKnowledgeState(index);
+    assert.equal(
+      renderKnowledgeIndexSection(index, state, { rootDir: '/srv/app' }),
+      renderKnowledgeIndexSection(index, state, { rootDir: '/srv/app' }),
+    );
+  });
+
+  it('anchors the bare-path fallback too, not just the indexed form', () => {
+    // The fallback is the only case where the bound strings reach the prompt verbatim, so it
+    // is the one that could leak a Windows separator.
+    const rendered = renderKnowledgeIndexSection(emptyIndex(['kb', 'spec.md']), resolveKnowledgeState(emptyIndex()), {
+      boundPaths: ['kb', 'spec.md'],
+      rootDir: '/srv/app',
+    });
+    assert.match(rendered, /Project root: `\/srv\/app`/);
+    assert.match(rendered, /- `spec\.md`/);
   });
 });

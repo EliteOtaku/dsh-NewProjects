@@ -70,7 +70,7 @@
 | 优先级 | 含义 | 条目 |
 | --- | --- | --- |
 | **P0** | 违背规格或官方原文 | ~~`GAP-01`~~ ✅ 已关闭 2026-10-27 |
-| **P1** | 会静默产出错误结果 | `GAP-22`（减法已做，`GAP-22a` 未做）`GAP-23` `GAP-24` |
+| **P1** | 会静默产出错误结果 | `GAP-23` `GAP-24`（`GAP-22` / `GAP-22a` 已关闭） |
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | `GAP-03` `GAP-04` `GAP-05` |
 | **P3** | 官方有、我们无，独立功能 | `GAP-06` `GAP-09` ~ `GAP-13` `GAP-26` `GAP-29` |
 | **P4** | 项目管理类，缺了不能「管起来」 | `GAP-14` `GAP-15` `GAP-17` `GAP-18` `GAP-25` `GAP-28` |
@@ -101,14 +101,14 @@
 
 ---
 
-## P1 — 会静默出错（3 项；`GAP-22` 的减法已完成，正确性残留拆出 `GAP-22a`）
+## P1 — 会静默出错（2 项；`GAP-22` / `GAP-22a` 已于 2026-10-29 关闭）
 
-### GAP-22 知识层应改为 paths-first（撤销 in-context / RAG 二分） — ⚠️ 部分完成（2026-10-27，commit `9c7ef10`）
+### GAP-22 知识层应改为 paths-first（撤销 in-context / RAG 二分） — ✅ 已做（2026-10-27 `9c7ef10`，2026-10-29 `GAP-22a` 收尾）
 
 > **本条取代 `GAP-21`（阈值写死）、`GAP-02`（陈旧检测）、`GAP-16`（自动重建时机）三条。** 它是一个减法项：做完之后那三个问题不再存在，而不是被修好。
 
-**已完成**：第 1、5、6、7 条（减法那一半）。`grep -rn "DEFAULT_CONTEXT_BUDGET_CHARS\|knowledgeMode\|RAG_CAPACITY" src/` 为空。
-**未完成**：第 2 条（路径锚定项目根）已拆为 **`GAP-22a`**，仍是 P1；第 3 条（`tree` / `read`）与第 4 条（查询时按需重建）未做，降为 P3 能力增强。
+**已完成**：第 1、5、6、7 条（减法那一半），以及第 2 条（路径锚定项目根，见 `GAP-22a`）。`grep -rn "DEFAULT_CONTEXT_BUDGET_CHARS\|knowledgeMode\|RAG_CAPACITY" src/` 为空。
+**仍未完成**：第 3 条（`tree` / `read`）与第 4 条（查询时按需重建）—— 这是能力增强，已降为 P3。
 
 **第二轮复核对第 1 条的修正——渲染的是「索引」而不是「清单」。** `OFFICIAL` L291 逐字：「Notes Claude keeps about the project … **stored as files**. Every cloud thread reads **the index file `MEMORY.md`** when it starts and **opens the other files when it needs them**」。官方开局给的是**索引**，不是路径清单。所以 charter 里每份文档一行「路径 — 字符数」：字符数是让模型能**选**的那个信息——「读那份 2 KB 的决策记录」与「读那份 400 KB 的转录」是两个不同的决定，纯路径清单分不出来。这一句同时回答了 `REVIEW-REQUEST` §7 的第二个问题（paths-first 有没有 prompt 层引导）：**有，但引导被编码在读取协议里**（索引 eager / 正文 lazy），不是 charter 里加一句话——所以「自己加一句」那个偏离不存在。
 
@@ -145,21 +145,29 @@
   5. `grep -rn "DEFAULT_CONTEXT_BUDGET_CHARS\|knowledgeMode\|RAG_CAPACITY" src/` 为空；
   6. `tree` / `read` 两个动作有单测，含路径越界（`../`）拒绝。
 
-### GAP-22a 知识路径没有锚定项目根，线程在 worktree 里解析不到 — ❌ 未做（P1，从 `GAP-22` 第 2 条拆出）
+### GAP-22a 知识路径没有锚定项目根，线程在 worktree 里解析不到 — ✅ 已做（P1，从 `GAP-22` 第 2 条拆出）
 
 - **为什么单独拆出来**：`GAP-22` 的其余未完成项（`tree` / `read`、按需重建）是**能力增强**，这一条是**正确性**。混在一条里会让它跟着那两项一起被降级。
 - **依据**：`OFFICIAL` L293 把两套路径并列写在同一行——「The **repositories every cloud thread clones**, the **folders and files it can read under `/mnt/project-files`**」。仓库是 clone，项目文件是**挂载**，而且挂载只有**一份共享的**，不是每线程一份副本。
   → 第二轮复核据此裁定：判断 I 的「让线程去读项目根的绝对路径」**更贴近官方**，**不要**往每个 worktree 复制或软链。复制会引入每线程一份副本（磁盘 × 线程数）与同步问题，而官方模型里这两个问题不存在。
-- **现状（`9c7ef10` 没有改善这一点）**：charter 的索引渲染的是 `IndexedDocument.path`，即相对项目 root 的显示路径；而线程的 cwd 是它自己的 worktree（`.dsh-project/worktrees/<threadId>`），worktree 只含 baseCommit 里**已提交**的文件。于是：
+- **原来的缺陷（`9c7ef10` 没有改善这一点）**：charter 的索引渲染的是 `IndexedDocument.path`，即相对项目 root 的显示路径；而线程的 cwd 是它自己的 worktree（`.dsh-project/worktrees/<threadId>`），worktree 只含 baseCommit 里**已提交**的文件。于是：
   1. 相对路径在线程里解析不到（它会相对自己的 worktree 去解）；
   2. 根检出里**未提交**的知识文件，线程无论怎么解析都读不到。
 - **做法**：charter 里渲染能定位到项目根的形式——绝对路径，或「项目根 = `<绝对路径>`」+ 相对路径——并明确写一句「知识是项目级的，读项目根，不是读你的 worktree」。
 - **要小心的**：绝对路径会让 charter 字节随机器变，跨机器的 prefix cache 命中因此失效。两害相权取其轻：读不到文件是**错误**，缓存未命中只是**成本**。若要兼顾，可渲染一次「项目根 = <绝对路径>」再用相对路径列文档，这样变动的只有一行。
-- **验收标准**：
-  1. 线程在 worktree 里按 charter 给出的定位形式能读到根检出**已提交**的知识文件；
-  2. 未提交的知识文件有明确提示（而不是静默读不到）；
-  3. charter 二次渲染字节相同；
-  4. 单测覆盖「worktree cwd + charter 路径 → 命中项目根文件」。
+- **实际做法（2026-10-29 落地，采用方案 A）**：
+  1. `renderKnowledgeIndexSection(index, state, { boundPaths, rootDir })` 新增可选 `rootDir`；绝对路径时渲染 `Project root: \`<abs>\`` 一段，并把「相对路径按项目根解析，**不要**按你自己的 cwd 解析」写清楚，含 worktree 只含分支切点前已提交内容的解释。
+  2. 只有**绝对** root 才渲染（`isAbsoluteKnowledgePath`）；相对的 root 会让每个线程解析到不同目录，比不说更糟。
+  3. 只有 Windows 绝对路径才把反斜杠换成斜杠（`toDisplayPath`）：POSIX 上反斜杠是文件名的合法字符，改写会把提示指向一个不存在的文件。
+  4. `CharterInput` 经 `manifest.rootDir` 传入，`renderProjectCharter` 无条件带上。
+  5. `searchProjectKnowledge` 返回值新增 `rootDir`；`project_knowledge_search` 结果带 `root` 字段，hint 说明引用路径的基准是项目根。
+  6. `renderThreadTask` 的 checkout 行补一句「从项目根读项目知识是预期行为，写它才不允许」——否则「don't touch the main checkout」会被谨慎的线程读成禁令，于是它干脆不读知识。
+- **验收标准（全部已有测试）**：
+  1. ✅ 线程在 worktree 里按 charter 给出的定位形式能读到根检出**已提交**的知识文件 —— `test/knowledge.test.ts`「lets a thread in a worktree reach every catalogued document」
+  2. ✅ 未提交的知识文件有明确提示（而不是静默读不到）—— 同一条测试构造的正是「root 有、worktree 没有」的未提交状态，charter 文案解释了为什么
+  3. ✅ charter 二次渲染字节相同 —— `test/unit/knowledge.test.ts`「stays byte-identical across renders with the same root」
+  4. ✅ 单测覆盖「worktree cwd + charter 路径 → 命中项目根文件」—— 同第 1 条
+  5. ✅ 检索结果带 root —— 「carries the root on search hits, because a citation is only usable with it」
 
 ### GAP-23 自愈计数应统计「连续失败」而不是生命周期总数
 
@@ -551,7 +559,7 @@
 - **一条取证错误**（第二轮复核，`docs/REVIEW-RESPONSE-2.md` §取证错误）：历来把「记忆放在 system prompt 固定槽位以命中缓存」当成已对上官方，引的是 `OFFICIAL` L22「**Set context once**: every new thread starts with the project's **instructions**」。引文逐字无误，**但它讲的是 instructions，不是 memory**。
 - **官方的 memory 是 paths-first**（L291）：「Notes Claude keeps about the project … **stored as files**. Every cloud thread reads the index file `MEMORY.md` when it starts and **opens the other files when it needs them**」。也就是说**官方对记忆和对知识用的是同一套机制**，而 `GAP-22` 只把知识改了，记忆还整段渲进 charter（`renderMemoryPrefix`）。
 - **为什么列为 BOUND 而不是 GAP**：⚠️ 这是判断而非依据——记忆是**决策**而不是**文档**，每条都短、每条都该被读到，lazy 读取反而会让线程漏掉约束；而 16,000 字符的预算对它绰绰有余。所以保留槽位是**我们的取舍**。
-- **要做的只有记账**：别再把它当「有据的基线」（`REVIEW-REQUEST` §1 那一行应改掉），并用 `MAX_INSTRUCTIONS_CHARS` 同一把尺子给记忆段也设一个报警阈值。若将来记忆长到会挤掉 instructions，再按官方形状改成文件 + 索引。
+- **要做的只有记账**：~~别再把它当「有据的基线」（`REVIEW-REQUEST` §1 那一行应改掉）~~ —— **这句待办已作废**：`8dad36c` 送审版确实有 `REVIEW-REQUEST.md:48` 那行「记忆放在 system prompt 固定槽位以命中缓存」，但它在 `bb71325` 重写时就没了，`9866952` 送审版 grep `槽位|固定位置|system prompt|缓存` 零命中。**剩下一半仍有效**：用 `MAX_INSTRUCTIONS_CHARS` 同一把尺子给记忆段也设一个报警阈值（`memoryOverBudget` 至今零命中）。若将来记忆长到会挤掉 instructions，再按官方形状改成文件 + 索引。
 
 ### BOUND-4 单进程内一个 root 恰好一个 turn-end 订阅
 
@@ -612,7 +620,7 @@
 
 | 批次 | 条目 | 依赖 | 说明 |
 | --- | --- | --- | --- |
-| **第一批 让输出可信** | `GAP-01` 全局配额 ✅ + `GAP-22` 知识 paths-first ⚠️ | 无 | 2026-10-27 `9c7ef10`：`GAP-01` 关闭；`GAP-22` 的减法做完（确实净减），**但 `GAP-22a`（路径锚定项目根）未做，仍是 P1 —— 第一批的收尾** |
+| **第一批 让输出可信** | `GAP-01` 全局配额 ✅ + `GAP-22` 知识 paths-first ✅ | 无 | 2026-10-27 `9c7ef10`：`GAP-01` 关闭，`GAP-22` 的减法做完（确实净减）；2026-10-29：`GAP-22a`（路径锚定项目根）关闭 —— **第一批完成** |
 | **第二批 让拆解可信** | `GAP-26` 模型优先拆解 + Suggested threads | 无（可与一批并行） | 后者是前者的保险，必须同批 |
 | **第三批 让报回可用** | `GAP-03` 投影 + `GAP-04` 六分组 + `GAP-05` 终态 + `GAP-10` Library + `GAP-11` PR 聚合 | 03 与 04 **可同批**（原判断的串行约束不成立） | 状态部分是加法，不是重构 |
 | **第四批 让裁定可用** | `GAP-12` 卡片动作 + `GAP-18` 审批 + `GAP-14` Pause + `GAP-24` 退订 + `GAP-19` worktree 回收 + `GAP-25` 禁令 | 19 依赖 10（先有清单再删目录） | **不可逆动作（19）与它的防护同批**，不推到最后 |
@@ -622,7 +630,7 @@
 
 > **第一批为什么不含 `GAP-23`（P1 却在按需）**：它的触发条件是「PR 被多轮评审」，只有真的跑起来才会遇到；而 21/22/24 在**第一次自愈**就可能出错。若第一批做完还有余量，`GAP-23` 应第一个补上。
 
-> **第一批的收尾（2026-10-27）**：`GAP-22a` 是第一批唯一的正确性残留，它应当在开第二批之前做掉 —— `GAP-22` 的其余未完成项（`tree` / `read`、查询时按需重建）是能力增强，可以等；而 `GAP-22a` 意味着线程现在**读不到** charter 指给它的知识文件，也就是说第一批「让输出可信」这个目标还差最后一步。
+> **第一批已完成（2026-10-29）**：`GAP-22a` 曾是第一批唯一的正确性残留——线程**读不到** charter 指给它的知识文件，也就是「让输出可信」还差最后一步。该条已在方案 A 下关闭（charter 渲染 `Project root` + 相对路径 + worktree 说明，检索结果带 root），**不要再按旧状态把它当未完成项**。`GAP-22` 的其余未完成项（`tree` / `read`、查询时按需重建）是能力增强，留在 P3。
 
 **验证方式（每批都要走）**：
 

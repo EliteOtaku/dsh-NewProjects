@@ -401,6 +401,34 @@ export function renderHits(hits: readonly KnowledgeHit[]): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * Whether a path is absolute, without pulling `node:path` into a pure module.
+ *
+ * Covers POSIX (`/x`), Windows drive (`C:\x`, `C:/x`) and UNC (`\\server\x`, matched by the
+ * leading separator).
+ */
+const ABSOLUTE_KNOWLEDGE_PATH = /^(?:[\\/]|[A-Za-z]:[\\/])/;
+
+/** Whether `path` is absolute. */
+export function isAbsoluteKnowledgePath(path: string): boolean {
+  return ABSOLUTE_KNOWLEDGE_PATH.test(path);
+}
+
+/** A Windows absolute path, where a backslash is a separator rather than a filename character. */
+const WINDOWS_ABSOLUTE_PATH = /^(?:[A-Za-z]:[\\/]|\\\\)/;
+
+/**
+ * Render a path as it should appear in the prompt.
+ *
+ * Only Windows absolute paths are rewritten, because only there is a backslash a separator.
+ * On a POSIX path a backslash is a legal character in a filename, so rewriting it would point
+ * the thread at a file that does not exist. Everything else is already forward-slashed by the
+ * source module when the index is built.
+ */
+export function toDisplayPath(path: string): string {
+  return WINDOWS_ABSOLUTE_PATH.test(path) ? path.replace(/\\/g, '/') : path;
+}
+
+/**
  * The knowledge index, as it appears in the charter.
  *
  * This is the whole of what knowledge contributes to the prompt: the catalogue, never the
@@ -416,11 +444,20 @@ export function renderHits(hits: readonly KnowledgeHit[]): string {
  * rebuilds. The index's age is stated in words rather than as a number: a thread cannot
  * usefully compare an epoch to "now", and what it needs to know is only that the file on disk
  * wins over the catalogue — which is exactly the failure mode this design removes.
+ *
+ * `rootDir` is rendered when the caller supplies it, for one reason: a thread's working
+ * directory is its own worktree, not the project root, and a worktree contains only what was
+ * committed when its branch was cut. A relative `docs/arch.md` therefore resolves inside the
+ * thread's checkout, where it may be missing (added but uncommitted) or stale (committed after
+ * the branch point). Stating the project root turns a silent miss into a lookup the thread can
+ * actually perform. It costs one line in the prefix, and only that one line varies across
+ * machines — the document list stays relative, so a prefix cache survives a path change better
+ * than it would with per-document absolute paths.
  */
 export function renderKnowledgeIndexSection(
   index: KnowledgeIndex,
   state: KnowledgeState,
-  options: { boundPaths?: readonly string[] } = {},
+  options: { boundPaths?: readonly string[]; rootDir?: string } = {},
 ): string {
   const bound = options.boundPaths ?? state.sources;
   if (index.docs.length === 0 && bound.length === 0) return '';
@@ -429,12 +466,22 @@ export function renderKnowledgeIndexSection(
   lines.push('## Project knowledge');
   lines.push('');
 
+  const rootDir = options.rootDir;
+  if (rootDir !== undefined && isAbsoluteKnowledgePath(rootDir)) {
+    lines.push(`Project root: \`${toDisplayPath(rootDir)}\``);
+    lines.push('');
+    lines.push(
+      'Relative paths below resolve against that project root, **not** against your own working directory. Your checkout is a worktree that holds only what was committed when your branch was cut, so a knowledge file that was added but not yet committed exists under the project root and not in your checkout, and one committed later than your branch point is stale in your checkout. Read knowledge from the project root.',
+    );
+    lines.push('');
+  }
+
   if (index.docs.length === 0) {
     // Bound but never indexed. The paths alone are still worth stating: they are where the
     // authoritative context lives, and a thread can read them without any index at all.
     lines.push('These paths hold the authoritative context for this project. Read the ones your task touches before making design decisions:');
     lines.push('');
-    for (const path of bound) lines.push(`- \`${path}\``);
+    for (const path of bound) lines.push(`- \`${toDisplayPath(path)}\``);
     return lines.join('\n');
   }
 

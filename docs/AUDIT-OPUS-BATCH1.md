@@ -165,3 +165,46 @@ Opus 自己在 `GAPS.md:625` 写了：
 - **方案 B**：每行都写绝对路径 → 最直观，但 charter 字节随机器变，跨机器缓存全废
 
 我倾向 **方案 A**，理由和 `GAPS.md:157` 写的一致：「读不到文件是**错误**，缓存未命中只是**成本**」，但两害相权时能兼顾就兼顾。
+
+---
+
+## 六、追查：`f994811` 声称改了 `bucketOf`，代码里没有 🔴
+
+这一条是本轮核查**最值得单独记下来**的发现，因为它不是「漏做」，而是「**提交说明比代码走得远**」。
+
+### 声称了什么
+
+`f994811` 的 commit message 原话：
+
+> `GAP-04` 补上互斥性裁定与带优先级的 `bucketOf`，验收标准从 4 条到 6 条
+
+### 实际是什么
+
+| 检查项 | 结果 |
+| --- | --- |
+| `git diff 9866952 9c7ef10 -- src/core/overview.ts` | 只有两行 quota 渲染改动（`threads from this project` + `quota (enforced, all projects)`），**没有任何 `bucketOf` 改动** |
+| `src/core/overview.ts:41` `bucketOf` 现状 | 仍是平表：`failed → 'failed'`（未并入 `waiting_for_feedback`），无 `landing` / `idle` / `resolved` 分支 |
+| `test/unit/overview.test.ts:50` | 仍断言 `assert.equal(bucketOf('failed'), 'failed')` |
+| `9c7ef10` 改动的 7 个测试文件 | `commands` / `engine` / `flow` / `knowledge` / `tools` / `unit/knowledge` / `unit/quotaLedger` —— **不含 `unit/overview`** |
+
+### 为什么这件事比「漏做」严重
+
+`GAP-03` 就曾被同一形态坑过一次（文档写「Host-only 会话投影保持面板随会话事件更新」，代码里一行投影都没注册），后来在 `README.md` 里改掉。
+
+**这次问题只在 commit message，不在登记簿**：`docs/GAPS.md` 的 `GAP-04` 条目把六条做法明确列在「做法」标题下，没有标成已完成。所以下一个人只要读登记簿就不会被骗；**但只读 `git log` 的人会被骗**。
+
+### 结论
+
+`GAP-04` **一行都没做**，不是「做了一半」。排期按 `GAPS.md` 的 P2 执行，不要因为这句 commit message 而以为它可以跳过。
+
+---
+
+## 七、本次核查之后已处理的事项
+
+| 事项 | 处理 |
+| --- | --- |
+| 问题 1：`GAP-22a` 未做 | ✅ 已实现（方案 A）。`renderKnowledgeIndexSection` 接受 `rootDir`，charter 渲染一行「Project root = `<绝对路径>`」+ 相对路径列表，并明确写「按项目根解析，不要在自己的 worktree 里解析」；`searchProjectKnowledge` 返回值新增 `rootDir`，工具结果的 hint 同步说明引用路径的基准。新增 9 项测试，含验收标准第 4 条（worktree cwd + charter 路径 → 命中项目根文件） |
+| 问题 2：`REVIEW-REQUEST` 待办已过期 | 见下（本条已作废） |
+| 问题 3：记忆段预算报警未做 | 未做，仍属 `BOUND-5` 收尾项 |
+| 问题 4：`PROJECT_BETA_SPEC.md:49` 措辞 | 未做 |
+| 第六节：`GAP-04` 的 commit message 虚述 | 本文件已记录，防止按 `git log` 排期 |
