@@ -223,6 +223,7 @@ export function buildOverview(
       : { recentMessages: [...manifest.recentMessages] }),
     revision: manifest.revision,
     quota: quotaState(manifest, nowMs),
+    ...(manifest.maxConcurrentThreads === undefined ? {} : { concurrency: manifest.maxConcurrentThreads }),
     buckets,
     memories: Object.values(manifest.memories).sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
     prefixFingerprint: memoryPrefixFingerprint(manifest),
@@ -307,6 +308,14 @@ export function renderOverviewMarkdown(overview: ProjectOverview): string {
   lines.push(`- quota: ${overview.quota.created}/${overview.quota.max} threads from this project on ${overview.quota.day}`);
   if (overview.quota.global !== undefined) {
     lines.push(`- quota (enforced, all projects): ${overview.quota.global.created}/${overview.quota.global.max}`);
+  }
+  if (overview.concurrency !== undefined) {
+    // Beside the quota, because both answer "why did only some of my threads start". The
+    // wording says preference, not limit: a reader who thinks it is a hard cap will file a bug
+    // the next time threads start one at a time while others are still running.
+    lines.push(
+      `- concurrency: up to ${overview.concurrency} at a time (a preference, not a cap; \`/project concurrent\`)`,
+    );
   }
   if (overview.goal !== undefined) {
     // Directly under the identity lines: every routing decision is measured against it, so it

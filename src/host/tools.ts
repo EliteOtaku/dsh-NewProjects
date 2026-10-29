@@ -113,7 +113,11 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
           description: 'Propose the threads instead of starting them. Defaults to true when `tasks` is omitted, because a bullet-split is a guess that otherwise costs one branch, worktree and session per line.',
         },
         rootDir: { type: 'string', description: 'Project root. Defaults to the current workspace.' },
-        limit: { type: 'number', description: 'Maximum threads to start in this call.' },
+        limit: {
+          type: 'number',
+          description:
+            "Start at most this many threads in this call. Omit it to follow the project's concurrency preference (`/project concurrent`), which is a preference rather than a cap: a round still starts at least one thread, and the result reports `concurrency` and any `deferred` tasks. A value here can only narrow the round, never widen it past the preference.",
+        },
         scopeOnly: { type: 'boolean', description: 'Isolate by scope only, without creating git branches.' },
         branchNamespace: { type: 'string', description: 'Branch name prefix, defaulting to the project slug.' },
       },

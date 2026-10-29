@@ -2087,3 +2087,112 @@ describe('usage', () => {
     await assert.rejects(() => engine.usageSummary());
   });
 });
+
+describe('concurrency preference', () => {
+  it('changes nothing when no preference is set', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const result = await engine.coordinate(PARENT, '- one\n- two\n- three', { planOnly: false });
+    assert.equal(result.started.length, 3);
+    assert.equal(result.deferred, undefined);
+    assert.equal(result.concurrency, undefined);
+  });
+
+  it('starts only as many as the preference allows and says what it held back', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    await engine.setConcurrencyPreference(2);
+    const result = await engine.coordinate(PARENT, '- one\n- two\n- three\n- four', { planOnly: false });
+
+    assert.equal(result.started.length, 2);
+    assert.equal(result.planned.length, 2);
+    assert.equal(result.deferred?.length, 2);
+    assert.equal(result.concurrency?.preference, 2);
+    assert.equal(result.concurrency?.active, 0);
+    assert.equal(result.concurrency?.allowed, 2);
+    assert.match(result.concurrency?.note ?? '', /2 of 4/);
+    assert.match(result.concurrency?.note ?? '', /not a cap|preference/);
+  });
+
+  it('counts the threads already running and still starts one when the preference is reached', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    await engine.setConcurrencyPreference(2);
+    await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
+
+    const next = await engine.coordinate(PARENT, '- three\n- four', { planOnly: false });
+    assert.equal(next.concurrency?.active, 2);
+    // Two are already active and the preference is two, so the honest answer would be
+    // "none"; the floor of one is what keeps this a preference instead of a cap.
+    assert.equal(next.started.length, 1);
+    assert.match(next.concurrency?.note ?? '', /started one anyway/);
+  });
+
+  it('does not let an explicit larger limit override the preference', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    await engine.setConcurrencyPreference(1);
+    const result = await engine.coordinate(PARENT, '- one\n- two', { limit: 5, planOnly: false });
+    assert.equal(result.started.length, 1);
+  });
+
+  it('honours the preference when starting a proposed plan too', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    await engine.setConcurrencyPreference(1);
+    await engine.coordinate(PARENT, '- one\n- two\n- three', { planOnly: true });
+
+    const started = await engine.startSuggested(PARENT, {});
+    assert.equal(started.started.length, 1);
+    assert.equal(started.deferred?.length, 2);
+    // The deferred tasks stay in the plan, so nothing is lost by the preference.
+    assert.equal(started.remaining.length, 2);
+  });
+
+  it('survives a restart, validates its input, and can be cleared', async () => {
+    const first = await harness();
+    const root = first.root;
+    await first.engine.init({ name: 'demo' });
+    await assert.rejects(
+      () => first.engine.setConcurrencyPreference(0),
+      (error: unknown) => isProjectError(error) && error.code === 'INVALID_INPUT',
+    );
+    await first.engine.setConcurrencyPreference(3);
+
+    const second = new ProjectEngine(root, {
+      runner: first.runner,
+      threads: first.threads,
+      clock: fixedClock(),
+      ids: sequentialIds(),
+      quotaLedgerPath: join(root, 'quota-ledger.json'),
+    });
+    assert.equal(await second.concurrency(), 3, 'the preference must survive a restart');
+
+    const cleared = await second.setConcurrencyPreference(undefined);
+    assert.equal(cleared.changed, true);
+    assert.equal(await second.concurrency(), undefined);
+  });
+
+  it('shows up on the panel beside the quota, and its absence is silent', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const before = renderOverviewMarkdown(await engine.overview());
+    assert.doesNotMatch(before, /concurrency:/);
+
+    await engine.setConcurrencyPreference(4);
+    const overview = await engine.overview();
+    assert.equal(overview.concurrency, 4);
+    const after = renderOverviewMarkdown(overview);
+    assert.match(after, /concurrency: up to 4 at a time/);
+    assert.match(after, /preference, not a cap/);
+    // The line belongs with the quota, not below the thread buckets.
+    assert.ok(after.indexOf('- concurrency:') < after.indexOf('- memory:'));
+  });
+});
+

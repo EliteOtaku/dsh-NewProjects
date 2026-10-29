@@ -73,7 +73,7 @@
 | **P1** | 会静默产出错误结果 | ~~`GAP-23`~~ ✅ ~~`GAP-24`~~ ✅（`GAP-22` / `GAP-22a` 已关闭）—— **P1 已清空** |
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | ~~`GAP-03`~~ ✅ ~~`GAP-04`~~ ✅ ~~`GAP-05`~~ ✅（2026-10-29 关闭） |
 | **P3** | 官方有、我们无，独立功能 | 全部关闭（`GAP-06` / `GAP-09` / `GAP-10` / `GAP-11` / `GAP-12` / `GAP-13` / `GAP-29` 已于 2026-10-29 完成） |
-| **P4** | 项目管理类，缺了不能「管起来」 | ~~`GAP-15`~~ ✅ ~~`GAP-17`~~ ✅（2026-10-29 关闭）+ `GAP-28` 按需 |
+| **P4** | 项目管理类，缺了不能「管起来」 | ~~`GAP-15`~~ ✅ ~~`GAP-17`~~ ✅ ~~`GAP-28`~~ ✅（2026-10-30 关闭）—— **P4 已清空** |
 | **P5** | 磁盘、性能与健壮性，不出错 | ~~`GAP-20`~~ ✅ ~~`GAP-27`~~ ✅（2026-10-29 关闭）—— **P5 已清空** |
 | **ARCH** | 架构性差异，记录不排期 | `GAP-A1` ~ `GAP-A4` |
 | **BOUND** | 有意为之的边界，非缺陷 | `BOUND-1` ~ `BOUND-4` |
@@ -514,7 +514,7 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
 
 **5. 不做的部分**
 
-官方建议里的「drop those limits once a few threads come back the way you want」（自适应放宽并发偏好）属 `GAP-28`，未在本条实现。
+官方建议里的「drop those limits once a few threads come back the way you want」（自适应放宽并发偏好）**有意不做**：判断「线程回来得对不对」是人的判断，替人放宽等于悄悄改变行为。`GAP-28` 只提供 `/project concurrent <n>` 这个显式旋钮（该条已于 2026-10-30 关闭）。
 
 #### 验收标准（全部已有测试）
 
@@ -658,7 +658,7 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
 
 **验收（全部有测试）**：✅ heal prompt 含两条禁令 —— `test/unit/healing.test.ts`「mentions the branch and forbids softening the test」（三个关键词断言）；✅ 交付/首轮 prompt 同样含 —— `test/unit/prompt.test.ts`「carries the three OFFICIAL prohibitions into the first turn」；✅ merge 路径仍禁 —— 「keeps force-push and CI edits forbidden on the merge path」。
 
-### GAP-28 并发偏好无法表达
+### GAP-28 并发偏好无法表达 — ✅ 已做（2026-10-30）
 
 - **依据**：`OFFICIAL`「There's no fixed number; Claude starts as many as the work calls for, and a limit you ask for is a **preference rather than a cap**.」+ 紧接着的「Claude **saves preferences like these to project memory** on its own and follows them in later cloud threads. … **Add one to project instructions when you want it worded exactly and applied to every thread from the start.**」
 - **现状**：没有任何表达并发偏好的地方。`MAX_PLANNED_TASKS = 8`（`src/core/planner.ts:18`）是**一次拆解最多几项**，不是并发 —— 连续两次 `coordinate` 就是 16 个线程在跑。
@@ -666,6 +666,31 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
 - **做法**：一条共享记忆键 `concurrency-preference`（或 manifest 字段 `maxConcurrentThreads?: number`），`coordinate` 时读它并在计划阶段告知模型/限制本次启动数；`/project concurrent <n>` 写入。**明确写进文档：这是偏好不是硬闸。**
 - **本地额外理由**：云端的并发成本是 token，我们的成本是 token + 磁盘 + 宿主进程 + 同一台机器的 CPU，所以更该有。官方首批建议也主张新项目从低并发开始。
 - **验收标准**：偏好可写、可读、跨进程持久；`coordinate` 遵守它并在结果里说明「按你的并发偏好只启动了 N 个」；不设时行为不变。
+
+#### 实际做法（2026-10-30 落地）
+
+1. 存在 **manifest 字段** `maxConcurrentThreads?: number`，不是共享记忆键。理由（写进 `src/core/concurrency.ts` 注释）：偏好是**结构性配置**，要参与「这一轮能起几个」的算术；记忆是自然语言，读它就得先解析文本再判合法性，而一处解析失败就会变成「偏好忽然不生效」。记忆层的用途是让线程*知道*当前偏好（charter 里渲染成一行），不是让它成为权威。
+2. `normaliseConcurrencyPreference(n)`：正整数、`1..min(200, dailyThreadQuotaMax)`。**上界不是拍脑袋** —— 一天配额 200，偏好写成 500 永远不会被触发，等于写了个假的旋钮。`0` 与负数被拒并指路 `off`（「关掉并发控制」不是「不许跑」）。分数、字符串、`NaN` 一律 `INVALID_INPUT`。
+3. `roundBudget({ preference, active, planned, requested })` 是**纯函数**，返回 `{ allowed, deferred, decision }`。规则：
+   - 无偏好 → 用 `requested`（缺省全起），行为与实现前完全一致；
+   - 有偏好 → `allowed = min(planned, max(1, preference - active), requested ?? ∞)`；
+   - **`max(1, …)` 是这份实现的核心判断**：官方原话是「a limit you ask for is a **preference rather than a cap**」。偏好已满时起 0 个，就把它变成了硬闸 —— 而线程是靠人推动的，硬闸会让人以为项目卡死。所以每轮至少起一个，并在 `note` 里写明「started one anyway … not a cap」。
+   - `requested`（`coordinate` 的 `limit`）**只能收窄不能放宽**：`min()` 已经保证，测试里也钉了这条（`limit: 9` 不会突破偏好 2）。
+4. **`active` 从 manifest 现算**（`activeThreadCount`，只数 `queued` / `running` / `ci_fixing`）而不是维护计数器：计数器与线程状态会在崩溃、暂停、超时回收时漂移，而线程状态是唯一真相。
+5. 接线点三处：`coordinate`、`startSuggested`（建议线程同样受偏好约束，被推迟的任务留回建议列表，不丢）、`coordinateDetailed` 的返回结构（`CoordinateResult` 新增 `concurrency?: { preference, active, allowed, note }` 与 `deferred?: PlannedTask[]`）。
+6. 面板：`overview` 的 `concurrency` 字段 + markdown 在 quota 那一行**之后**输出 `- concurrency: up to N at a time (preference, not a cap)` —— 与配额同处，因为两者回答的是同一个问题「还能起多少」。
+7. 命令 `/project concurrent <n>` 与 `/project concurrent off`；`PROJECT_USAGE` 同步。
+8. **不做自适应放宽**（官方提到的「drop those limits once a few threads come back the way you want」）：调整阈值需要判断「线程回来得对不对」，那是人的判断，替人放宽等于悄悄改变行为。留给人一条命令，比留一个猜规则的启发式更诚实。
+
+- **验收（全部有测试）**：
+  1. ✅ 可写、可读、跨进程持久、`off` 能清 —— `test/engine.test.ts` 的 `survives a restart, validates its input, and can be cleared`
+  2. ✅ 一轮只起 N 个并说明推迟了几个 —— `starts only as many as the preference allows and says what it held back`（断言 `deferred` 长度与 `note` 文案）
+  3. ✅ 已满时仍起 1 个（偏好不是硬闸）—— `counts the threads already running and still starts one when the preference is reached`
+  4. ✅ `limit` 不能突破偏好 —— `does not let an explicit larger limit override the preference`
+  5. ✅ 建议线程同样受约束且任务不丢 —— `honours the preference when starting a proposed plan too`
+  6. ✅ 不设偏好时行为完全不变 —— `changes nothing when no preference is set`
+  7. ✅ 面板可见、未设时不出现、位置在配额附近 —— `shows up on the panel beside the quota, and its absence is silent`
+  8. ✅ 纯函数边界（0/负/分数/超上限/空轮/坏 limit）—— `test/unit/concurrency.test.ts` 全部 16 项
 
 ---
 
@@ -854,7 +879,7 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
 | **第四批 让裁定可用** ✅ | ~~`GAP-12` 卡片动作~~ ✅ + ~~`GAP-25` 禁令~~ ✅ + ~~`GAP-19` worktree 回收~~ ✅ + ~~`GAP-18` 审批~~ ✅ + ~~`GAP-14` Pause~~ ✅ | 19 依赖 10（先有清单再删目录）| **整批已于 2026-10-29 完成**。不可逆动作（19）与它的防护（18/25）同批，没有推到最后一刻 |
 | **第五批 减少重复交代** ✅ | ~~`GAP-06` goal~~ ✅ + ~~`GAP-09` 仓库约定~~ ✅ + ~~`GAP-29` 三件套~~ ✅ | 无 | **整批已于 2026-10-29 完成**：goal 进共享前缀、约定按官方三处只读根、近期消息环只给协调者不进线程前缀 |
 | **第六批 卫生** ✅ | ~~`GAP-13` Usage~~ ✅ + ~~`GAP-15` Archive~~ ✅ + ~~`GAP-17` 超时~~ ✅ + ~~`GAP-20` purge~~ ✅ + ~~`GAP-27` 锁重试~~ ✅ | 无 | **整批已于 2026-10-29 完成** |
-| **按需** | `GAP-28` 并发偏好 | 无 | ~~`GAP-23`~~ ✅ 已于 2026-10-29 提前做完 |
+| **按需** ✅ | ~~`GAP-28` 并发偏好~~ ✅ | 无 | **2026-10-30 完成**。字段而非记忆键、每轮至少起 1 个、`limit` 只收窄不放宽、`active` 现算不计数 —— 理由见该条「实际做法」。原先提前做完的 `GAP-23` 亦 ✅ |
 
 > **`GAP-23` / `GAP-24` 为什么提前做了（2026-10-29）**：原计划把它们放在第四批与「按需」，理由是触发条件要等到真的跑起来。实际复核后发现 `GAP-24` 的触发条件比预想近得多 —— 只要一个 PR 合并后分支被删，下一轮 sweep 就会安静地失败，而这是**每个正常收尾的 PR 都会走的路**；`GAP-23` 与它共用 `observeOne` 的同一段代码，分开做要改两遍。两项一起做，`observeOne` 的判断只落一次。
 

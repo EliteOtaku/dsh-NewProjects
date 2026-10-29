@@ -17,6 +17,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
 
 import { describeError, isProjectError, ProjectError } from './errors.js';
+import { activeThreadCount, concurrencyPreference, normaliseConcurrencyPreference, roundBudget } from './concurrency.js';
 import { CommandError, withLockRetry } from './exec.js';
 import type { CommandRunner } from './exec.js';
 import {
@@ -561,6 +562,37 @@ export class ProjectEngine {
     return (await this.requireManifest()).goal;
   }
 
+  /**
+   * Set or clear the concurrency preference.
+   *
+   * A preference, not a cap: it decides how many threads one round starts, and a round still
+   * starts at least one. Passing `undefined` restores "as many as the work calls for".
+   */
+  async setConcurrencyPreference(value: number | undefined): Promise<{ preference?: number; changed: boolean }> {
+    const preference = value === undefined ? undefined : normaliseConcurrencyPreference(value);
+    const result = await this.store.update((draft) => {
+      const previous = draft.maxConcurrentThreads;
+      if (previous === preference) return { manifest: draft, result: { changed: false, preference } };
+      if (preference === undefined) delete draft.maxConcurrentThreads;
+      else draft.maxConcurrentThreads = preference;
+      return { manifest: draft, result: { changed: true, preference } };
+    });
+    if (result.changed) {
+      await this.recordRecent(
+        'user',
+        preference === undefined
+          ? 'removed the concurrency preference'
+          : `set the concurrency preference to ${preference}`,
+      );
+    }
+    return result;
+  }
+
+  /** The concurrency preference in force, or `undefined` when unset. */
+  async concurrency(): Promise<number | undefined> {
+    return concurrencyPreference(await this.requireManifest());
+  }
+
   /** Retained coordinator messages, newest last. */
   async recentMessages(): Promise<RecentMessage[]> {
     return [...((await this.requireManifest()).recentMessages ?? [])];
@@ -753,8 +785,16 @@ export class ProjectEngine {
       };
     }
 
-    const limit = Math.max(1, Math.min(options.limit ?? planned.length, planned.length));
-    const tasks = planned.slice(0, limit);
+    // How many of these may start now. The preference is what the user asked to be remembered;
+    // an explicit `limit` can only narrow it (see `roundBudget` for why).
+    const budget = roundBudget({
+      preference: concurrencyPreference(opening),
+      active: activeThreadCount(Object.values(opening.threads)),
+      planned: planned.length,
+      ...(options.limit === undefined ? {} : { requested: options.limit }),
+    });
+    const tasks = planned.slice(0, budget.allowed);
+    const deferred = planned.slice(budget.allowed);
     const now = this.clock.now();
 
     // Probe the environment once, so every task sees consistent facts.
@@ -841,6 +881,8 @@ export class ProjectEngine {
       planOrigin: plan.origin,
       ...(planNote === undefined ? {} : { planNote }),
       suggested: [],
+      ...(deferred.length === 0 ? {} : { deferred }),
+      ...(budget.decision === undefined ? {} : { concurrency: budget.decision }),
     };
   }
 
@@ -932,8 +974,14 @@ export class ProjectEngine {
       }
       selected = entries.filter((entry) => wanted.has(entry.ordinal));
     }
-    const limit = Math.max(1, Math.min(options.limit ?? selected.length, selected.length));
-    selected = selected.slice(0, limit);
+    const budget = roundBudget({
+      preference: concurrencyPreference(manifest),
+      active: activeThreadCount(Object.values(manifest.threads)),
+      planned: selected.length,
+      ...(options.limit === undefined ? {} : { requested: options.limit }),
+    });
+    const deferred = selected.slice(budget.allowed).map((entry) => entry.task);
+    selected = selected.slice(0, budget.allowed);
 
     let repo: RepoFacts = { isRepo: false, ghReady: false, ghProblem: 'not inspected' };
     try {
@@ -1005,6 +1053,8 @@ export class ProjectEngine {
       skipped,
       remaining,
       quota: { ...quotaState(finalManifest, this.clock.now()), global: { created: global.created, max: global.max } },
+      ...(deferred.length === 0 ? {} : { deferred }),
+      ...(budget.decision === undefined ? {} : { concurrency: budget.decision }),
     };
   }
 

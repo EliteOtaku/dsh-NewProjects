@@ -74,7 +74,11 @@ export const PROJECT_USAGE = [
   '- `/project resume` — undo a pause; interrupted threads stay resumable',
   '- `/project archive` — stop everything and take the project out of the way',
   '- `/project unarchive` — bring it back; interrupted threads still need a retry or a steer',
+  '- `/project concurrent [n|off]` — how many threads to run at once (a preference, not a cap); `off` clears it',
 ].join('\n');
+
+/** The two forms of `/project concurrent`, shown wherever it is relevant. */
+const CONCURRENT_USAGE = '`/project concurrent <n>` sets it; `/project concurrent off` clears it.';
 
 /** Split a raw argument line into verb and remainder. */
 function splitVerb(raw: string): { verb: string; rest: string } {
@@ -427,6 +431,43 @@ export function buildProjectCommand(source: CommandContextSource): CommandDef {
               for (const message of tail) lines.push(`- ${new Date(message.at).toISOString()} ${message.role}: ${message.text}`);
             }
             return { kind: 'success', text: lines.join('\n') };
+          }
+          case 'concurrent': {
+            const engine = await source.engineFor(invocation.agent, undefined);
+            await requireReady(engine);
+            const lower = rest.trim().toLowerCase();
+            if (lower.length > 0) {
+              const off = lower === 'off' || lower === 'none' || lower === 'clear';
+              const parsed = off ? undefined : Number.parseInt(lower, 10);
+              if (!off && !Number.isFinite(parsed)) {
+                return { kind: 'error', text: `\`${rest}\` is not a number.\n${CONCURRENT_USAGE}` };
+              }
+              const result = await engine.setConcurrencyPreference(parsed);
+              if (!result.changed) {
+                return {
+                  kind: 'success',
+                  text:
+                    result.preference === undefined
+                      ? 'no concurrency preference was set'
+                      : `concurrency preference already ${result.preference}`,
+                };
+              }
+              return {
+                kind: 'success',
+                text:
+                  result.preference === undefined
+                    ? 'concurrency preference removed; a round starts as many threads as its tasks call for.'
+                    : `concurrency preference set to ${result.preference}.\nA round now starts at most ${result.preference} threads while ${result.preference} are active at once, and always at least one — it is a preference, not a cap.`,
+              };
+            }
+            const current = await engine.concurrency();
+            return {
+              kind: 'success',
+              text:
+                current === undefined
+                  ? `no concurrency preference; a round starts as many threads as its tasks call for.\n${CONCURRENT_USAGE}`
+                  : `concurrency preference: ${current} at a time (a preference, not a cap).\n${CONCURRENT_USAGE}`,
+            };
           }
           case 'usage': {
             const engine = await source.engineFor(invocation.agent, undefined);

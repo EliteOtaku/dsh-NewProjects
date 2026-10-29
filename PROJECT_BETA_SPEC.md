@@ -34,6 +34,7 @@
 - **配额护栏**：默认限制单个用户每天**在所有项目中**最多新建 **200 个线程**。
   - *实现注记（2026-10）*：**当前为每项目独立计数，未做到"跨项目"**。见 `docs/GAPS.md` 的 `GAP-01`。
 - **并发度**：官方原文「There's no fixed number; Claude starts as many as the work calls for, and a limit you ask for is a **preference rather than a cap**」——并发数**本来就不是硬上限**，不设硬闸是符合规格的。但官方的「偏好」会被**持久化进记忆并由模型遵守**，所以我们应让并发偏好「可表达、可持久化、可被协调者读到」，见 `GAP-28`。
+  - *实现注记（2026-10-30，`GAP-28` 关闭）*：偏好存在 manifest 字段 `maxConcurrentThreads`（不是记忆键——它要参与「这一轮起几个」的算术），由 `/project concurrent <n>` 写。**每轮至少起一个**：偏好已满时起 0 个就等于把它变成硬闸，而官方明说这不是 cap。`coordinate` 的 `limit` 只能收窄不能放宽偏好；`active` 从线程状态现算而不维护计数器。面板在配额行之后显示 `concurrency: up to N at a time (preference, not a cap)`。
 
 ### 模块 B：Parallel Threads（基于 Git 隔离与持久化子会话）
 

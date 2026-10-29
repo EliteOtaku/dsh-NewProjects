@@ -263,6 +263,16 @@ export interface ProjectManifest {
   /** Bumped on every prefix-affecting change (memory set/remove). */
   prefixVersion: number;
   /**
+   * How many threads the user would like running at once, or absent for "as many as the work
+   * calls for".
+   *
+   * **A preference, not a cap.** The official spec is explicit that no fixed number exists and
+   * that a limit one asks for is "a preference rather than a cap". So this shapes how many
+   * threads a single `coordinate` round starts, and never refuses requested work outright: a
+   * round always starts at least one thread. See {@link roundBudget}.
+   */
+  maxConcurrentThreads?: number;
+  /**
    * When the project was paused, or absent while it runs.
    *
    * Pausing stops everything at once: no new threads, no self-healing sweeps, no delivery,
@@ -356,6 +366,23 @@ export interface ProjectPlan {
   tasks: PlannedTask[];
 }
 
+/**
+ * How the project's concurrency preference shaped one round.
+ *
+ * Reported rather than silently applied: "why did only two of five start" must be answerable
+ * from the tool result, and the caller needs to know it was a preference they can override.
+ */
+export interface ConcurrencyDecision {
+  /** The preference in force, as stored on the manifest. */
+  preference: number;
+  /** Threads already owned by us (queued / running / ci_fixing) when the round began. */
+  active: number;
+  /** How many threads this round was allowed to start. */
+  allowed: number;
+  /** One sentence the caller must surface when `allowed` cut the round short. */
+  note?: string;
+}
+
 /** Result of one `project_coordinate` call. */
 export interface CoordinateResult {
   projectId: string;
@@ -371,6 +398,10 @@ export interface CoordinateResult {
   planNote?: string;
   /** Tasks still waiting for a go-ahead, when `planOnly` is true. */
   suggested: PlannedTask[];
+  /** Tasks this round left for later because the concurrency preference was reached. */
+  deferred?: PlannedTask[];
+  /** Present only when a concurrency preference is set. */
+  concurrency?: ConcurrencyDecision;
 }
 
 /** Result of starting previously proposed tasks. */
@@ -380,6 +411,10 @@ export interface SuggestStartResult {
   /** Tasks still waiting; empty once everything was started. */
   remaining: PlannedTask[];
   quota: ProjectQuotaState;
+  /** Tasks this round left for later because the concurrency preference was reached. */
+  deferred?: PlannedTask[];
+  /** Present only when a concurrency preference is set. */
+  concurrency?: ConcurrencyDecision;
 }
 
 /** A pending decomposition as the panel and the command show it. */
@@ -414,6 +449,13 @@ export interface ProjectOverview {
   prefixFingerprint: string;
   /** The proposed decomposition, when one is waiting for a go-ahead. */
   suggested?: SuggestedPlanView;
+  /**
+   * The concurrency preference in force, absent when the user has not set one.
+   *
+   * Surfaced on the panel next to the quota lines so "why did only two start" is answerable
+   * where the user is looking, not from a settings tab.
+   */
+  concurrency?: number;
   totals: {
     threads: number;
     /** Threads still owned by us right now (queued / running / ci_fixing). */
