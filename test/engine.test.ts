@@ -913,6 +913,128 @@ describe('library', () => {
   });
 });
 
+describe('card actions', () => {
+  /** A delivered thread with a pull request, so the card actions have a target. */
+  async function delivered(): Promise<{
+    engine: ProjectEngine;
+    runner: FakeRunner;
+    threads: FakeThreads;
+    threadId: string;
+  }> {
+    const { engine, runner, threads } = await harness();
+    repoReady(runner);
+    await engine.init({ name: 'demo' });
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
+    const threadId = result.started[0]?.threadId ?? '';
+    runner.on('git status --porcelain', { stdout: ' M src/a.ts\n' });
+    runner.on('git add', { exitCode: 0 });
+    runner.on('git commit', { stdout: '[project/demo/1-one abc1234] one\n' });
+    runner.on('git push', { exitCode: 0 });
+    runner.on('gh pr create', { stdout: 'https://github.com/o/r/pull/7\n' });
+    runner.on('gh pr view', {
+      stdout: JSON.stringify({
+        number: 7,
+        url: 'https://github.com/o/r/pull/7',
+        state: 'OPEN',
+        isDraft: false,
+        headRefName: 'project/demo/1-one',
+        baseRefName: 'main',
+        reviewDecision: '',
+        mergeable: 'MERGEABLE',
+      }),
+    });
+    runner.on('git diff', { stdout: '' });
+    await engine.deliverThread(threadId);
+    return { engine, runner, threads, threadId };
+  }
+
+  /** A running thread with no pull request, for the refusal paths. */
+  async function bare(): Promise<{ engine: ProjectEngine; threadId: string }> {
+    const { engine, runner } = await harness();
+    repoReady(runner);
+    await engine.init({ name: 'demo' });
+    const result = await engine.coordinate(PARENT, '- one', { planOnly: false });
+    return { engine, threadId: result.started[0]?.threadId ?? '' };
+  }
+
+  it('asks the thread to merge instead of merging behind its back', async () => {
+    // The thread is the only party that knows whether the branch needs a rebase first and
+    // what to clean up afterwards. A host-side merge would report success on a branch the
+    // thread still believes is waiting for review.
+    const { engine, runner, threads, threadId } = await delivered();
+    const outcome = await engine.manageThread(PARENT, threadId, 'merge', undefined);
+    assert.equal(threads.resumes.length, 1);
+    assert.match(threads.resumes[0]?.text ?? '', /pull\/7/);
+    assert.equal(runner.saw('gh pr merge'), false, 'the host must not merge for the thread');
+    assert.equal(outcome.thread.status, 'landing');
+  });
+
+  it('refuses to merge a thread with no pull request', async () => {
+    const { engine, threadId } = await bare();
+    await assert.rejects(
+      () => engine.manageThread(PARENT, threadId, 'merge', undefined),
+      (error: unknown) => isProjectError(error) && error.code === 'INVALID_INPUT',
+    );
+  });
+
+  it('hands the thread the likely conflict sites and the base branch', async () => {
+    const { engine, runner, threads, threadId } = await delivered();
+    runner.on('gh pr view', { stdout: JSON.stringify({ baseRefName: 'main' }) });
+    runner.on('git merge-base', { stdout: 'fork1234\n' });
+    // Both sides touched `src/shared.ts`; only this branch touched `src/mine.ts`. The prompt
+    // names the intersection and calls it a candidate list, because only the merge can turn
+    // a candidate into a real conflict.
+    runner.onCommand('git diff', (spec) =>
+      spec.argv.join(' ').includes('origin/main')
+        ? { stdout: 'M\tsrc/shared.ts\n' }
+        : { stdout: 'M\tsrc/shared.ts\nA\tsrc/mine.ts\n' },
+    );
+    await engine.manageThread(PARENT, threadId, 'conflicts', undefined);
+    const text = threads.resumes[0]?.text ?? '';
+    assert.match(text, /src\/shared\.ts/);
+    assert.match(text, /main/);
+    assert.equal(text.includes('src/mine.ts'), false, 'a file only this branch touched cannot conflict');
+    assert.match(text, /candidate|likely/i);
+  });
+
+  it('still asks the thread to fetch and inspect when nothing overlaps', async () => {
+    // An empty intersection is not proof of a clean merge: the base may have moved in a way
+    // the two-dot diff cannot see. The instruction survives and only the file list vanishes,
+    // because a list of zero files would read as "we already checked, nothing to do".
+    const { engine, runner, threads, threadId } = await delivered();
+    runner.on('gh pr view', { stdout: JSON.stringify({ baseRefName: 'main' }) });
+    runner.on('git merge-base', { stdout: 'fork1234\n' });
+    runner.on('git diff', { stdout: '' });
+    await engine.manageThread(PARENT, threadId, 'conflicts', undefined);
+    const text = threads.resumes[0]?.text ?? '';
+    assert.match(text, /Bring `main` into your branch/);
+    assert.equal(text.includes('Files both sides touched'), false);
+  });
+
+  it('refuses to resolve conflicts without a pull request', async () => {
+    const { engine, threadId } = await bare();
+    await assert.rejects(
+      () => engine.manageThread(PARENT, threadId, 'conflicts', undefined),
+      (error: unknown) => isProjectError(error) && error.code === 'INVALID_INPUT',
+    );
+  });
+
+  it('answers review with the link and spends no thread turn', async () => {
+    const { engine, threads, threadId } = await delivered();
+    const outcome = await engine.manageThread(PARENT, threadId, 'review', undefined);
+    assert.match(outcome.message, /^https:\/\/github\.com\/o\/r\/pull\/7$/);
+    assert.equal(threads.resumes.length, 0, 'review is a link, not a wake-up');
+  });
+
+  it('refuses review without a pull request', async () => {
+    const { engine, threadId } = await bare();
+    await assert.rejects(
+      () => engine.manageThread(PARENT, threadId, 'review', undefined),
+      (error: unknown) => isProjectError(error) && error.code === 'INVALID_INPUT',
+    );
+  });
+});
+
 describe('healSweep', () => {
   it('observes nothing and reports no errors for a project with no reviewed threads', async () => {
     const { engine, runner } = await harness();

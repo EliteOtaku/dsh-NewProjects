@@ -296,6 +296,12 @@ describe('buildHealPrompt', () => {
     // review, and deleting an assertion turns red into green without fixing anything.
     const prompt = buildHealPrompt(base, [check('build', 'fail')], []);
     assert.match(prompt, /same branch/i);
+    // OFFICIAL: "Don't merge, force-push, or change CI configuration without asking me in
+    // the thread." All three are named so a heal pass cannot quietly rewrite history or
+    // soften the checks it is supposed to satisfy.
+    assert.match(prompt, /Do not force-push/);
+    assert.match(prompt, /CI configuration/);
+    assert.match(prompt, /Do not merge the pull request yourself/);
     assert.match(prompt, /do not (?:weaken|delete)/i);
   });
 

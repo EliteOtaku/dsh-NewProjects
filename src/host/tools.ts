@@ -260,7 +260,25 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
         threadId: { type: 'string', description: 'Target thread id. Omit to list every thread.' },
         action: {
           type: 'string',
-          enum: ['list', 'inspect', 'steer', 'respond', 'retry', 'interrupt', 'close', 'reopen', 'deliver', 'heal', 'start', 'drop', 'watch', 'unwatch'],
+          enum: [
+            'list',
+            'inspect',
+            'steer',
+            'respond',
+            'retry',
+            'interrupt',
+            'close',
+            'reopen',
+            'deliver',
+            'heal',
+            'start',
+            'drop',
+            'watch',
+            'unwatch',
+            'merge',
+            'conflicts',
+            'review',
+          ],
           description: 'What to do. Defaults to list.',
         },
         message: { type: 'string', description: 'The message for steer/respond, or the PR body/title text for deliver.' },
@@ -327,7 +345,20 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
           const delivered = await engine.deliverThread(threadId, message === undefined ? {} : { body: message });
           return { ok: true, prRef: delivered.prRef, message: delivered.message, thread: delivered.thread };
         }
-        if (action === 'inspect' || action === 'steer' || action === 'respond' || action === 'retry' || action === 'interrupt' || action === 'close' || action === 'reopen' || action === 'watch' || action === 'unwatch') {
+        if (
+          action === 'inspect' ||
+          action === 'steer' ||
+          action === 'respond' ||
+          action === 'retry' ||
+          action === 'interrupt' ||
+          action === 'close' ||
+          action === 'reopen' ||
+          action === 'watch' ||
+          action === 'unwatch' ||
+          action === 'merge' ||
+          action === 'conflicts' ||
+          action === 'review'
+        ) {
           const outcome = await engine.manageThread(source.parentOf(exec), threadId, action, message, exec.signal);
           return { ok: true, message: outcome.message, thread: outcome.thread };
         }

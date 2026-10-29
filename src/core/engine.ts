@@ -46,7 +46,13 @@ import {
 import { buildOverview, dueForResolve } from './overview.js';
 import { buildProjectState, type ProjectStateSnapshot } from './projectState.js';
 import { branchNameFor, normaliseTasks, planTasks, PLAN_TTL_MS } from './planner.js';
-import { renderFeedbackAnswer, renderProjectCharter, renderThreadTask } from './prompt.js';
+import {
+  renderConflictRequest,
+  renderFeedbackAnswer,
+  renderMergeRequest,
+  renderProjectCharter,
+  renderThreadTask,
+} from './prompt.js';
 import { normaliseQuotaMax, quotaState, quotaWarning, releaseQuota, reserveQuota, rolloverQuota } from './quota.js';
 import { QuotaLedger, defaultQuotaLedgerPath, type QuotaLedgerState } from './quotaLedger.js';
 import { systemClock, systemIds, dayKey } from './util.js';
@@ -81,6 +87,8 @@ import {
   readReviewComments,
   readReviewVerdicts,
   type RepoFacts,
+  mergeBase,
+  readPrBase,
 } from './vcs.js';
 import { aggregateLibrary, readOutput as readOutputBytes } from './library.js';
 import type { OutputReadResult } from './library.js';
@@ -187,6 +195,9 @@ export type ThreadAction =
   | 'retry'
   | 'close'
   | 'reopen'
+  | 'merge'
+  | 'conflicts'
+  | 'review'
   | 'watch'
   | 'unwatch';
 
@@ -1116,6 +1127,57 @@ export class ProjectEngine {
         });
         return { thread: updated, message: `reopened ${threadId}` };
       }
+      case 'merge': {
+        // The Host does not run `gh pr merge`. Only the thread knows whether the branch needs
+        // a rebase first, which checks are actually green, and what to clean up afterwards; a
+        // host-side merge would report success on a branch the thread still believes is open.
+        const prUrl = thread.prOrDeliverableRef;
+        if (prUrl === undefined) {
+          throw new ProjectError('INVALID_INPUT', `${threadId} has no pull request to merge`, { threadId });
+        }
+        await this.threads.resume(parent, thread.childSessionId, renderMergeRequest(thread, { prUrl }), signal);
+        this.live.set(thread.childSessionId, threadId);
+        const updated = await this.updateThread(threadId, (draft) => {
+          draft.status = 'landing';
+          draft.note = payload ?? 'asked the thread to merge its pull request';
+          draft.updatedAt = this.clock.now();
+        });
+        return { thread: updated, message: `asked ${threadId} to merge ${prUrl}` };
+      }
+      case 'conflicts': {
+        const prUrl = thread.prOrDeliverableRef;
+        if (prUrl === undefined) {
+          throw new ProjectError('INVALID_INPUT', `${threadId} has no pull request to resolve conflicts against`, { threadId });
+        }
+        const cwd = thread.worktreePath ?? this.rootDir;
+        const base = (await this.conflictBase(cwd, prUrl)) ?? 'main';
+        const files = await this.conflictCandidates(thread, cwd, base);
+        await this.threads.resume(
+          parent,
+          thread.childSessionId,
+          renderConflictRequest(thread, { base, files, prUrl }),
+          signal,
+        );
+        this.live.set(thread.childSessionId, threadId);
+        const updated = await this.updateThread(threadId, (draft) => {
+          draft.status = 'running';
+          draft.note = `resolving conflicts with ${base}`;
+          draft.updatedAt = this.clock.now();
+        });
+        return {
+          thread: updated,
+          message: `asked ${threadId} to resolve conflicts with ${base}${files.length === 0 ? '' : ` (${String(files.length)} likely file(s))`}`,
+        };
+      }
+      case 'review': {
+        // No wake-up: the answer is a link. Handing the URL back lets the Host render it as a
+        // clickable reference instead of spending a thread turn on "here is your own PR".
+        const prUrl = thread.prOrDeliverableRef;
+        if (prUrl === undefined) {
+          throw new ProjectError('INVALID_INPUT', `${threadId} has no pull request to review`, { threadId });
+        }
+        return { thread, message: `${prUrl}` };
+      }
       case 'unwatch': {
         // Polling is the only thing this stops: the branch, the PR and the descriptor all
         // stay. A merged pull request whose branch was deleted is the usual reason to want
@@ -1660,6 +1722,43 @@ export class ProjectEngine {
     });
     return { thread: updated, prRef: created.pr.url, message: `opened ${created.pr.url}` };
   }
+  /** The branch this thread's pull request targets, when GitHub will tell us. */
+  private async conflictBase(cwd: string, prUrl: string): Promise<string | undefined> {
+    const prNumber = Number.parseInt(/\/(\d+)(?:$|\?)/.exec(prUrl)?.[1] ?? '', 10);
+    if (!Number.isFinite(prNumber)) return undefined;
+    return readPrBase(this.runner, cwd, prNumber);
+  }
+
+  /**
+   * Files both sides touched since they diverged.
+   *
+   * These are candidates, not confirmed conflicts: git only knows the real ones when it tries
+   * the merge. Reporting them narrows where to look without pretending to be authoritative.
+   */
+  private async conflictCandidates(
+    thread: ProjectThreadDescriptor,
+    cwd: string,
+    base: string,
+  ): Promise<string[]> {
+    if (thread.baseCommit === undefined) return [];
+    // `origin/<base>` is what a pull request actually compares against; the local branch may
+    // be stale or absent in a worktree that never fetched.
+    const fork =
+      (await mergeBase(this.runner, cwd, thread.baseCommit, `origin/${base}`)) ??
+      (await mergeBase(this.runner, cwd, thread.baseCommit, base));
+    if (fork === undefined) return [];
+    const [mine, theirs] = await Promise.all([
+      readChangedFiles(this.runner, cwd, fork, thread.branch ?? 'HEAD'),
+      readChangedFiles(this.runner, cwd, fork, `origin/${base}`),
+    ]);
+    if (mine === undefined || theirs === undefined) return [];
+    const theirsPaths = new Set(theirs.filter((file) => file.change !== 'deleted').map((file) => file.path));
+    return mine
+      .filter((file) => file.change !== 'deleted' && theirsPaths.has(file.path))
+      .map((file) => file.path)
+      .sort();
+  }
+
   /**
    * What this thread's branch changed relative to its base commit.
    *

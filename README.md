@@ -62,7 +62,8 @@ cmd /c mklink /J "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-newp
 /project memory stack = TypeScript on Node   # 写一条决策并广播
 /project memory rm stack      # 删一条
 /project threads              # 所有线程及其状态
-/project thread <id> steer|respond|retry|interrupt|close|deliver [text]
+/project thread <id> steer|respond|retry|interrupt|close|reopen|deliver [text]
+/project thread <id> merge|conflicts|review   # 卡片动作：让线程自己合、解冲突、给 PR 链接
 /project heal                 # 手动跑一次 CI/PR 巡检
 /project coordinate <goal>    # 提议拆解（命令路径没有模型，必然是兜底拆解，故只提议不启动）
 /project start [1 3]          # 启动全部或指定序号的建议线程
@@ -117,11 +118,14 @@ cmd /c mklink /J "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-newp
 | `ci_fixing` | 收到 CI 失败或被要求改，正在修 | 线程自身（+ 巡检） |
 | `awaiting_review` | 已开 PR，等人工评审 | 评审人 / `heal` 的 merged 检测 |
 | `needs_feedback` | 需要人拍板（含"跑完了但没交付"） | `/project thread <id> respond <text>` |
-| `completed` / `failed` | 收尾 | — |
+| `landing` | 已批准或排队合并（`/project thread <id> merge` 之后） | 巡检读到 merged 后转 `resolved` |
+| `completed` | 已完成且不在等任何事（官方的 Idle） | 线程收尾 / `reopen` 回到这里 |
+| `resolved` | 已结案（人工 `close` / 合并完成 / 一周无活动） | `/project thread <id> reopen` |
+| `failed` | 出错 | 同上，归入 `Waiting on you` |
 
-> 官方的六分组是 `Ready for review` / `Waiting on you` / `Working` / `Landing` / `Idle` / `Resolved`。
-> 我方状态与它的对应关系、以及缺的三个（`landing` / `idle` / `resolved`）见 [`docs/GAPS.md`](docs/GAPS.md) 的 `GAP-04` 与 `GAP-05`。
-> **分组是状态的投影**，`bucketOf()` 就是那个派生函数——加状态只改它，不需要重构枚举。
+> 官方六分组 `Ready for review` / `Waiting on you` / `Working` / `Landing` / `Idle` / `Resolved` 与上表一一对应，`bucketOf()` 是那个派生函数——加状态只改它，不需要重构枚举。
+> 两个裁定记在 [`docs/GAPS.md`](docs/GAPS.md) 的 `GAP-04` / `GAP-05`：`failed` 不单独成组（官方把它归入 `Waiting on you`）；**人阻塞优先于 PR 生命周期**（卡在审批的线程若归进 `Ready for review`，官方的「有点就表示在等你」那盏灯就不亮，而项目对话里说「继续」到不了它，线程会永久卡死）。
+> `resolved` 默认从 Overview 隐藏，`/project threads --all` 可看全部。
 
 ## 目录布局
 
@@ -168,7 +172,7 @@ npm test           # 只跑测试
 
 ## 已知未实现部分
 
-相对官方 Claude Code Projects 还有若干未实现的能力（goal 持久化、`Merge it` 等卡片动作、Pause/Archive、审批改译、Usage 统计等）与若干有意为之的边界（重启后后台自愈停摆、云端 sandbox 差异等）。
+相对官方 Claude Code Projects 还有若干未实现的能力（goal 持久化、Pause/Archive、审批改译、Usage 统计等）与若干有意为之的边界（重启后后台自愈停摆、云端 sandbox 差异等）。
 
 完整清单、代码证据、依据来源与验收标准见 **[docs/GAPS.md](./docs/GAPS.md)**，按批次推进。那份文档是判断「某个能力到底有没有」的唯一依据——不要凭本文件的段落推断。
 

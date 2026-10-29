@@ -183,6 +183,46 @@ export interface PullRequestFacts {
 }
 
 /** Read one PR by branch, or `undefined` when none exists yet. */
+/**
+ * The commit where `a` and `b` diverged, or `undefined` when git cannot tell.
+ *
+ * Conflict candidates are computed against this point rather than against the base branch
+ * tip: files changed only on the base since the fork are not the thread's problem, and
+ * reporting them would send the thread moving commits it never touched.
+ */
+export async function mergeBase(
+  runner: CommandRunner,
+  cwd: string,
+  a: string,
+  b: string,
+): Promise<string | undefined> {
+  const result = await runProbe(runner, { argv: ['git', 'merge-base', a, b], cwd });
+  if (result.exitCode !== 0) return undefined;
+  const commit = result.stdout.trim();
+  return commit.length === 0 ? undefined : commit;
+}
+
+/** The branch a pull request would merge into. */
+export async function readPrBase(
+  runner: CommandRunner,
+  cwd: string,
+  prNumber: number,
+): Promise<string | undefined> {
+  const result = await runProbe(runner, {
+    argv: ['gh', 'pr', 'view', String(prNumber), '--json', 'baseRefName'],
+    cwd,
+  });
+  if (result.exitCode !== 0) return undefined;
+  try {
+    const parsed = JSON.parse(result.stdout) as { baseRefName?: unknown };
+    return typeof parsed.baseRefName === 'string' && parsed.baseRefName.length > 0
+      ? parsed.baseRefName
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function findPullRequest(runner: CommandRunner, cwd: string, branch: string): Promise<PullRequestFacts | undefined> {
   const result = await runProbe(runner, {
     argv: ['gh', 'pr', 'view', branch, '--json', 'number,url,state,isDraft,headRefName,reviewDecision,mergeable'],

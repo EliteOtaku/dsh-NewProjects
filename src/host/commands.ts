@@ -19,7 +19,20 @@ import type { HostCommandDefinition, HostCommandDefinition as CommandDef } from 
 /** Every management verb the `thread` sub-command accepts, validated before dispatch. */
 type ThreadVerb = ThreadAction;
 
-const THREAD_VERBS: readonly ThreadVerb[] = ['inspect', 'steer', 'respond', 'retry', 'interrupt', 'close', 'watch', 'unwatch'];
+const THREAD_VERBS: readonly ThreadVerb[] = [
+  'inspect',
+  'steer',
+  'respond',
+  'retry',
+  'interrupt',
+  'close',
+  'reopen',
+  'watch',
+  'unwatch',
+  'merge',
+  'conflicts',
+  'review',
+];
 
 /** Where commands get their engine from. */
 export interface CommandContextSource {
@@ -40,7 +53,7 @@ export const PROJECT_USAGE = [
   '- `/project memory <key> = <decision>` — write one decision and broadcast it',
   '- `/project memory rm <key>` — delete one decision',
   '- `/project threads [--all]` — every thread with its status (resolved are hidden by default)',
-  '- `/project thread <id> [steer|respond|retry|interrupt|close|deliver|watch|unwatch] <text>` — act on one thread',
+  '- `/project thread <id> [steer|respond|retry|interrupt|close|reopen|deliver|watch|unwatch|merge|conflicts|review] [text]` — act on one thread',
   '- `/project knowledge` — what is indexed and whether it is in context or retrieval mode',
   '- `/project knowledge add <path...>` — bind files or folders and reindex',
   '- `/project knowledge rm <path...>` — unbind paths and reindex',

@@ -72,8 +72,8 @@
 | **P0** | 违背规格或官方原文 | ~~`GAP-01`~~ ✅ 已关闭 2026-10-27 |
 | **P1** | 会静默产出错误结果 | ~~`GAP-23`~~ ✅ ~~`GAP-24`~~ ✅（`GAP-22` / `GAP-22a` 已关闭）—— **P1 已清空** |
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | ~~`GAP-03`~~ ✅ ~~`GAP-04`~~ ✅ ~~`GAP-05`~~ ✅（2026-10-29 关闭） |
-| **P3** | 官方有、我们无，独立功能 | `GAP-06` `GAP-09` `GAP-12` `GAP-13` `GAP-29`（`GAP-10` / `GAP-11` 已于 2026-10-29 关闭） |
-| **P4** | 项目管理类，缺了不能「管起来」 | `GAP-14` `GAP-15` `GAP-17` `GAP-18` `GAP-25` `GAP-28` |
+| **P3** | 官方有、我们无，独立功能 | `GAP-06` `GAP-09` `GAP-13` `GAP-29`（`GAP-10` / `GAP-11` / `GAP-12` 已于 2026-10-29 关闭） |
+| **P4** | 项目管理类，缺了不能「管起来」 | `GAP-14` `GAP-15` `GAP-17` `GAP-18` `GAP-28`（`GAP-25` 已于 2026-10-29 关闭） |
 | **P5** | 磁盘、性能与健壮性，不出错 | `GAP-19` `GAP-20` `GAP-27` |
 | **ARCH** | 架构性差异，记录不排期 | `GAP-A1` ~ `GAP-A4` |
 | **BOUND** | 有意为之的边界，非缺陷 | `BOUND-1` ~ `BOUND-4` |
@@ -379,7 +379,7 @@
 
 **验收（全部有测试）**：✅ 按状态分组、计数正确 —— `test/unit/overview.test.ts`「groups pull requests by state and tallies their checks」；✅ 无 PR 时字段不出现 —— 同文件「stays absent until a thread produces something」；✅ 空状态组不出现 —— 「omits a state group no thread is in」。
 
-### GAP-12 线程卡片动作缺 Merge it / Resolve conflicts / Review PR
+### GAP-12 线程卡片动作缺 Merge it / Resolve conflicts / Review PR — ✅ 已做
 
 - **依据**：`OFFICIAL` 卡片动作六个，且**执行者分两类**：
   > **Resolve conflicts**, **Fix CI**, **Address comments**, and **Merge it** send that instruction to the thread **as a message from you**, so you can prompt the thread yourself instead of waiting for it to react to the pull request.
@@ -396,6 +396,17 @@
   2. `conflicts` 唤醒线程并把冲突文件清单交给它；
   3. `review` 返回可点击的 URL；
   4. 三者都有成功与失败路径的单测。
+
+**实际做法（2026-10-29 落地）**：三个动作加进 `ThreadAction`（`src/core/engine.ts`），命令与工具的白名单同步。
+
+- **`merge`** —— 宿主**不跑** `gh pr merge`，只用 `threads.resume` 给线程发 `renderMergeRequest`，并把状态置 `landing`。prompt 要求线程先自查可合并性（checks 绿、无冲突、评审要求满足），落后就先更新分支再合，合完报告 merge commit 与待清理项。
+  为什么不让宿主代跑：线程才知道自己那条分支要不要先 rebase、合完该清理什么。宿主代跑会在一个线程仍以为「等评审」的分支上宣告成功，而 `landing` 这个状态就再也回不到真相。
+- **`conflicts`** —— 先把 PR 的 base 分支读出来（`gh pr view <n> --json baseRefName`），再算**两侧各自相对 merge-base 改过的文件**取交集，作为「候选冲突点」交给 `renderConflictRequest`。状态置 `running`。
+  候选而不是定论：git 只有在真正尝试 merge 时才知道哪些文件真冲突。交集为空时**只省略文件清单、保留指令** —— 列一个零文件清单会读成「已经查过，没事」。
+- **`review`** —— 返回 PR URL，**不唤醒线程**。官方卡片里 Review PR 是人点开去看，不是给线程下指令；发一条消息会白烧一轮的 token。CLI 里输出即链接，面板里由 `GAP-03` 的投影带出 `pr` 字段。
+- 三者都在没有 PR 时以 `INVALID_INPUT` 拒绝（`merge` / `conflicts` 还要求线程带分支），而不是静默成功。
+
+**验收（全部有测试）**：✅ `merge` 走消息且宿主没有 `gh pr merge` —— `test/engine.test.ts`「asks the thread to merge instead of merging behind its back」；✅ `conflicts` 把交集交给线程、非交集文件不出现 —— 「hands the thread the likely conflict sites and the base branch」；✅ 交集为空仍发指令 —— 「still asks the thread to fetch and inspect when nothing overlaps」；✅ `review` 返回 URL 且不唤醒 —— 「answers review with the link and spends no thread turn」；✅ 三者的失败路径 —— 三条「refuses ... without a pull request」。
 
 ### GAP-13 没有 Usage（token 用量）
 
@@ -518,7 +529,7 @@
   3. 拒绝时状态可解释（不是卡在 `running`）；
   4. 不试图在子线程里调用 `userQuestions.ask`（有测试断言不会抛 `DELEGATED_CALLER`）。
 
-### GAP-25 heal prompt 没禁止 force-push 与改 CI 配置
+### GAP-25 heal prompt 没禁止 force-push 与改 CI 配置 — ✅ 已做
 
 - **依据**：`OFFICIAL` 项目指令示范：「Don't merge, **force-push**, or **change CI configuration** without asking me in the thread.」——官方自己把「需要人点头」的动作列出来了。
 - **现状**：`buildHealPrompt`（`src/core/healing.ts:139-143`）的 5 步里只禁了弱化断言：第 2 步 "Do not weaken, skip, or delete the failing assertion to make it pass."。**没有**禁 `force-push`，也**没有**禁改 CI 配置文件。
@@ -529,6 +540,15 @@
   1. heal prompt 文本含 force-push 与 CI 配置禁令（单测断言关键词）；
   2. 交付 prompt 同样含；
   3. 文档里写明「改 CI 必须问人」。
+
+**实际做法（2026-10-29 落地）**：禁令写进三个 prompt 模板，各按其场景措辞。
+
+- `buildHealPrompt`（`src/core/healing.ts`）在「What to do」之后加三条：不得 `force-push`（评审者可能正在读这条分支）；不得改 CI 配置（workflow 文件、跑哪些检查、检查的阈值）来让检查通过，检查本身错了就停下来说；不得自己合 PR。
+- `renderThreadTask`（`src/core/prompt.ts`，线程的第一轮）加同样三条。第一轮和自愈轮面对的是同一种诱惑：为了绕过一个 rebase 而重写分支，或者为了让检查变绿去动 workflow。
+- `renderMergeRequest` 保留「不得 `force-push`、不得改 CI 配置来把合并推进」；`renderConflictRequest` 保留「不得 `force-push`、不得自己合 PR」。
+- 文档侧写明：**改 CI 必须问人**（本条目与 `PROJECT_BETA_SPEC.md` 模块 D 的护栏段）。
+
+**验收（全部有测试）**：✅ heal prompt 含两条禁令 —— `test/unit/healing.test.ts`「mentions the branch and forbids softening the test」（三个关键词断言）；✅ 交付/首轮 prompt 同样含 —— `test/unit/prompt.test.ts`「carries the three OFFICIAL prohibitions into the first turn」；✅ merge 路径仍禁 —— 「keeps force-push and CI edits forbidden on the merge path」。
 
 ### GAP-28 并发偏好无法表达
 
@@ -709,7 +729,7 @@
 | **第一批 让输出可信** | `GAP-01` 全局配额 ✅ + `GAP-22` 知识 paths-first ✅ | 无 | 2026-10-27 `9c7ef10`：`GAP-01` 关闭，`GAP-22` 的减法做完（确实净减）；2026-10-29：`GAP-22a`（路径锚定项目根）关闭 —— **第一批完成** |
 | **第二批 让拆解可信** | `GAP-26` 模型优先拆解 + Suggested threads ✅ | 无（可与一批并行） | 后者是前者的保险，必须同批。2026-10-29 关闭 —— **第二批完成** |
 | **第三批 让报回可用** | `GAP-03` 投影 ✅ + `GAP-04` 六分组 ✅ + `GAP-05` 终态 ✅ + `GAP-10` Library ✅ + `GAP-11` PR 聚合 ✅ | 03 与 04 **可同批**（原判断的串行约束不成立） | 2026-10-29 全部关闭 —— **第三批完成** |
-| **第四批 让裁定可用** | `GAP-12` 卡片动作 + `GAP-18` 审批 + `GAP-14` Pause + `GAP-19` worktree 回收 + `GAP-25` 禁令 | 19 依赖 10（先有清单再删目录） | **不可逆动作（19）与它的防护同批**，不推到最后。~~`GAP-24` 退订~~ ✅ 已于 2026-10-29 提前做完 |
+| **第四批 让裁定可用** | ~~`GAP-12` 卡片动作~~ ✅ + ~~`GAP-25` 禁令~~ ✅ + `GAP-18` 审批 + `GAP-14` Pause + `GAP-19` worktree 回收 | 19 依赖 10（先有清单再删目录） | **不可逆动作（19）与它的防护同批**，不推到最后。`GAP-12` 与 `GAP-25` 已于 2026-10-29 完成 |
 | **第五批 减少重复交代** | `GAP-06` goal + `GAP-09` 仓库约定 + `GAP-29` 三件套 | 无 | |
 | **第六批 卫生** | `GAP-13` Usage + `GAP-15` Archive + `GAP-17` 超时 + `GAP-20` purge + `GAP-27` 锁重试 | 无 | |
 | **按需** | `GAP-28` 并发偏好 | 无 | ~~`GAP-23`~~ ✅ 已于 2026-10-29 提前做完 |

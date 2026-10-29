@@ -61,6 +61,9 @@
   - **不得修改 CI 配置来让检查通过**——这是自愈线程最省力也最有害的「修法」，必须停下来问人。官方项目指令示范原文：「Don't merge, **force-push**, or **change CI configuration** without asking me in the thread.」见 `GAP-25`。
   - **修复计数的轴是「连续失败」而不是「生命周期总数」**：一个 PR 被多轮评审带来多轮不同意见属正常节奏，不该在第四轮被当成「修不好」。有进展（失败集合变化 / 处理了新评论）即清零。见 `GAP-23`。
   - **实现注记（2026-10-29 落地）**：`failureSignature(checks)` 取失败项名字排序后拼接作签名，签名变化或出现新评论即复位；`consecutiveFails >= 3` 才升级，`healAttempts` 降级为只读展示；升级文案写明「同一组检查连续 N 轮仍在失败（共 M 轮）」并列出检查名。
+- **卡片动作的执行者分两类**（官方原文明说）：`Resolve conflicts` / `Fix CI` / `Address comments` / `Merge it` 把指令**作为「你发的消息」送给线程**；`Create PR` 则由宿主**直接按分支建 PR**、不给线程发指令。照此实现即可，照 `deliver` 的样子写 `merge` 会做错。
+  - **实现注记（2026-10-29 落地）**：`merge` 只发 `renderMergeRequest` 消息（宿主绝不跑 `gh pr merge`），并把状态置 `landing`；`conflicts` 先读 PR 的 base 分支、再算两侧相对 merge-base 改过文件的交集作为**候选**冲突点交给线程（交集为空时只省略清单、保留指令）；`review` 返回 PR URL 且**不唤醒**线程。三者都在没有 PR 时以 `INVALID_INPUT` 拒绝。见 `GAP-12`。
+- **三条禁令要写在每个会动手的 prompt 里**，不只自愈轮：首轮 `renderThreadTask`、`renderMergeRequest`、`renderConflictRequest` 都带「不得 force-push / 不得改 CI 配置让检查通过 / 不得自己合 PR」。见 `GAP-25`。
 - **退订是一等动作**：官方止损手段是「ask in the thread for it to stop watching the pull request」。合并后、转终态后、项目归档后都应**显式退订**，不能只靠「状态不在候选集就不扫」这种隐式行为。见 `GAP-24`。
   - **实现注记（2026-10-29 落地）**：`gh` 失败先经 `classifyGhFailure` 分三档 —— `benign`（没配 CI）/ `retryable`（网络、限流、认证 → 记 error，不退订、不改状态）/ `terminal`（PR 或分支已不存在 → 不记 error，先按编号重读 PR 终态：`merged` 转 `completed`、`closed` 转 `failed`，两者都自动退订；读不出来则升 `needs_feedback` 并附原始消息）；未识别的消息**默认 `retryable`**，因为悄悄退订会永久失去监视。`unwatchAt` 是 descriptor 上的显式字段，`/project thread <id> unwatch|watch` 可手动开关。
 
@@ -83,7 +86,7 @@
 - **配额展示**：当日配额消耗（X / 200），注意口径是**跨项目**（`GAP-01`）。
 
 > *实现注记（2026-10）*：
-> - `sessionProjections` **尚未接入**，目前只有 `project_overview` 工具与 `/project` 命令两种主动拉取表面。见 `GAP-03`。
+> - `sessionProjections` **已接入**（2026-10-29，`GAP-03` 关闭）：线程状态每次变更都 append `project-beta/state` 事件，面板读的是事件折叠出来的快照，不是轮询。
 >   - **它不再被状态模型阻塞**：投影暴露的是**桶**不是枚举，`bucketOf` 已解耦，两者可同批实现（原判断的串行约束不成立）。**2026-10-29 已实现**：`project-beta/state` 事件 + `projectBeta` 投影键，写入后自动发布。
 > - Overview 另有三个标签页官方有而我们无：**Library**（`GAP-10`）、**Pull requests**（`GAP-11`）、**Scheduled tasks**（未列为差距，见下方第 4 节）。
 >   - **2026-10-29 已补齐前两个**。`Library` 的实现要点：本地没有云端「沙箱消失」的约束，文件本来就在盘上，所以它是**清单 + 按需读取**而**不是存储层** —— `deliverThread` 记 `git diff --name-status --no-renames <base>..<branch>` 进 descriptor（关掉重命名检测，好让旧路径留在清单里），worktree 回收后清单仍在，`read` 现读现取、文件不在就报不可读；`Pull requests` 从各线程最后一次观察快照分组，带 checks 计数与未消费评论数，**面板不自己查 GitHub**（那是自愈巡检的活，面板查会白烧 API 配额）。两者都**没有内容时整个字段不出现**。
