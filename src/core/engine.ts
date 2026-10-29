@@ -89,6 +89,8 @@ import {
   type RepoFacts,
   mergeBase,
   readPrBase,
+  removeWorktree,
+  ensureWorktree,
 } from './vcs.js';
 import { aggregateLibrary, readOutput as readOutputBytes } from './library.js';
 import type { OutputReadResult } from './library.js';
@@ -1067,6 +1069,7 @@ export class ProjectEngine {
           throw new ProjectError('INVALID_INPUT', 'respond requires an answer');
         }
         const text = renderFeedbackAnswer(thread, payload);
+        await this.checkoutFor(thread);
         await this.threads.resume(parent, thread.childSessionId, text, signal);
         this.live.set(thread.childSessionId, threadId);
         const updated = await this.updateThread(threadId, (draft) => {
@@ -1086,6 +1089,7 @@ export class ProjectEngine {
       }
       case 'retry': {
         const manifest = await this.requireManifest();
+        await this.checkoutFor(thread);
         await this.threads.resume(
           parent,
           thread.childSessionId,
@@ -1135,6 +1139,7 @@ export class ProjectEngine {
         if (prUrl === undefined) {
           throw new ProjectError('INVALID_INPUT', `${threadId} has no pull request to merge`, { threadId });
         }
+        await this.checkoutFor(thread);
         await this.threads.resume(parent, thread.childSessionId, renderMergeRequest(thread, { prUrl }), signal);
         this.live.set(thread.childSessionId, threadId);
         const updated = await this.updateThread(threadId, (draft) => {
@@ -1149,7 +1154,7 @@ export class ProjectEngine {
         if (prUrl === undefined) {
           throw new ProjectError('INVALID_INPUT', `${threadId} has no pull request to resolve conflicts against`, { threadId });
         }
-        const cwd = thread.worktreePath ?? this.rootDir;
+        const cwd = await this.checkoutFor(thread);
         const base = (await this.conflictBase(cwd, prUrl)) ?? 'main';
         const files = await this.conflictCandidates(thread, cwd, base);
         await this.threads.resume(
@@ -1418,6 +1423,9 @@ export class ProjectEngine {
 
     // heal: wake the thread with the evidence, and remember which comments were sent.
     const consumed = [...snapshot.consumedCommentIds, ...snapshot.comments.filter((comment) => !snapshot.consumedCommentIds.includes(comment.id)).map((comment) => comment.id)];
+    // Delivery may have reclaimed the checkout; the heal turn runs in the same path, so it has
+    // to exist before the wake-up rather than after it.
+    await this.checkoutFor(thread);
     await this.threads.resume(parent, thread.childSessionId, action.prompt, signal);
     this.live.set(thread.childSessionId, thread.threadId);
     await this.updateThread(thread.threadId, (draft) => {
@@ -1661,13 +1669,43 @@ export class ProjectEngine {
     return updated;
   }
 
+  /**
+   * The directory a thread's turn must run in, restoring its worktree if delivery reclaimed it.
+   *
+   * Delivery deletes the checkout once the branch is pushed, because keeping a full checkout
+   * for every thread ever delivered grows without bound. The branch survives, so waking a
+   * thread means putting the checkout back first: the child session's working directory is that
+   * path, and resuming it against a missing directory fails in a way that looks like the
+   * thread's own fault.
+   */
+  private async checkoutFor(thread: ProjectThreadDescriptor): Promise<string> {
+    if (thread.worktreePath !== undefined) {
+      const restored = await ensureWorktree(
+        this.runner,
+        this.rootDir,
+        thread.branch ?? thread.worktreePath,
+        thread.worktreePath,
+      );
+      if (restored.ok) return thread.worktreePath;
+      throw new ProjectError('VCS_FAILED', restored.message, { threadId: thread.threadId });
+    }
+    if (thread.branch === undefined) return this.rootDir;
+    const path = join(projectPaths(this.rootDir).worktreeRoot, thread.threadId);
+    const created = await ensureWorktree(this.runner, this.rootDir, thread.branch, path);
+    if (!created.ok) throw new ProjectError('VCS_FAILED', created.message, { threadId: thread.threadId });
+    await this.updateThread(thread.threadId, (draft) => {
+      draft.worktreePath = path;
+    });
+    return path;
+  }
+
   /** Commit and push one thread's work, then open a PR. */
   async deliverThread(
     threadId: string,
     options: { message?: string; title?: string; body?: string; draft?: boolean } = {},
   ): Promise<{ thread: ProjectThreadDescriptor; prRef?: string; message: string }> {
     const thread = await this.requireThread(threadId);
-    const cwd = thread.worktreePath ?? this.rootDir;
+    const cwd = await this.checkoutFor(thread);
     const commit = await commitAll(this.runner, {
       cwd,
       message: options.message ?? `${thread.title}\n\nthread ${threadId}`,
@@ -1711,6 +1749,13 @@ export class ProjectEngine {
     });
     if (!created.ok) throw new ProjectError('VCS_FAILED', created.message);
 
+    // The branch is pushed and the pull request exists, so the checkout is now redundant: its
+    // commits live on the remote. Reclaiming it here (rather than in a separate sweep) is what
+    // keeps disk use proportional to the threads in flight instead of the threads ever run.
+    const reclaim =
+      thread.worktreePath === undefined
+        ? undefined
+        : await removeWorktree(this.runner, this.rootDir, thread.worktreePath);
     const updated = await this.updateThread(threadId, (draft) => {
       draft.status = 'awaiting_review';
       draft.prOrDeliverableRef = created.pr.url;
@@ -1719,8 +1764,19 @@ export class ProjectEngine {
         draft.outputs = outputs;
         draft.outputsAt = this.clock.now();
       }
+      if (reclaim?.removed === true) {
+        // The Library keeps `outputs`, so "what did this thread produce" survives the deletion.
+        delete draft.worktreePath;
+        draft.note = 'worktree reclaimed after delivery';
+      } else if (reclaim?.warning !== undefined) {
+        draft.note = reclaim.warning;
+      }
     });
-    return { thread: updated, prRef: created.pr.url, message: `opened ${created.pr.url}` };
+    const message =
+      reclaim?.warning === undefined
+        ? `opened ${created.pr.url}`
+        : `opened ${created.pr.url} (${reclaim.warning})`;
+    return { thread: updated, prRef: created.pr.url, message };
   }
   /** The branch this thread's pull request targets, when GitHub will tell us. */
   private async conflictBase(cwd: string, prUrl: string): Promise<string | undefined> {
@@ -1797,6 +1853,16 @@ export class ProjectEngine {
       throw new ProjectError('THREAD_NOT_FOUND', `unknown thread ${threadId}`, { threadId });
     }
     const owner = named ?? this.threadProducingPath(manifest, path);
+    if (owner !== undefined && owner.worktreePath === undefined && owner.outputs !== undefined) {
+      // The Library still knows the file exists; the bytes are on the thread's branch. Reading
+      // from the project root would answer with a different revision of the file — or with
+      // nothing, which reads as "the thread produced nothing".
+      return {
+        ok: false,
+        path,
+        reason: `the thread's worktree was reclaimed after delivery; \`${path}\` lives on branch \`${owner.branch ?? owner.branchOrScope}\` and is readable here only once that branch is merged`,
+      };
+    }
     const base = owner?.worktreePath ?? manifest.rootDir;
     return readOutputBytes(base, path);
   }

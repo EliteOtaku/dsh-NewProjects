@@ -99,7 +99,6 @@ cmd /c mklink /J "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-newp
 
 **尚未实现**（见 `docs/GAPS.md`）：
 
-- ⚠️ **路径还没锚定项目根**（`GAP-22a`，P1）：charter 给的是相对项目 root 的路径，而线程 cwd 在自己的 worktree 里，所以它**现在解析不到**那些路径。这是第一批的收尾项。
 - `project_knowledge` 的 `tree` / `read` 导航动作（`GAP-22` 第 3 条）。
 - 索引在查询时按需重建（`GAP-22` 第 4 条）；目前需要显式 `/project knowledge rebuild`。
 - `inlineKnowledgeMaxChars`（`GAP-22` 第 7 条）：注入路径整个删掉了，效果等于默认关闭，但没有这个旋钮。
@@ -159,6 +158,7 @@ npm test           # 只跑测试
 ## 设计取舍
 
 - **每个线程一个私有 worktree**：只建分支不算隔离——线程仍在父检出里跑，并发时互相看见对方的改动，提交还会落到父会话当前分支上。worktree 建在 `.dsh-project/worktrees/<threadId>`（已 gitignore），父检出永不移动。建不出来时降级为纯 scope 隔离并在状态里说明，而不是假装隔离了。**官方对同一件事的背书**：`claude remote-control --spawn worktree` 就是「每线程一个 worktree」的官方开关。
+- **交付即回收 checkout，分支是真相**：PR 开出来、分支推上去之后，工作区里的那份 checkout 就是冗余的，删掉它让磁盘占用与**在飞的线程数**成正比而不是与**跑过的线程数**成正比。删之前必须确认已推送（无分支的 scope 线程一律不删）；删除失败只记 warning，不判交付失败；唤醒已回收的线程前先用 `git worktree add` 把它重建回来，因为子会话的 cwd 就是那个路径。
 - **一律走 `CommandRunner` 而非 `node:child_process`**：命令必须落在 Host 所在的机器上，SSH / 容器部署时后者会在错误的主机上执行。
 - **一轮结束 ≠ 已交付**：线程收尾消息里没有 PR 链接时进入 `needs_feedback`，而不是给一个声称产物存在的 `completed` 徽章。
 - **广播只推正在跑的线程**：给 idle 子会话发消息会新起一轮，把所有已完成线程都唤醒会白烧 token。官方**根本不给运行中线程更新**，所以这条属于超额实现，不是缺口。
@@ -172,7 +172,7 @@ npm test           # 只跑测试
 
 ## 已知未实现部分
 
-相对官方 Claude Code Projects 还有若干未实现的能力（goal 持久化、Pause/Archive、审批改译、Usage 统计等）与若干有意为之的边界（重启后后台自愈停摆、云端 sandbox 差异等）。
+相对官方 Claude Code Projects 还有若干未实现的能力（goal 持久化、Pause/Archive、审批改译、Usage 统计等）与若干有意为之的边界（重启后后台自愈停摆、云端 sandbox 差异等）。worktree 回收与「唤醒前重建」已实现（`GAP-19`）。
 
 完整清单、代码证据、依据来源与验收标准见 **[docs/GAPS.md](./docs/GAPS.md)**，按批次推进。那份文档是判断「某个能力到底有没有」的唯一依据——不要凭本文件的段落推断。
 

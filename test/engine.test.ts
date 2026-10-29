@@ -8,6 +8,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -842,6 +843,28 @@ describe('library', () => {
     return { engine, runner, root, threadId, worktreePath: thread.worktreePath ?? '' };
   }
 
+  /**
+   * A project with one started thread that has not delivered yet.
+   *
+   * Delivery reclaims the checkout, so anything that reads bytes from disk has to run before
+   * it. The worktree directory itself is not created by the fake runner, so the caller makes it.
+   */
+  async function started(): Promise<{
+    engine: ProjectEngine;
+    runner: FakeRunner;
+    root: string;
+    threadId: string;
+    worktreePath: string;
+  }> {
+    const { engine, runner, root } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
+    const threadId = result.started[0]?.threadId ?? '';
+    const thread = await engine.requireThread(threadId);
+    return { engine, runner, root, threadId, worktreePath: thread.worktreePath ?? '' };
+  }
+
   it('records what the branch changed when the thread delivers', async () => {
     const { engine, threadId } = await delivered();
     const thread = await engine.requireThread(threadId);
@@ -876,12 +899,17 @@ describe('library', () => {
     assert.equal(thread.outputs?.length, 2);
   });
 
-  it('reads a produced file out of the thread worktree', async () => {
-    const { engine, threadId, worktreePath } = await delivered();
+  it('reads a produced file out of a live thread worktree', async () => {
+    // A thread that has not delivered yet still owns its checkout, which is the only state in
+    // which the bytes are on this disk at all: delivery reclaims the worktree once the branch
+    // is pushed, and after that the file lives on the branch rather than in a directory.
+    const { engine, runner, threadId, worktreePath } = await started();
     const { mkdir, writeFile } = await import('node:fs/promises');
     await mkdir(join(worktreePath, 'src'), { recursive: true });
     await writeFile(join(worktreePath, 'src', 'a.ts'), 'export const a = 1;\n');
-    const result = await engine.readOutputFile('src/a.ts');
+    // Named explicitly: the path → thread mapping is written when the thread delivers, so a
+    // thread that has not delivered yet is found by id rather than by searching the manifest.
+    const result = await engine.readOutputFile('src/a.ts', threadId);
     assert.equal(result.ok, true);
     if (result.ok) {
       assert.equal(result.text, 'export const a = 1;\n');
@@ -895,13 +923,21 @@ describe('library', () => {
       () => engine.readOutputFile('src/a.ts', 'thr-999'),
       (error: unknown) => isProjectError(error) && error.code === 'THREAD_NOT_FOUND',
     );
+    void runner;
   });
 
   it('says a reclaimed worktree is unreadable instead of returning an empty file', async () => {
-    const { engine } = await delivered();
+    const { engine, threadId } = await delivered();
+    const thread = await engine.requireThread(threadId);
+    assert.equal(thread.worktreePath, undefined);
     const result = await engine.readOutputFile('src/a.ts');
     assert.equal(result.ok, false);
-    if (!result.ok) assert.match(result.reason, /not on disk/);
+    if (!result.ok) {
+      // The bytes are on the branch, so the honest report names where they are rather than
+      // describing the file as missing.
+      assert.match(result.reason, /reclaimed after delivery/);
+      assert.match(result.reason, /lives on branch/);
+    }
   });
 
   it('reports no library rows before anything was delivered', async () => {
@@ -910,6 +946,120 @@ describe('library', () => {
     repoReady(runner);
     await engine.coordinate(PARENT, '- one', { planOnly: false });
     assert.deepEqual(await engine.library(), []);
+  });
+});
+
+describe('worktree reclamation', () => {
+  /**
+   * Route git's worktree commands against the real filesystem.
+   *
+   * The default fake answers `git rev-parse --git-dir` with success for any directory, which
+   * makes a deleted checkout look healthy — exactly the bug these tests exist to catch. Here
+   * absence is observable, `remove` really deletes, and `add` really creates.
+   */
+  function worktreeAware(runner: FakeRunner, options: { refuseRemoval?: boolean } = {}): void {
+    // Keyed on the whole command, not on `git rev-parse`: route keys are matched by longest
+    // prefix, so a shorter key would be shadowed by the fixture's own success-answering route
+    // and every deleted checkout would look healthy.
+    runner.onCommand('git rev-parse --git-dir', (spec) =>
+      existsSync(spec.cwd)
+        ? { exitCode: 0, stdout: '.git\n' }
+        : { exitCode: 128, stderr: 'fatal: not a git repository' },
+    );
+    runner.onCommand('git worktree remove', (spec) => {
+      if (options.refuseRemoval === true) {
+        return { exitCode: 1, stderr: 'fatal: validation failed, cannot remove working tree: untracked files\n' };
+      }
+      const path = spec.argv[4] ?? '';
+      if (existsSync(path)) rmSync(path, { recursive: true, force: true });
+      return { exitCode: 0 };
+    });
+    runner.onCommand('git worktree add', (spec) => {
+      // Two shapes reach this route: `add -b <branch> <path> <from>` when a thread starts, and
+      // `add <path> <branch>` when delivery's reclaim is undone. The path is the first
+      // non-flag argument after the `-b <branch>` pair.
+      const rest = spec.argv.slice(3);
+      const path = rest[0] === '-b' ? (rest[2] ?? '') : (rest[0] ?? '');
+      if (path !== '') mkdirSync(path, { recursive: true });
+      return { exitCode: 0 };
+    });
+  }
+
+  /** A project with one delivered thread whose checkout was reclaimed. */
+  async function deliveredThread(options: { refuseRemoval?: boolean } = {}): Promise<{
+    engine: ProjectEngine;
+    runner: FakeRunner;
+    threadId: string;
+    worktreePath: string;
+    message: string;
+  }> {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const planned = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
+    const threadId = planned.started[0]?.threadId ?? '';
+    const thread = await engine.requireThread(threadId);
+    const worktreePath = thread.worktreePath ?? '';
+    worktreeAware(runner, options);
+    // The fake `git worktree add -b` answers success without touching the disk, so the checkout
+    // is materialised here; every later claim about healthy/missing is a real `existsSync`.
+    mkdirSync(join(worktreePath, 'src'), { recursive: true });
+    runner.on('git status --porcelain', { stdout: ' M src/a.ts\n' });
+    runner.on('git commit', { stdout: '[project/demo/1-one abc1234] one\n' });
+    runner.on('git push', { exitCode: 0 });
+    runner.on('gh pr create', { stdout: 'https://github.com/o/r/pull/7\n' });
+    runner.on('gh pr view', {
+      stdout: JSON.stringify({
+        number: 7,
+        url: 'https://github.com/o/r/pull/7',
+        state: 'OPEN',
+        isDraft: false,
+        headRefName: 'project/demo/1-one',
+        reviewDecision: '',
+        mergeable: 'MERGEABLE',
+      }),
+    });
+    runner.on('git diff', { stdout: 'A\tsrc/a.ts\n' });
+    const delivery = await engine.deliverThread(threadId);
+    return { engine, runner, threadId, worktreePath, message: delivery.message };
+  }
+
+  it('reclaims the checkout once the branch is pushed', async () => {
+    // Disk use stays proportional to threads in flight rather than threads ever run. The branch
+    // is pushed first, so nothing is lost that is not on the remote.
+    const { engine, runner, threadId, worktreePath } = await deliveredThread();
+    assert.equal(existsSync(worktreePath), false);
+    const thread = await engine.requireThread(threadId);
+    assert.equal(thread.worktreePath, undefined);
+    assert.equal(thread.note, 'worktree reclaimed after delivery');
+    assert.equal(runner.saw('git worktree remove'), true);
+    // The recorded outputs survive the deletion, which is the whole reason Library is a list.
+    assert.equal(thread.outputs?.[0]?.path, 'src/a.ts');
+  });
+
+  it('puts the checkout back before waking a delivered thread', async () => {
+    // A heal or respond turn runs in the same path the thread was launched into. Waking it
+    // against a deleted directory would fail in a way that looks like the thread's fault.
+    const { engine, runner, threadId, worktreePath } = await deliveredThread();
+    const before = runner.callsFor('git worktree add').length;
+    await engine.manageThread(PARENT, threadId, 'respond', 'merge it');
+    // A second `add` means the wake-up actually restored the checkout; the first is the one
+    // coordinate made when the thread started.
+    assert.equal(runner.callsFor('git worktree add').length, before + 1);
+    assert.equal(existsSync(worktreePath), true);
+    const thread = await engine.requireThread(threadId);
+    assert.equal(thread.worktreePath, worktreePath);
+  });
+
+  it('keeps the checkout and reports a warning when git refuses to remove it', async () => {
+    // A failed cleanup is housekeeping, not a delivery failure: the pull request is already
+    // open, so the honest answer is to keep the directory and say so rather than to throw.
+    const { engine, threadId, worktreePath, message } = await deliveredThread({ refuseRemoval: true });
+    const thread = await engine.requireThread(threadId);
+    assert.equal(thread.worktreePath, worktreePath);
+    assert.equal(existsSync(worktreePath), true);
+    assert.match(thread.note ?? '', /could not remove worktree/);
+    assert.match(message, /could not remove worktree/);
   });
 });
 

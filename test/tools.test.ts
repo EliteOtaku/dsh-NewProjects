@@ -374,6 +374,17 @@ describe('project_library', () => {
     return { engine, runner, threadId, worktreePath: thread.worktreePath ?? '' };
   }
 
+  /** A project with one started thread that still owns its checkout. */
+  async function started(): Promise<{ engine: ProjectEngine; runner: FakeRunner; threadId: string; worktreePath: string }> {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const planned = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
+    const threadId = planned.started[0]?.threadId ?? '';
+    const thread = await engine.requireThread(threadId);
+    return { engine, runner, threadId, worktreePath: thread.worktreePath ?? '' };
+  }
+
   it('lists what the threads produced', async () => {
     const { engine } = await delivered();
     const source = { engineFor: () => Promise.resolve(engine), parentOf: () => PARENT };
@@ -396,19 +407,22 @@ describe('project_library', () => {
   });
 
   it('reads a produced file, and reports a missing one as missing', async () => {
-    const { engine, worktreePath } = await delivered();
+    // Not delivered: delivery reclaims the checkout, and these bytes only exist on disk while
+    // the thread still owns its worktree.
+    const { engine, worktreePath, threadId } = await started();
     const { mkdir, writeFile } = await import('node:fs/promises');
     await mkdir(join(worktreePath, 'src'), { recursive: true });
     await writeFile(join(worktreePath, 'src', 'a.ts'), 'export const a = 1;\n');
     const source = { engineFor: () => Promise.resolve(engine), parentOf: () => PARENT };
     const read = tool(source, 'project_library');
 
-    const ok = (await read.execute({ action: 'read', path: 'src/a.ts' }, context())) as Record<string, unknown>;
+    // The thread is named because delivery is what records which thread produced which path.
+    const ok = (await read.execute({ action: 'read', path: 'src/a.ts', threadId }, context())) as Record<string, unknown>;
     assert.equal(ok['ok'], true);
     assert.equal(ok['text'], 'export const a = 1;\n');
 
     // A body-less success would be indistinguishable from an empty file.
-    const missing = (await read.execute({ action: 'read', path: 'src/gone.ts' }, context())) as Record<string, unknown>;
+    const missing = (await read.execute({ action: 'read', path: 'src/gone.ts', threadId }, context())) as Record<string, unknown>;
     assert.equal(missing['ok'], false);
     assert.equal(missing['code'], 'NOT_READABLE');
     assert.match(String(missing['message']), /not on disk/);

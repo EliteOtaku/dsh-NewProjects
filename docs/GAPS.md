@@ -74,7 +74,7 @@
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | ~~`GAP-03`~~ ✅ ~~`GAP-04`~~ ✅ ~~`GAP-05`~~ ✅（2026-10-29 关闭） |
 | **P3** | 官方有、我们无，独立功能 | `GAP-06` `GAP-09` `GAP-13` `GAP-29`（`GAP-10` / `GAP-11` / `GAP-12` 已于 2026-10-29 关闭） |
 | **P4** | 项目管理类，缺了不能「管起来」 | `GAP-14` `GAP-15` `GAP-17` `GAP-18` `GAP-28`（`GAP-25` 已于 2026-10-29 关闭） |
-| **P5** | 磁盘、性能与健壮性，不出错 | `GAP-19` `GAP-20` `GAP-27` |
+| **P5** | 磁盘、性能与健壮性，不出错 | `GAP-20` `GAP-27`（`GAP-19` 已于 2026-10-29 关闭） |
 | **ARCH** | 架构性差异，记录不排期 | `GAP-A1` ~ `GAP-A4` |
 | **BOUND** | 有意为之的边界，非缺陷 | `BOUND-1` ~ `BOUND-4` |
 
@@ -563,17 +563,26 @@
 
 ## P5 — 磁盘、性能与健壮性
 
-### GAP-19 worktree 永不回收
+### GAP-19 worktree 永不回收 — ✅ 已做
 
 - **现状**：`worktreeRoot` 是 `.dsh-project/worktrees`（`src/core/manifest.ts:47`），每线程一个目录，**从不删除**（`grep "worktree remove\|prune" src/` 返回空，engine 里没有任何 `rm`）。跑 100 个线程 = 100 份完整 checkout。
 - **做法**：`deliverThread` 成功后（PR 已开、分支已推）删除 worktree（`git worktree remove --force` + 目录兜底），**保留分支**。删除前必须确认分支已推送，否则未推送的提交会丢。
 - **顺序不能反**：先有产出清单（`GAP-10`），再删目录。否则删完就再也说不清「这个线程产出了什么」。
 - **排期上移**（2026-10-28 修正）：原排在最后一批。但**不可逆的动作不该最后做防护** —— 在它之前，每一次 `deinit` / 归档都在这个风险上。因此移到与 `Pause` / `Archive` 同批。
-- **验收标准**：
-  1. 交付成功且已推送后 worktree 被删，分支与远端都在；
-  2. 未推送时不删（防丢提交）；
-  3. 删除失败不阻塞交付（记 warning）；
-  4. 删除后 Library 清单仍可读（配合 `GAP-10`）。
+- **实际做法（2026-10-29 落地）**：
+  1. `vcs.ts` 新增 `removeWorktree(runner, repoRoot, worktreePath)`：`git worktree remove --force` 失败就 `git worktree prune` 再复查，仍不消失则返回 `{ removed: false, warning }` —— 清理是家务事，交付已经完成，不能因为它失败就把交付判失败。
+  2. `deliverThread` 在 **push 成功且 PR 已开之后**才回收，成功则删掉 `worktreePath` 并记 `note: 'worktree reclaimed after delivery'`，失败则把 warning 写进 note 与返回消息。
+  3. **无分支线程不回收**：scope 隔离的线程没有远端可去，删了就真丢了（早退分支在回收之前）。
+  4. 回收后唤醒线程要能重建 checkout：`vcs.ts` 的 `ensureWorktree(runner, repoRoot, branch, worktreePath)`（不健康就 `git worktree add <path> <branch>`），engine 的 `checkoutFor(thread)` 统一走它 —— 有 `worktreePath` 就确保存在，没有 `branch` 返回项目根，有 `branch` 没 `worktreePath` 就在 `worktrees/<threadId>` 重建并写回 descriptor。六个接线点：`deliver` / `respond` / `retry` / `merge` / `conflicts` / `observeOne` 的自愈唤醒（唤醒**之前**调用，子会话的 cwd 就是那个路径）。
+  5. 只读 PR 状态的路径（`observeOne` / `settleUnreachable`）仍用 `thread.worktreePath ?? rootDir`：读 gh 不值得为它重建一份 checkout。
+  6. 回收后读产出文件返回明确原因：`` `... lives on branch <branch> and is readable here only once that branch is merged` ``，而不是空内容。
+- **顺带修的真实缺陷**：Windows 上 `rename` 覆盖一个被其他进程短暂打开的文件会抛 `EPERM`/`EBUSY`（索引器、杀软、第二个读者），`manifest.json` 的原子写因此偶发失败。`manifest.ts` 新增 `renameWithRetry`（5 次、5ms×2^n 退避，非重试码立即抛），POSIX 上无副作用。修复前全量并行跑测试稳定复现 `EPERM: rename ... manifest.json.tmp -> manifest.json`；修复后连续三次 `394/394` 全绿。
+- **验收（全部有测试）**：
+  1. ✅ 交付成功且已推送后 worktree 被删、分支与远端都在 —— `test/engine.test.ts` 的 `reclaims the checkout once the branch is pushed`
+  2. ✅ 未推送时不删 —— 同一 describe 的 `keeps the checkout and reports a warning when git refuses to remove it`（外加无分支早退路径）
+  3. ✅ 删除失败不阻塞交付、只记 warning —— 同上用例断言的 note 与 message
+  4. ✅ 删除后 Library 清单仍可读 —— 用例 1 断言 `outputs[0].path === 'src/a.ts'`，回收用例另断言读盘返回 `reclaimed after delivery`
+  5. ✅ 唤醒前恢复 checkout —— `puts the checkout back before waking a delivered thread`（断言第二次 `git worktree add` 发生、目录重新存在、descriptor 写回路径）
 
 ### GAP-20 `deinit` 只删 manifest，其余全留磁盘
 
@@ -729,7 +738,7 @@
 | **第一批 让输出可信** | `GAP-01` 全局配额 ✅ + `GAP-22` 知识 paths-first ✅ | 无 | 2026-10-27 `9c7ef10`：`GAP-01` 关闭，`GAP-22` 的减法做完（确实净减）；2026-10-29：`GAP-22a`（路径锚定项目根）关闭 —— **第一批完成** |
 | **第二批 让拆解可信** | `GAP-26` 模型优先拆解 + Suggested threads ✅ | 无（可与一批并行） | 后者是前者的保险，必须同批。2026-10-29 关闭 —— **第二批完成** |
 | **第三批 让报回可用** | `GAP-03` 投影 ✅ + `GAP-04` 六分组 ✅ + `GAP-05` 终态 ✅ + `GAP-10` Library ✅ + `GAP-11` PR 聚合 ✅ | 03 与 04 **可同批**（原判断的串行约束不成立） | 2026-10-29 全部关闭 —— **第三批完成** |
-| **第四批 让裁定可用** | ~~`GAP-12` 卡片动作~~ ✅ + ~~`GAP-25` 禁令~~ ✅ + `GAP-18` 审批 + `GAP-14` Pause + `GAP-19` worktree 回收 | 19 依赖 10（先有清单再删目录） | **不可逆动作（19）与它的防护同批**，不推到最后。`GAP-12` 与 `GAP-25` 已于 2026-10-29 完成 |
+| **第四批 让裁定可用** | ~~`GAP-12` 卡片动作~~ ✅ + ~~`GAP-25` 禁令~~ ✅ + ~~`GAP-19` worktree 回收~~ ✅ + `GAP-18` 审批 + `GAP-14` Pause | 19 依赖 10（先有清单再删目录）| **不可逆动作（19）与它的防护同批**，不推到最后。`GAP-12`/`GAP-25`/`GAP-19` 已于 2026-10-29 完成 |
 | **第五批 减少重复交代** | `GAP-06` goal + `GAP-09` 仓库约定 + `GAP-29` 三件套 | 无 | |
 | **第六批 卫生** | `GAP-13` Usage + `GAP-15` Archive + `GAP-17` 超时 + `GAP-20` purge + `GAP-27` 锁重试 | 无 | |
 | **按需** | `GAP-28` 并发偏好 | 无 | ~~`GAP-23`~~ ✅ 已于 2026-10-29 提前做完 |

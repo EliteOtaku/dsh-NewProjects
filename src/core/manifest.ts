@@ -22,6 +22,36 @@ export const MANIFEST_FILE = 'manifest.json';
 /** Default instruction file, preferred over `AGENTS.md`. */
 export const INSTRUCTIONS_FILE = 'PROJECT_INSTRUCTIONS.md';
 
+/** Transient rename failures Windows reports when another process briefly holds the target. */
+const RETRYABLE_RENAME = new Set(['EPERM', 'EACCES', 'EBUSY']);
+/** Attempts before a rename is treated as a real failure. */
+const RENAME_ATTEMPTS = 5;
+
+/**
+ * Replace a file atomically, retrying the Windows-only transient failures.
+ *
+ * On POSIX a rename over an open file succeeds, so this is a no-op there. On Windows it fails
+ * with `EPERM`/`EBUSY` whenever an indexer, an antivirus scanner, or a second reader holds the
+ * destination for a moment — a condition that clears by itself in milliseconds. Retrying is the
+ * difference between a record write that occasionally fails for no reason the user can act on
+ * and one that does not; a genuine permission problem still fails after the last attempt.
+ */
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < RENAME_ATTEMPTS; attempt += 1) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      if (typeof code !== 'string' || !RETRYABLE_RENAME.has(code)) throw error;
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 5 * 2 ** attempt));
+    }
+  }
+  throw lastError;
+}
+
 /** Resolved paths for one project root. */
 export interface ProjectPaths {
   rootDir: string;
@@ -185,7 +215,7 @@ export class ManifestStore {
     const body = `${JSON.stringify(document, null, 2)}\n`;
     const tmp = `${this.paths.manifestPath}.tmp`;
     await writeFile(tmp, body, 'utf8');
-    await rename(tmp, this.paths.manifestPath);
+    await renameWithRetry(tmp, this.paths.manifestPath);
   }
 
   /** Delete the record and its scratch files (project de-initialisation). */
