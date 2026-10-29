@@ -409,6 +409,11 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
           type: 'boolean',
           description: 'Also list threads that are resolved. They are hidden by default.',
         },
+        usage: {
+          type: 'boolean',
+          description:
+            'Also return token spend per thread and per model. Costs one read of each thread session log, so it is off by default.',
+        },
       },
       additionalProperties: false,
     },
@@ -417,10 +422,11 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
       void exec;
       try {
         const engine = await source.engineFor(readString(args, 'rootDir'));
-        const options = { includeResolved: readBool(args, 'includeResolved') === true };
-        const json = await engine.overviewJson(options);
+        const includeResolved = readBool(args, 'includeResolved') === true;
+        const includeUsage = readBool(args, 'usage') === true;
+        const json = await engine.overviewJson({ includeResolved, includeUsage });
         if (readBool(args, 'markdown') === true) {
-          const structured = await engine.overview([], options);
+          const structured = await engine.overview([], { includeResolved });
           return { ok: true, ...json, markdown: renderOverviewMarkdown(structured) };
         }
         return { ok: true, ...json };

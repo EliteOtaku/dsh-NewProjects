@@ -239,4 +239,23 @@ export interface HostSessions {
 export interface HostSession {
   readonly id: string;
   append(type: string, data: unknown): unknown;
+  /** Every event this session recorded itself, oldest first. */
+  ownEvents(): readonly HostSessionEvent[];
+}
+
+/** One recorded session event, narrowed only as far as the usage reader needs. */
+export interface HostSessionEvent {
+  readonly type: string;
+  readonly data?: unknown;
+}
+
+/**
+ * The subset of the `tokenMeter` service this plugin calls.
+ *
+ * Used for current context pressure only. Spend itself comes from the provider's own usage
+ * numbers on the session log: an estimate presented as billed tokens would be a lie the user
+ * cannot detect.
+ */
+export interface HostTokenMeter {
+  measure(session: HostSession): { readonly totalTokens?: number };
 }

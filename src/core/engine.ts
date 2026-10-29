@@ -17,7 +17,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
 
 import { describeError, isProjectError, ProjectError } from './errors.js';
-import { CommandError } from './exec.js';
+import { CommandError, withLockRetry } from './exec.js';
 import type { CommandRunner } from './exec.js';
 import {
   buildHealPrompt,
@@ -65,6 +65,12 @@ import {
 } from './prompt.js';
 import { normaliseQuotaMax, quotaState, quotaWarning, releaseQuota, reserveQuota, rolloverQuota } from './quota.js';
 import { QuotaLedger, defaultQuotaLedgerPath, type QuotaLedgerState } from './quotaLedger.js';
+import {
+  buildUsage,
+  type ProjectUsage,
+  type RawThreadUsage,
+  type UsagePort,
+} from './usage.js';
 import { systemClock, systemIds, dayKey } from './util.js';
 import type { Clock, IdFactory } from './util.js';
 import type {
@@ -140,6 +146,24 @@ export interface EngineDeps {
    * {@link ProjectEngine.approve} records a grant, and thread prompts stop before it and ask.
    */
   requireApprovalFor?: readonly ApprovalAction[];
+  /**
+   * How many times a git command is retried when another thread holds a lock in the shared
+   * `.git`. `1` disables the retry, which is only useful in tests that want to observe a
+   * contention failure directly.
+   */
+  gitLockRetryAttempts?: number;
+  /**
+   * Wall-clock budget for one thread run. `0` disables the deadline entirely, which only makes
+   * sense for projects whose work is expected to span hours.
+   */
+  threadTimeoutMs?: number;
+  /**
+   * Where per-thread token spend comes from.
+   *
+   * Optional because the Host may expose no session log at all. Absent means every thread reports
+   * "usage unavailable" — never zero, which would read as "this project cost nothing".
+   */
+  usage?: UsagePort;
 }
 
 /** Options accepted by {@link ProjectEngine.init}. */
@@ -208,13 +232,24 @@ export interface HealSweepResult {
   settled: ProjectThreadDescriptor[];
   waiting: ProjectThreadDescriptor[];
   errors: Array<{ threadId: string; message: string }>;
-  /** Set when the sweep declined to act because the project is paused. */
+  /** Threads interrupted because they outlived their deadline. */
+  timedOut: ProjectThreadDescriptor[];
+  /** Set when the sweep declined to act because the project is paused or archived. */
   paused?: string;
 }
 
 /** Thread-management verbs exposed to the model and the `/project` command. */
 /** Actions that can be gated on human sign-off. */
 export const APPROVAL_ACTIONS: readonly ApprovalAction[] = ['push', 'pr', 'merge', 'force-push'];
+
+/**
+ * Default wall-clock budget for one thread run.
+ *
+ * Deliberately generous: the cost of interrupting a legitimately long build is a confused user,
+ * while the cost of never interrupting is a thread stuck in `running` with nothing happening. Two
+ * hours covers a slow full test suite plus review rounds without being mistaken for "no limit".
+ */
+export const DEFAULT_THREAD_TIMEOUT_MS = 120 * 60_000;
 
 export type ThreadAction =
   | 'inspect'
@@ -235,6 +270,8 @@ export class ProjectEngine {
   readonly store: ManifestStore;
   /** Actions this project gates on human sign-off; empty means the original behaviour. */
   private readonly requireApprovalFor: ApprovalAction[];
+  /** Wall-clock budget per thread run; `0` disables deadline enforcement. */
+  private readonly threadTimeoutMs: number;
   private readonly runner: CommandRunner;
   private readonly threads: ThreadRuntime;
   private readonly clock: Clock;
@@ -261,6 +298,8 @@ export class ProjectEngine {
    * free and an edited one visible on the next render, without a watcher.
    */
   private conventionsCache: { stamp: string; documents: ConventionDocument[] } | undefined;
+  /** Where per-thread token spend is read from, when the Host can supply it. */
+  private readonly usagePort: UsagePort | undefined;
   /** The user-wide daily thread ledger; the enforced cap lives here, not in the manifest. */
   private readonly ledger: QuotaLedger;
   /**
@@ -279,12 +318,17 @@ export class ProjectEngine {
     readonly rootDir: string,
     deps: EngineDeps,
   ) {
-    this.runner = deps.runner;
+    // Every worktree of a project shares one `.git`, so any git command can collide with a
+    // sibling thread's. Retrying here — once, for all of them — is the only version that cannot
+    // be forgotten when the next git call is added.
+    this.runner = withLockRetry(deps.runner, { attempts: deps.gitLockRetryAttempts });
     this.threads = deps.threads;
     this.clock = deps.clock ?? systemClock;
     this.ids = deps.ids ?? systemIds;
     this.watermarks = deps.memoryWatermarks ?? new Map();
     this.requireApprovalFor = [...(deps.requireApprovalFor ?? [])];
+    this.threadTimeoutMs = Math.max(0, deps.threadTimeoutMs ?? DEFAULT_THREAD_TIMEOUT_MS);
+    this.usagePort = deps.usage;
     this.store = new ManifestStore(rootDir, this.clock);
     this.ledger = new QuotaLedger(deps.quotaLedgerPath ?? defaultQuotaLedgerPath());
   }
@@ -416,10 +460,11 @@ export class ProjectEngine {
   }
 
   /** Delete the durable record. Threads keep running; their descriptors are dropped. */
-  async deinit(): Promise<void> {
-    await this.store.destroy();
+  async deinit(options: { purge?: boolean } = {}): Promise<{ purged: string[]; savedInstructions?: string }> {
+    const outcome = await this.store.destroy(options);
     this.live.clear();
     this.watermarks.clear();
+    return outcome;
   }
 
   // ---------------------------------------------------------------------------
@@ -676,7 +721,7 @@ export class ProjectEngine {
     signal: AbortSignal = AbortSignal.timeout(120_000),
   ): Promise<CoordinateResult> {
     this.noteCaller(parent);
-    await this.refuseWhilePaused('start threads');
+    await this.refuseWhileStopped('start threads');
     const opening = await this.requireManifest();
     const plan = this.resolvePlan(goal, options);
     const planned = plan.tasks;
@@ -857,7 +902,7 @@ export class ProjectEngine {
     signal: AbortSignal = AbortSignal.timeout(120_000),
   ): Promise<SuggestStartResult> {
     this.noteCaller(parent);
-    await this.refuseWhilePaused('start threads');
+    await this.refuseWhileStopped('start threads');
     const manifest = await this.requireManifest();
     const plan = manifest.plan;
     if (plan === undefined) {
@@ -1054,6 +1099,7 @@ export class ProjectEngine {
     // between the two leaves a queued descriptor rather than a phantom session.
     const running = await this.updateThread(threadId, (thread) => {
       thread.status = 'running';
+      this.stampDeadline(thread);
     });
 
     return running;
@@ -1193,10 +1239,11 @@ export class ProjectEngine {
         if (payload === undefined || payload.trim().length === 0) {
           throw new ProjectError('INVALID_INPUT', 'steer requires a message');
         }
-        await this.refuseWhilePaused('steer a thread');
+        await this.refuseWhileStopped('steer a thread');
         await this.threads.steer(parent, thread.childSessionId, payload.trim(), signal);
         const updated = await this.updateThread(threadId, (draft) => {
           if (draft.status === 'needs_feedback') draft.status = 'running';
+          this.stampDeadline(draft);
           draft.feedbackPrompt = undefined;
           draft.updatedAt = this.clock.now();
         });
@@ -1206,13 +1253,14 @@ export class ProjectEngine {
         if (payload === undefined || payload.trim().length === 0) {
           throw new ProjectError('INVALID_INPUT', 'respond requires an answer');
         }
-        await this.refuseWhilePaused('answer a thread');
+        await this.refuseWhileStopped('answer a thread');
         const text = renderFeedbackAnswer(thread, payload);
         await this.checkoutFor(thread);
         await this.threads.resume(parent, thread.childSessionId, text, signal);
         this.live.set(thread.childSessionId, threadId);
         const updated = await this.updateThread(threadId, (draft) => {
           draft.status = 'running';
+          this.stampDeadline(draft);
           draft.feedbackPrompt = undefined;
           draft.updatedAt = this.clock.now();
         });
@@ -1227,7 +1275,7 @@ export class ProjectEngine {
         return { thread: updated, message: `interrupted ${threadId}` };
       }
       case 'retry': {
-        await this.refuseWhilePaused('retry a thread');
+        await this.refuseWhileStopped('retry a thread');
         const manifest = await this.requireManifest();
         await this.checkoutFor(thread);
         await this.threads.resume(
@@ -1240,6 +1288,7 @@ export class ProjectEngine {
         this.watermarks.set(thread.childSessionId, markSeen(manifest, {}));
         const updated = await this.updateThread(threadId, (draft) => {
           draft.status = 'running';
+          this.stampDeadline(draft);
           draft.lastError = undefined;
           draft.updatedAt = this.clock.now();
           draft.healAttempts = 0;
@@ -1279,7 +1328,7 @@ export class ProjectEngine {
         if (prUrl === undefined) {
           throw new ProjectError('INVALID_INPUT', `${threadId} has no pull request to merge`, { threadId });
         }
-        await this.refuseWhilePaused('merge a pull request');
+        await this.refuseWhileStopped('merge a pull request');
         this.assertApproved(thread, ['merge'], 'merging this pull request');
         await this.checkoutFor(thread);
         await this.threads.resume(parent, thread.childSessionId, renderMergeRequest(thread, { prUrl }), signal);
@@ -1296,7 +1345,7 @@ export class ProjectEngine {
         if (prUrl === undefined) {
           throw new ProjectError('INVALID_INPUT', `${threadId} has no pull request to resolve conflicts against`, { threadId });
         }
-        await this.refuseWhilePaused('wake a thread for conflicts');
+        await this.refuseWhileStopped('wake a thread for conflicts');
         const cwd = await this.checkoutFor(thread);
         const base = (await this.conflictBase(cwd, prUrl)) ?? 'main';
         const files = await this.conflictCandidates(thread, cwd, base);
@@ -1309,6 +1358,7 @@ export class ProjectEngine {
         this.live.set(thread.childSessionId, threadId);
         const updated = await this.updateThread(threadId, (draft) => {
           draft.status = 'running';
+          this.stampDeadline(draft);
           draft.note = `resolving conflicts with ${base}`;
           draft.updatedAt = this.clock.now();
         });
@@ -1362,6 +1412,21 @@ export class ProjectEngine {
   async healSweep(parent: object, signal: AbortSignal = AbortSignal.timeout(120_000)): Promise<HealSweepResult> {
     this.noteCaller(parent);
     const manifest = await this.requireManifest();
+    if (manifest.archivedAt !== undefined) {
+      // Same reasoning as pause: the watcher calls this on a timer, and throwing would write a
+      // stack trace every interval for a project that is archived on purpose.
+      return {
+        observed: 0,
+        resolved: 0,
+        healed: [],
+        escalated: [],
+        settled: [],
+        waiting: [],
+        errors: [],
+        timedOut: [],
+        paused: 'project is archived',
+      };
+    }
     if (manifest.pausedAt !== undefined) {
       // Reported rather than thrown: the background watcher calls this on a timer, and a
       // throwing sweep would fill the log with one stack per poll while the project sits
@@ -1374,6 +1439,7 @@ export class ProjectEngine {
         settled: [],
         waiting: [],
         errors: [],
+        timedOut: [],
         paused: manifest.pauseReason ?? 'project is paused',
       };
     }
@@ -1385,7 +1451,13 @@ export class ProjectEngine {
     settled: [],
     waiting: [],
     errors: [],
+    timedOut: [],
   };
+    // Deadline enforcement runs before polling: a thread that has outlived its limit is still
+    // "running" from the record's point of view, and polling it would spend a turn on work we are
+    // about to interrupt. It is also before `autoResolveIdle` so a thread that is both stuck and
+    // silent is reported as timed out — the actionable fact — rather than quietly resolved.
+    result.timedOut = await this.enforceDeadlines(parent);
     // The week-of-silence rule runs before the poll selection, so a thread that just went
     // quiet is resolved instead of being polled one last time. It is a write, so it belongs
     // here rather than in `buildOverview` — a panel render must never mutate the record.
@@ -1603,6 +1675,7 @@ export class ProjectEngine {
     this.live.set(thread.childSessionId, thread.threadId);
     await this.updateThread(thread.threadId, (draft) => {
       draft.status = 'ci_fixing';
+      this.stampDeadline(draft);
       draft.healAttempts = (draft.healAttempts ?? 0) + 1;
       draft.consecutiveFails = input.consecutiveFails + 1;
       draft.failureSignature = signature;
@@ -1829,11 +1902,63 @@ export class ProjectEngine {
   }
 
   /**
-   * Refuse to advance work while paused.
+   * Archive the project: stop everything and take it out of the way.
    *
-   * Read-only actions stay available: a user who paused the project to answer a question or
-   * close a thread should not have to resume first.
+   * Distinct from {@link pause}: pause means "not right now, I am coming back to this session";
+   * archive means "this is done with" — nothing should keep polling GitHub on its behalf. Both
+   * interrupt live threads, because a thread that keeps running contradicts either promise.
    */
+  async archive(parent: object): Promise<{ interrupted: string[]; wasArchived: boolean }> {
+    this.noteCaller(parent);
+    const manifest = await this.requireManifest();
+    const wasArchived = manifest.archivedAt !== undefined;
+    const active = Object.values(manifest.threads).filter(
+      (thread) => thread.status === 'running' || thread.status === 'ci_fixing' || thread.status === 'queued',
+    );
+    const now = this.clock.now();
+    await this.store.update((draft) => {
+      draft.archivedAt = now;
+      // Per-thread watches are left alone on purpose: the sweep refuses to run at all while the
+      // project is archived (`healSweep` returns early), so no poll happens either way, and
+      // clearing them would silently change what unarchiving restores.
+      for (const thread of active) {
+        const live = draft.threads[thread.threadId];
+        if (live !== undefined && live.status === 'running') live.note = 'interrupted by archive';
+      }
+      return { manifest: draft, result: undefined };
+    });
+    const interrupted: string[] = [];
+    for (const thread of active) {
+      if (!this.threads.isLive(thread.childSessionId)) continue;
+      await this.threads.interrupt(thread.childSessionId).catch(() => undefined);
+      interrupted.push(thread.threadId);
+    }
+    await this.recordRecent('coordinator', `archived the project; interrupted ${interrupted.length} thread(s)`);
+    await this.publishState();
+    return { interrupted, wasArchived };
+  }
+
+  /** Bring an archived project back. Threads stay interrupted until retried or steered. */
+  async unarchive(parent?: object): Promise<{ wasArchived: boolean }> {
+    if (parent !== undefined) this.noteCaller(parent);
+    const manifest = await this.requireManifest();
+    if (manifest.archivedAt === undefined) return { wasArchived: false };
+    await this.store.update((draft) => {
+      delete draft.archivedAt;
+      return { manifest: draft, result: undefined };
+    });
+    await this.recordRecent('coordinator', 'unarchived the project');
+    await this.publishState();
+    return { wasArchived: true };
+  }
+
+  /** When the project was archived, if it is. */
+  async archived(): Promise<{ since: number } | undefined> {
+    const snapshot = await this.store.tryRead();
+    if (snapshot?.manifest.archivedAt === undefined) return undefined;
+    return { since: snapshot.manifest.archivedAt };
+  }
+
   /** Actions this project gates on human sign-off. */
   approvalsRequired(): ApprovalAction[] {
     return [...this.requireApprovalFor];
@@ -1876,19 +2001,108 @@ export class ProjectEngine {
     );
   }
 
-  private async refuseWhilePaused(action: string): Promise<void> {
+  private async refuseWhileStopped(action: string): Promise<void> {
     const manifest = await this.requireManifest();
+    // Archived first: an archived project is expected to be out of the way, so "unarchive" is the
+    // only useful instruction. Telling its owner to ` + BT + 'resume' + BT + ' would leave them stuck.
+    if (manifest.archivedAt !== undefined) {
+      throw new ProjectError(
+        'PROJECT_ARCHIVED',
+        `project is archived; ' + BT + '/project unarchive' + BT + ' before you ${action}`,
+        { archivedAt: manifest.archivedAt, action },
+      );
+    }
     if (manifest.pausedAt === undefined) return;
     const reason = manifest.pauseReason === undefined ? '' : `: ${manifest.pauseReason}`;
     throw new ProjectError(
       'PROJECT_PAUSED',
-      `project is paused${reason}; \`/project resume\` before you ${action}`,
+      `project is paused${reason}; ' + BT + '/project resume' + BT + ' before you ${action}`,
       { pausedAt: manifest.pausedAt, action },
     );
   }
 
+  /**
+   * Give the thread a fresh window, or clear it when deadlines are disabled.
+   *
+   * Called every time a thread is woken: a retry is new intent and should not inherit the previous
+   * run's remaining seconds, and a resumed thread that was already past its deadline would be
+   * interrupted again on the very next sweep, which reads as a flaky engine rather than a policy.
+   */
+  private stampDeadline(draft: ProjectThreadDescriptor): void {
+    if (this.threadTimeoutMs === 0) {
+      delete draft.deadlineAt;
+      return;
+    }
+    draft.deadlineAt = this.clock.now() + this.threadTimeoutMs;
+  }
+
+  /**
+   * Interrupt threads that outlived their deadline and hand them back to the user.
+   *
+   * `needs_feedback`, not `failed`: the thread did not fail, it ran out of time — a human decides
+   * whether to retry with more room, steer it somewhere smaller, or abandon it. The work may also
+   * still be mid-flight in the child session, so calling it failed would be a guess.
+   */
+  private async enforceDeadlines(parent: object): Promise<ProjectThreadDescriptor[]> {
+    const now = this.clock.now();
+    const manifest = await this.requireManifest();
+    const expired = Object.values(manifest.threads).filter(
+      (thread) =>
+        thread.deadlineAt !== undefined &&
+        thread.deadlineAt <= now &&
+        (thread.status === 'running' || thread.status === 'ci_fixing' || thread.status === 'queued'),
+    );
+    if (expired.length === 0) return [];
+    const budgetMinutes = Math.round(this.threadTimeoutMs / 60_000);
+    const out: ProjectThreadDescriptor[] = [];
+    for (const thread of expired) {
+      if (this.threads.isLive(thread.childSessionId)) {
+        await this.threads.interrupt(thread.childSessionId).catch(() => undefined);
+      }
+      out.push(
+        await this.updateThread(thread.threadId, (draft) => {
+          draft.status = 'needs_feedback';
+          draft.deadlineAt = undefined;
+          draft.note = `timed out after ${budgetMinutes} minutes`;
+          draft.feedbackPrompt = `this thread ran past its ${budgetMinutes} minute limit and was interrupted. Steer it with what remains, or retry to give it a fresh window.`;
+        }),
+      );
+    }
+    // One line for the whole sweep: a burst of timeouts is one event ("everything stalled"), not N.
+    await this.recordRecent('coordinator', `interrupted ${out.length} thread(s) that outlived their deadline`);
+    if (parent !== undefined) this.noteCaller(parent);
+    return out;
+  }
+
   /** Buckets plus thread descriptors as a plain JSON value (tool output). */
-  async overviewJson(options: { includeResolved?: boolean } = {}): Promise<Record<string, unknown>> {
+  /**
+   * Token spend, per thread and per model.
+   *
+   * Reads each thread's own session log through the {@link UsagePort}. Threads whose session is
+   * gone still appear, marked unavailable: a shrinking total would read as "spend went down".
+   */
+  async usageSummary(): Promise<ProjectUsage> {
+    const manifest = await this.requireManifest();
+    const threads = Object.values(manifest.threads);
+    const measured = new Map<string, RawThreadUsage | undefined>();
+    const port = this.usagePort;
+    if (port === undefined) {
+      return buildUsage(
+        threads,
+        measured,
+        this.clock.now(),
+        'this Host exposes no session log, so per-thread token use cannot be reported',
+      );
+    }
+    for (const thread of threads) {
+      // One unreadable session must not blank the whole panel, so failures become per-thread gaps.
+      const raw = await port.measure(thread.childSessionId).catch(() => undefined);
+      if (raw !== undefined) measured.set(thread.threadId, raw);
+    }
+    return buildUsage(threads, measured, this.clock.now());
+  }
+
+  async overviewJson(options: { includeResolved?: boolean; includeUsage?: boolean } = {}): Promise<Record<string, unknown>> {
     const overview = await this.overview([], options);
     const knowledge = await this.knowledgeState().catch(() => undefined);
     const buckets: Partial<Record<OverviewBucket, ProjectThreadDescriptor[]>> = overview.buckets;
@@ -1899,6 +2113,7 @@ export class ProjectEngine {
       // session needs to answer "what is this project for" without reading a transcript.
       goal: overview.goal,
       recentMessages: overview.recentMessages,
+      ...(overview.archived === undefined ? {} : { archived: overview.archived }),
       rootDir: overview.rootDir,
       revision: overview.revision,
       quota: overview.quota,
@@ -1916,6 +2131,7 @@ export class ProjectEngine {
         sources: knowledge.state.sources,
         summary: describeKnowledge(knowledge.state),
       },
+      ...(options.includeUsage === true ? { usage: await this.usageSummary() } : {}),
       buckets,
     };
   }
@@ -2006,7 +2222,7 @@ export class ProjectEngine {
     threadId: string,
     options: { message?: string; title?: string; body?: string; draft?: boolean } = {},
   ): Promise<{ thread: ProjectThreadDescriptor; prRef?: string; message: string }> {
-    await this.refuseWhilePaused('deliver a thread');
+    await this.refuseWhileStopped('deliver a thread');
     const thread = await this.requireThread(threadId);
     this.assertApproved(thread, ['push', 'pr'], 'delivering this thread');
     const cwd = await this.checkoutFor(thread);

@@ -16,6 +16,7 @@ import { after, describe, it } from 'node:test';
 import { ProjectEngine } from '../src/core/engine.js';
 import { buildTools } from '../src/host/tools.js';
 import type { HostToolDefinition, HostToolRunContext } from '../src/host/hostTypes.js';
+import type { UsagePort } from '../src/core/usage.js';
 import { FakeRunner, FakeThreads, fixedClock, sequentialIds } from './helpers.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -37,7 +38,12 @@ function context(): HostToolRunContext {
 }
 
 /** A project over a fresh temp root. */
-async function harness(): Promise<{ engine: ProjectEngine; runner: FakeRunner; threads: FakeThreads; root: string }> {
+async function harness(extra: { usage?: UsagePort } = {}): Promise<{
+  engine: ProjectEngine;
+  runner: FakeRunner;
+  threads: FakeThreads;
+  root: string;
+}> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-project-tool-'));
   cleanups.push(async () => {
     await rm(root, { recursive: true, force: true });
@@ -50,6 +56,7 @@ async function harness(): Promise<{ engine: ProjectEngine; runner: FakeRunner; t
     clock: fixedClock(),
     ids: sequentialIds(),
     quotaLedgerPath: join(root, 'quota-ledger.json'),
+    ...(extra.usage === undefined ? {} : { usage: extra.usage }),
   });
   return { engine, runner, threads, root };
 }
@@ -443,5 +450,35 @@ describe('project_library', () => {
     const source = { engineFor: () => Promise.resolve(engine), parentOf: () => PARENT };
     const result = (await tool(source, 'project_library').execute({}, context())) as Record<string, unknown>;
     assert.equal(result['code'], 'PROJECT_NOT_INITIALIZED');
+  });
+});
+
+describe('project_overview usage', () => {
+  it('omits token spend unless asked, and reports it when asked', async () => {
+    const usage: UsagePort = {
+      async measure() {
+        return {
+          calls: 1,
+          inputTokens: 5,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          models: [{ provider: 'p', model: 'm', calls: 1, inputTokens: 5, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }],
+        };
+      },
+    };
+    const { engine, runner, root } = await harness({ usage });
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    await engine.coordinate(PARENT, '- one', { planOnly: false });
+    const overview = tool({ engineFor: () => Promise.resolve(engine), parentOf: () => PARENT }, 'project_overview');
+
+    const cheap = (await overview.execute({ rootDir: root }, context())) as { usage?: unknown };
+    assert.equal(cheap.usage, undefined);
+
+    const full = (await overview.execute({ rootDir: root, usage: true }, context())) as {
+      usage?: { totals?: { inputTokens?: number } };
+    };
+    assert.equal(full.usage?.totals?.inputTokens, 5);
   });
 });

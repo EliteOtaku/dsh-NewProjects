@@ -57,6 +57,8 @@ export interface ProjectStateSnapshot {
   suggested?: { count: number; expired: boolean };
   /** Present only while the project is paused. */
   paused?: { since: number; reason?: string };
+  /** Present only while the project is archived. */
+  archived?: { since: number };
   knowledge?: { docs: number; summary: string };
   warnings: string[];
 }
@@ -128,6 +130,7 @@ export function buildProjectState(
     snapshot.suggested = { count: overview.suggested.tasks.length, expired: overview.suggested.expired };
   }
   if (overview.paused !== undefined) snapshot.paused = overview.paused;
+  if (overview.archived !== undefined) snapshot.archived = overview.archived;
   if (extra.knowledge !== undefined) snapshot.knowledge = extra.knowledge;
   return snapshot;
 }

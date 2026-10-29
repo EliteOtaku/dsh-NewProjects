@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -16,7 +16,8 @@ import { after, describe, it } from 'node:test';
 const test = it;
 
 import type { ApprovalAction } from '../src/types.js';
-import { ProjectEngine } from '../src/core/engine.js';
+import { DEFAULT_THREAD_TIMEOUT_MS, ProjectEngine } from '../src/core/engine.js';
+import type { RawThreadUsage, UsagePort } from '../src/core/usage.js';
 import { isProjectError } from '../src/core/errors.js';
 import { RECENT_MESSAGE_LIMIT } from '../src/core/coordState.js';
 import { renderOverviewMarkdown } from '../src/core/overview.js';
@@ -47,7 +48,9 @@ async function freshRoot(): Promise<string> {
 }
 
 /** Build an engine over a fresh temp root. */
-async function harness(extra: { requireApprovalFor?: ApprovalAction[] } = {}): Promise<{
+async function harness(
+  extra: { requireApprovalFor?: ApprovalAction[]; threadTimeoutMs?: number; usage?: UsagePort } = {},
+): Promise<{
   engine: ProjectEngine;
   runner: FakeRunner;
   threads: FakeThreads;
@@ -65,6 +68,8 @@ async function harness(extra: { requireApprovalFor?: ApprovalAction[] } = {}): P
     ids: sequentialIds(),
     quotaLedgerPath: join(root, 'quota-ledger.json'),
     ...(extra.requireApprovalFor === undefined ? {} : { requireApprovalFor: extra.requireApprovalFor }),
+    ...(extra.threadTimeoutMs === undefined ? {} : { threadTimeoutMs: extra.threadTimeoutMs }),
+    ...(extra.usage === undefined ? {} : { usage: extra.usage }),
   });
   return { engine, runner, threads, root, clock };
 }
@@ -151,6 +156,30 @@ describe('init / deinit', () => {
     assert.match(ignore, /SHARED_MEMORY\.md/);
   });
 });
+
+  it('keeps .dsh-project/ on a plain deinit and purges it on request', async () => {
+    const { engine, root } = await harness();
+    await engine.init({ name: 'demo' });
+    const instructionsPath = join(root, '.dsh-project', 'PROJECT_INSTRUCTIONS.md');
+    await writeFile(instructionsPath, 'use tabs' + String.fromCharCode(10), 'utf8');
+    const kept = await engine.deinit();
+    assert.deepEqual(kept.purged, []);
+    // Conservative default: the record is gone, the (possibly hand-written) files are not.
+    assert.equal(existsSync(instructionsPath), true);
+    assert.equal(existsSync(join(root, '.dsh-project', 'manifest.json')), false);
+
+    const again = await harness();
+    await again.engine.init({ name: 'demo' });
+    const purgePath = join(again.root, '.dsh-project', 'PROJECT_INSTRUCTIONS.md');
+    await writeFile(purgePath, 'use spaces' + String.fromCharCode(10), 'utf8');
+    const purged = await again.engine.deinit({ purge: true });
+    const savedPath = join(again.root, 'PROJECT_INSTRUCTIONS.md.saved');
+    assert.equal(purged.savedInstructions, savedPath);
+    assert.equal(existsSync(purgePath), false);
+    assert.equal(existsSync(savedPath), true);
+    assert.equal(readFileSync(savedPath, 'utf8').trim(), 'use spaces');
+    assert.equal(existsSync(join(again.root, '.dsh-project')), false);
+  });
 
 describe('setMemory / removeMemory', () => {
   it('bumps prefixVersion but not the store revision', async () => {
@@ -873,6 +902,131 @@ describe('manifest durability', () => {
   });
 });
 
+describe('thread deadlines', () => {
+  test('interrupts a thread that outlived its window and asks the user', async () => {
+    const { engine, runner, threads, clock } = await harness();
+    repoReady(runner);
+    await engine.init({ name: 'demo' });
+    const started = await engine.coordinate(PARENT, '- one', { planOnly: false });
+    const threadId = started.started[0]?.threadId ?? '';
+    // Generated prompt is text; the deadline itself is derived from the clock the harness controls.
+    clock.advance(DEFAULT_THREAD_TIMEOUT_MS + 1);
+
+    const sweep = await engine.healSweep(PARENT);
+    assert.equal(sweep.timedOut.length, 1);
+    assert.equal(threads.interrupts.length, 1);
+    const thread = await engine.requireThread(threadId);
+    // Not `failed`: the thread did not fail, it ran out of time.
+    assert.equal(thread.status, 'needs_feedback');
+    assert.match(thread.feedbackPrompt ?? '', /ran past its 120 minute limit/);
+    assert.match(thread.note ?? '', /timed out/);
+    assert.equal(thread.deadlineAt, undefined);
+  });
+
+  test('leaves threads inside their window alone', async () => {
+    const { engine, runner } = await harness();
+    repoReady(runner);
+    await engine.init({ name: 'demo' });
+    const started = await engine.coordinate(PARENT, '- one', { planOnly: false });
+    const sweep = await engine.healSweep(PARENT);
+    assert.equal(sweep.timedOut.length, 0);
+    assert.equal((await engine.requireThread(started.started[0]?.threadId ?? '')).status, 'running');
+  });
+
+  test('a retry gets a whole new window instead of the expired one', async () => {
+    const { engine, runner, clock } = await harness();
+    repoReady(runner);
+    await engine.init({ name: 'demo' });
+    const started = await engine.coordinate(PARENT, '- one', { planOnly: false });
+    const threadId = started.started[0]?.threadId ?? '';
+    clock.advance(DEFAULT_THREAD_TIMEOUT_MS + 1);
+    await engine.healSweep(PARENT);
+    await engine.manageThread(PARENT, threadId, 'retry', 'try again');
+    const thread = await engine.requireThread(threadId);
+    assert.equal(thread.status, 'running');
+    assert.ok((thread.deadlineAt ?? 0) > clock.now());
+  });
+
+  test('a zero timeout disables the deadline', async () => {
+    const { engine, runner, clock } = await harness({ threadTimeoutMs: 0 });
+    repoReady(runner);
+    await engine.init({ name: 'demo' });
+    const started = await engine.coordinate(PARENT, '- one', { planOnly: false });
+    const thread = await engine.requireThread(started.started[0]?.threadId ?? '');
+    assert.equal(thread.deadlineAt, undefined);
+    clock.advance(10 * DEFAULT_THREAD_TIMEOUT_MS);
+    assert.equal((await engine.healSweep(PARENT)).timedOut.length, 0);
+  });
+});
+
+describe('archive', () => {
+  test('stops everything, reports it, and refuses to start work until unarchived', async () => {
+    const { engine, runner, threads } = await harness();
+    repoReady(runner);
+    await engine.init({ name: 'demo' });
+    const started = await engine.coordinate(PARENT, '- one', { planOnly: false });
+    assert.equal(threads.presence(started.started[0]?.childSessionId ?? ''), 'busy');
+
+    const archived = await engine.archive(PARENT);
+    assert.equal(archived.wasArchived, false);
+    assert.deepEqual(archived.interrupted, started.started.map((thread) => thread.threadId));
+    assert.equal(threads.interrupts.length, 1);
+
+    await assert.rejects(
+      async () => engine.coordinate(PARENT, '- two', { planOnly: false }),
+      (error: unknown) => {
+        assert.ok(isProjectError(error));
+        assert.equal(error.code, 'PROJECT_ARCHIVED');
+        // The only useful instruction is the one that lifts the state.
+        assert.match(error.message, /unarchive/);
+        assert.doesNotMatch(error.message, /resume/);
+        return true;
+      },
+    );
+
+    const sweep = await engine.healSweep(PARENT);
+    assert.equal(sweep.observed, 0);
+    assert.equal(sweep.paused, 'project is archived');
+
+    const overview = await engine.overview();
+    assert.equal(overview.archived !== undefined, true);
+    const markdown = renderOverviewMarkdown(overview);
+    assert.match(markdown, /ARCHIVED/);
+    assert.match(markdown, /\/project unarchive/);
+  });
+
+  test('survives a restart and comes back on unarchive', async () => {
+    const { engine, root, runner, threads, clock } = await harness();
+    repoReady(runner);
+    await engine.init({ name: 'demo' });
+    await engine.archive(PARENT);
+
+    const reopened = new ProjectEngine(root, {
+      runner,
+      threads,
+      clock,
+      ids: sequentialIds(),
+      quotaLedgerPath: join(root, 'quota-ledger.json'),
+    });
+    assert.equal((await reopened.archived())?.since !== undefined, true);
+    assert.equal((await reopened.overviewJson()).archived !== undefined, true);
+
+    const back = await reopened.unarchive();
+    assert.equal(back.wasArchived, true);
+    assert.equal(await reopened.archived(), undefined);
+    const again = await reopened.unarchive();
+    assert.equal(again.wasArchived, false);
+  });
+
+  test('archiving twice reports it was already archived', async () => {
+    const { engine, runner } = await harness();
+    repoReady(runner);
+    await engine.init({ name: 'demo' });
+    assert.equal((await engine.archive(PARENT)).wasArchived, false);
+    assert.equal((await engine.archive(PARENT)).wasArchived, true);
+  });
+});
+
 describe('pause', () => {
   test('refuses to start work, sweep, or deliver while paused, and says so', async () => {
     const { engine, runner, threads } = await harness();
@@ -1307,6 +1461,71 @@ describe('worktree reclamation', () => {
     assert.equal(existsSync(worktreePath), true);
     assert.match(thread.note ?? '', /could not remove worktree/);
     assert.match(message, /could not remove worktree/);
+  });
+});
+
+describe('shared-repository lock contention', () => {
+  it('retries a locked commit instead of failing the delivery', async () => {
+    // Every worktree shares one `.git`, so two threads committing at the same instant collide.
+    // Reporting that as "this thread failed" would teach the user to distrust red threads.
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const result = await engine.coordinate(PARENT, '- one', { planOnly: false });
+    const threadId = result.started[0]?.threadId ?? '';
+    runner.on('git status --porcelain', { stdout: ' M src/a.ts' + String.fromCharCode(10) });
+    runner.on('git push', { exitCode: 0 });
+    runner.on('gh pr create', { stdout: 'https://github.com/o/r/pull/9' + String.fromCharCode(10) });
+    runner.on('gh pr view', {
+      stdout: JSON.stringify({
+        number: 9,
+        url: 'https://github.com/o/r/pull/9',
+        state: 'OPEN',
+        isDraft: false,
+        headRefName: 'project/demo/1-one',
+        reviewDecision: '',
+        mergeable: 'MERGEABLE',
+      }),
+    });
+    runner.on('git diff', { stdout: 'A	src/a.ts' + String.fromCharCode(10) });
+    let commits = 0;
+    const lockText = "error: cannot lock ref 'refs/heads/project/demo/1-one': File exists.";
+    runner.onCommand('git commit', () => {
+      commits += 1;
+      if (commits === 1) return { exitCode: 1, stdout: '', stderr: lockText };
+      return { exitCode: 0, stdout: '[project/demo/1-one abc1234] one', stderr: '' };
+    });
+
+    const delivered = await engine.deliverThread(threadId);
+    assert.equal(commits, 2);
+    assert.equal(delivered.prRef, 'https://github.com/o/r/pull/9');
+    const thread = await engine.requireThread(threadId);
+    assert.equal(thread.status, 'awaiting_review');
+  });
+
+  it('reports contention in plain words once the retries are spent', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const result = await engine.coordinate(PARENT, '- one', { planOnly: false });
+    const threadId = result.started[0]?.threadId ?? '';
+    runner.on('git status --porcelain', { stdout: ' M src/a.ts' + String.fromCharCode(10) });
+    runner.onCommand('git commit', () => ({
+      exitCode: 1,
+      stdout: '',
+      stderr: "error: cannot lock ref 'refs/heads/x': File exists.",
+    }));
+    await assert.rejects(
+      async () => engine.deliverThread(threadId),
+      (error: unknown) => {
+        // The command layer's error, not a ProjectError: what matters for the acceptance is that
+        // the message blames the shared repository rather than the thread's change.
+        const message = String((error as Error).message);
+        assert.match(message, /git commit/);
+        assert.match(message, /busy with another thread/);
+        return true;
+      },
+    );
   });
 });
 
@@ -1773,5 +1992,98 @@ describe('approvals', () => {
     const overview = await engine.overviewJson();
     assert.deepEqual(overview.approvalsRequired, ['push', 'pr']);
     assert.match(renderOverviewMarkdown(await engine.overview()), /sign-off required before: push, pr/);
+  });
+});
+
+describe('usage', () => {
+  /**
+   * A port that answers from a table, so the engine's aggregation is exercised without a Host.
+   * `undefined` in the table means "the Host has no record", which must surface as a gap.
+   */
+  function portFor(rows: Record<string, RawThreadUsage | undefined>): { port: UsagePort; asked: string[] } {
+    const asked: string[] = [];
+    return {
+      asked,
+      port: {
+        async measure(childSessionId: string) {
+          asked.push(childSessionId);
+          return rows[childSessionId];
+        },
+      },
+    };
+  }
+
+  async function twoThreads(usage: UsagePort): Promise<{ engine: ProjectEngine }> {
+    const { engine, runner } = await harness({ usage });
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    await engine.coordinate(PARENT, ['- one', '- two'].join(String.fromCharCode(10)), { planOnly: false });
+    return { engine };
+  }
+
+  it('aggregates per thread from the port', async () => {
+    const { port, asked } = portFor({
+      'child-1': {
+        calls: 2,
+        inputTokens: 900,
+        outputTokens: 100,
+        cacheReadTokens: 400,
+        cacheWriteTokens: 40,
+        models: [
+          { provider: 'p', model: 'm', calls: 2, inputTokens: 900, outputTokens: 100, cacheReadTokens: 400, cacheWriteTokens: 40 },
+        ],
+      },
+      'child-2': {
+        calls: 1,
+        inputTokens: 10,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        models: [{ provider: 'q', model: 'n', calls: 1, inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }],
+      },
+    });
+    const { engine } = await twoThreads(port);
+    const usage = await engine.usageSummary();
+    assert.equal(usage.available, true);
+    assert.equal(usage.threads.length, 2);
+    assert.equal(usage.totals.inputTokens, 910);
+    assert.equal(usage.totals.outputTokens, 101);
+    assert.equal(usage.totals.cacheReadTokens, 400);
+    assert.equal(usage.byModel.length, 2);
+    // Asked with the child session id, not the thread id: the port reads Host sessions.
+    assert.deepEqual(asked.sort(), ['child-1', 'child-2']);
+  });
+
+  it('reports a thread whose session is gone as unavailable, not as zero cost', async () => {
+    const { port } = portFor({ 'child-1': undefined });
+    const { engine } = await twoThreads(port);
+    const usage = await engine.usageSummary();
+    assert.equal(usage.available, false);
+    assert.match(usage.unavailable ?? '', /no usage record/);
+  });
+
+  it('says so, rather than reporting zero, when the Host exposes no usage source', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    await engine.coordinate(PARENT, '- one', { planOnly: false });
+    const usage = await engine.usageSummary();
+    assert.equal(usage.available, false);
+    assert.match(usage.unavailable ?? '', /no session log/);
+    assert.equal(usage.totals.calls, 0);
+  });
+
+  it('is included in the overview payload only when asked', async () => {
+    const { port } = portFor({});
+    const { engine } = await twoThreads(port);
+    const cheap = await engine.overviewJson();
+    assert.equal(cheap.usage, undefined);
+    const full = await engine.overviewJson({ includeUsage: true });
+    assert.equal(typeof full.usage, 'object');
+  });
+
+  it('refuses to answer before the project exists', async () => {
+    const { engine } = await harness();
+    await assert.rejects(() => engine.usageSummary());
   });
 });

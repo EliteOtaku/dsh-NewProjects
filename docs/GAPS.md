@@ -72,7 +72,7 @@
 | **P0** | 违背规格或官方原文 | ~~`GAP-01`~~ ✅ 已关闭 2026-10-27 |
 | **P1** | 会静默产出错误结果 | ~~`GAP-23`~~ ✅ ~~`GAP-24`~~ ✅（`GAP-22` / `GAP-22a` 已关闭）—— **P1 已清空** |
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | ~~`GAP-03`~~ ✅ ~~`GAP-04`~~ ✅ ~~`GAP-05`~~ ✅（2026-10-29 关闭） |
-| **P3** | 官方有、我们无，独立功能 | `GAP-13`（`GAP-06` / `GAP-09` / `GAP-10` / `GAP-11` / `GAP-12` / `GAP-29` 已于 2026-10-29 关闭） |
+| **P3** | 官方有、我们无，独立功能 | 全部关闭（`GAP-06` / `GAP-09` / `GAP-10` / `GAP-11` / `GAP-12` / `GAP-13` / `GAP-29` 已于 2026-10-29 完成） |
 | **P4** | 项目管理类，缺了不能「管起来」 | `GAP-15` `GAP-17` `GAP-28`（`GAP-14`/`GAP-18`/`GAP-25` 已于 2026-10-29 关闭） |
 | **P5** | 磁盘、性能与健壮性，不出错 | `GAP-20` `GAP-27`（`GAP-19` 已于 2026-10-29 关闭） |
 | **ARCH** | 架构性差异，记录不排期 | `GAP-A1` ~ `GAP-A4` |
@@ -425,12 +425,54 @@
 
 **验收（全部有测试）**：✅ `merge` 走消息且宿主没有 `gh pr merge` —— `test/engine.test.ts`「asks the thread to merge instead of merging behind its back」；✅ `conflicts` 把交集交给线程、非交集文件不出现 —— 「hands the thread the likely conflict sites and the base branch」；✅ 交集为空仍发指令 —— 「still asks the thread to fetch and inspect when nothing overlaps」；✅ `review` 返回 URL 且不唤醒 —— 「answers review with the link and spends no thread turn」；✅ 三者的失败路径 —— 三条「refuses ... without a pull request」。
 
-### GAP-13 没有 Usage（token 用量）
+### GAP-13 没有 Usage（token 用量）— ✅ 已做
 
 - **依据**：`OFFICIAL`「Open **Usage** in **Project settings** to see token use by thread and by model, and how much went to the project conversation.」
-- **现状**：完全没有。Host 有 `tokenMeter` 服务但未接入（`grep -rn tokenMeter src/` 返回空）。
-- **做法**：读 Host `tokenMeter` 按线程归集；`overviewJson()` 加 `usage`。**如果 `tokenMeter` 只能给全局数字，就明确标注「本项目无法按线程拆分」，不要造假的分布。**
+- **现状（2026-10-29 之前）**：完全没有。Host 有 `tokenMeter` 服务但未接入（`grep -rn tokenMeter src/` 返回空）。
+- **做法（原判断）**：读 Host `tokenMeter` 按线程归集；`overviewJson()` 加 `usage`。**如果 `tokenMeter` 只能给全局数字，就明确标注「本项目无法按线程拆分」，不要造假的分布。**
 - **验收标准**：能看到按线程用量；拿不到精确数据时如实显示「不可用」而不是 0。
+
+#### 实际做法（2026-10-29 落地）
+
+**1. `tokenMeter` 不是账单来源，只能给「当前占用」**
+
+`tokenMeter.measure(session)` 返回的是**当前请求压强**（`TokenMeasurement.totalTokens` 是这次请求要发多少 token），不是花了多少。真正的账单数字在会话日志里：每条 `assistant/message` 事件带 `usage: TokenUsage`，那是 provider 回给我们的原文。所以：
+
+- 花费 ← 逐条 `assistant/message` 的 `usage` 累加（`inputTokens` / `outputTokens` / `cacheReadTokens` / `cacheWriteTokens`）；
+- 占用 ← `tokenMeter.measure(session).totalTokens`，单独一列显示，**绝不与花费相加**。
+
+把估算和账单并排显示而读者分不出来，比不给数字更糟，所以两个来源在类型上就是分开的（`RawThreadUsage.pressureTokens` vs 各 token 字段）。
+
+**2. 端口化，而不是在 engine 里读会话**
+
+`src/core/usage.ts` 定义 `UsagePort { measure(childSessionId): Promise<RawThreadUsage | undefined> }`，与 `CommandRunner` 同样的理由：engine 必须能在内存里测，且 `src/core` 不能 import Host 包（外部插件解析不到）。Host 实现是 `src/host/usage.ts` 的 `createUsagePort(sessions, meter?)`，读 `session.ownEvents()`。
+
+**3. 「不可用」是一等答案，不是 0**
+
+`buildUsage` 有两条独立的缺口通道：整机没有端口（`this Host exposes no session log`）与单线程会话已不在（`the Host has no usage record for this thread`）。两种都让 `available: false` 并把原因留成文字；**行仍然出现**——线程总比 Host 进程活得久，凭空消失的总数会被读成「花得少了」。`renderUsageMarkdown` 把不可用提示放在表**之前**：先给一屏 0 再在脚注说「其实没数据」，脚注没人看。
+
+**4. 归属按 `message.source` 的 provider/model，不按当前路由**
+
+同一线程中途可能换模型。`source` 是唯一记录「这次是谁答的」的地方，读当前配置会把所有历史调用都记到现在的模型上。所以按模型拆分时以 `provider/model` 为键（只按 model 名会把两个 provider 的同名模型合并）。
+
+**5. `overviewJson` 是按需的**
+
+GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsage: true }` 选项：面板会轮询 overview，而 usage 要给每个线程读一遍会话日志。默认关、要用才开，并在 `project_overview` 工具的 `usage` 参数说明里写明代价。
+
+**6. `/project usage`**
+
+命令层直接渲染 `renderUsageMarkdown`，不经模型；`project_overview` 工具用 `usage: true` 拿结构化数据。两者共用同一份聚合逻辑。
+
+#### 验收（全部有测试）
+
+1. ✅ 按线程聚合、按模型拆分、`cache` 分列（`test/engine.test.ts`「aggregates per thread from the port」，断言 `totals.inputTokens` 与 `byModel.length`）。
+2. ✅ 会话消失时该线程报「不可用」而不是 0（「reports a thread whose session is gone as unavailable, not as zero cost」）。
+3. ✅ 整机没有会话日志时报原因（「says so, rather than reporting zero, when the Host exposes no usage source」，断言 `no session log`）。
+4. ✅ `overviewJson` 默认不含、`includeUsage: true` 才含（「is included in the overview payload only when asked」）。
+5. ✅ 未初始化时拒绝（「refuses to answer before the project exists」）。
+6. ✅ 渲染与格式化（`test/unit/usage.test.ts` 16 项：不可用前置、零时给「nothing to break down」、缓存列仅在 >0 时出现、`formatTokens` 压缩、按 provider 分开）。
+7. ✅ 会话事件解析（同文件 `summariseSession` 4 项：无 `usage` 仍计调用次数、无 `source` 仍计花费、同一会话跨模型拆分）。
+8. ✅ 命令与工具入口（`test/commands.test.ts`「/project usage」2 项、`test/tools.test.ts`「project_overview usage」1 项）。
 
 ### GAP-26 拆解应模型优先，并把「先提议后启动」与它一起做 ✅ 已做
 
@@ -786,7 +828,7 @@
 | **第三批 让报回可用** | `GAP-03` 投影 ✅ + `GAP-04` 六分组 ✅ + `GAP-05` 终态 ✅ + `GAP-10` Library ✅ + `GAP-11` PR 聚合 ✅ | 03 与 04 **可同批**（原判断的串行约束不成立） | 2026-10-29 全部关闭 —— **第三批完成** |
 | **第四批 让裁定可用** ✅ | ~~`GAP-12` 卡片动作~~ ✅ + ~~`GAP-25` 禁令~~ ✅ + ~~`GAP-19` worktree 回收~~ ✅ + ~~`GAP-18` 审批~~ ✅ + ~~`GAP-14` Pause~~ ✅ | 19 依赖 10（先有清单再删目录）| **整批已于 2026-10-29 完成**。不可逆动作（19）与它的防护（18/25）同批，没有推到最后一刻 |
 | **第五批 减少重复交代** ✅ | ~~`GAP-06` goal~~ ✅ + ~~`GAP-09` 仓库约定~~ ✅ + ~~`GAP-29` 三件套~~ ✅ | 无 | **整批已于 2026-10-29 完成**：goal 进共享前缀、约定按官方三处只读根、近期消息环只给协调者不进线程前缀 |
-| **第六批 卫生** | `GAP-13` Usage + `GAP-15` Archive + `GAP-17` 超时 + `GAP-20` purge + `GAP-27` 锁重试 | 无 | |
+| **第六批 卫生** ✅ | ~~`GAP-13` Usage~~ ✅ + ~~`GAP-15` Archive~~ ✅ + ~~`GAP-17` 超时~~ ✅ + ~~`GAP-20` purge~~ ✅ + ~~`GAP-27` 锁重试~~ ✅ | 无 | **整批已于 2026-10-29 完成** |
 | **按需** | `GAP-28` 并发偏好 | 无 | ~~`GAP-23`~~ ✅ 已于 2026-10-29 提前做完 |
 
 > **`GAP-23` / `GAP-24` 为什么提前做了（2026-10-29）**：原计划把它们放在第四批与「按需」，理由是触发条件要等到真的跑起来。实际复核后发现 `GAP-24` 的触发条件比预想近得多 —— 只要一个 PR 合并后分支被删，下一轮 sweep 就会安静地失败，而这是**每个正常收尾的 PR 都会走的路**；`GAP-23` 与它共用 `observeOne` 的同一段代码，分开做要改两遍。两项一起做，`observeOne` 的判断只落一次。

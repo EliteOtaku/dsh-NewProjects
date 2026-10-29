@@ -7,7 +7,7 @@
  * bumps `revision` by one, and replaces the file atomically (tmp + rename).
  */
 
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { renameWithRetry } from './atomicFile.js';
@@ -190,9 +190,37 @@ export class ManifestStore {
   }
 
   /** Delete the record and its scratch files (project de-initialisation). */
-  async destroy(): Promise<void> {
+  /**
+   * Remove this project's record.
+   *
+   * With `purge` the whole `.dsh-project/` directory goes too — knowledge index, memory mirror,
+   * reclaimed worktrees, logs. The default stays conservative because the directory can hold
+   * `PROJECT_INSTRUCTIONS.md`, which the *user* wrote: deleting someone's hand-written instructions
+   * as a side effect of "remove this project" is the kind of surprise that loses work.
+   */
+  async destroy(options: { purge?: boolean } = {}): Promise<{ purged: string[]; savedInstructions?: string }> {
+    const purged: string[] = [];
     await rm(this.paths.manifestPath, { force: true });
     await rm(`${this.paths.manifestPath}.tmp`, { force: true });
+    if (options.purge !== true) return { purged };
+    // Preserve the one file in there that a human typed, next to where it was, before the wipe.
+    let savedInstructions: string | undefined;
+    const instructions = await readFile(this.paths.instructionsPath, 'utf8').catch(() => undefined);
+    if (instructions !== undefined && instructions.trim().length > 0) {
+      // Outside `.dsh-project/`: anything inside is about to be deleted, and a backup that the
+      // purge removes in the same breath is not a backup.
+      savedInstructions = join(this.paths.rootDir, 'PROJECT_INSTRUCTIONS.md.saved');
+      await writeFile(savedInstructions, instructions, 'utf8');
+      purged.push(savedInstructions);
+    }
+    const entries = await readdir(this.paths.projectDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      const target = join(this.paths.projectDir, entry.name);
+      await rm(target, { recursive: true, force: true });
+      purged.push(target);
+    }
+    await rm(this.paths.projectDir, { recursive: true, force: true });
+    return { purged, ...(savedInstructions === undefined ? {} : { savedInstructions }) };
   }
 }
 

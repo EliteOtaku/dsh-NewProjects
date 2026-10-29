@@ -29,10 +29,12 @@ import {
 import { PROJECT_STATE_EVENT, type ProjectStateSnapshot } from './core/projectState.js';
 import { SwappableThreadRuntime, UnavailableThreadRuntime, type ThreadRuntime } from './core/threads.js';
 import { createCommandRunner } from './host/commandRunner.js';
+import { createLazyUsagePort, createUsagePort } from './host/usage.js';
 import { buildCommands, type CommandContextSource } from './host/commands.js';
 import { SubagentThreadRuntime } from './host/subagents.js';
 import { buildProjectStateProjection } from './host/projections.js';
 import { buildTools, type ToolContextSource } from './host/tools.js';
+import type { UsagePort } from './core/usage.js';
 import type { ApprovalAction } from './types.js';
 import type {
   HostCommands,
@@ -40,6 +42,7 @@ import type {
   HostSubagents,
   HostSessionProjections,
   HostSessions,
+  HostTokenMeter,
   HostSubprocess,
   HostSystemPrompt,
   HostTimer,
@@ -114,6 +117,8 @@ function createRuntime(options: {
   threads: ThreadRuntime;
   quotaLedgerPath?: string;
   requireApprovalFor?: ApprovalAction[];
+  /** Per-thread token accounting; absent until the Host exposes a session log. */
+  usage?: UsagePort;
   /**
    * Where to send state snapshots. Supplied once `sessions` is available; absent until then
    * and in tests, which is why publishing is a no-op rather than an error.
@@ -138,7 +143,7 @@ function createRuntime(options: {
       threads: options.threads,
       ...(options.quotaLedgerPath === undefined ? {} : { quotaLedgerPath: options.quotaLedgerPath }),
       ...(options.requireApprovalFor === undefined ? {} : { requireApprovalFor: options.requireApprovalFor }),
-      ...(options.requireApprovalFor === undefined ? {} : { requireApprovalFor: options.requireApprovalFor }),
+      ...(options.usage === undefined ? {} : { usage: options.usage }),
     });
     if (publisher !== undefined) engine.setStatePublisher(publisher);
     engines.set(root, engine);
@@ -204,6 +209,14 @@ export function apply(ctx: HostContext, config: ProjectBetaConfig = {}): void {
       process.cwd(),
     runner: createCommandRunner(subprocess),
     threads,
+    // Resolved per measurement: `sessions` and `tokenMeter` arrive after activation, and a port
+    // captured once at boot would leave every project reporting "unavailable" forever.
+    usage: createLazyUsagePort(() => {
+      const sessions = ctx.get('sessions') as HostSessions | undefined;
+      if (sessions === undefined) return undefined;
+      const meter = ctx.get('tokenMeter') as HostTokenMeter | undefined;
+      return createUsagePort(sessions, meter);
+    }),
     ...(config.quotaLedgerPath === undefined ? {} : { quotaLedgerPath: config.quotaLedgerPath }),
     ...(config.requireApprovalFor === undefined ? {} : { requireApprovalFor: config.requireApprovalFor }),
   });

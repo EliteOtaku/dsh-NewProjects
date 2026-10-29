@@ -19,6 +19,8 @@ export type ProjectErrorCode =
   | 'INVALID_INPUT'
   /** The project is paused — resume it before starting or advancing any thread. */
   | 'PROJECT_PAUSED'
+  /** The project is archived — unarchive it before starting or advancing any thread. */
+  | 'PROJECT_ARCHIVED'
   /** This project asks for human sign-off before an irreversible git action. */
   | 'APPROVAL_REQUIRED';
 

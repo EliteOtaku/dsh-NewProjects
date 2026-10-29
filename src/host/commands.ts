@@ -15,6 +15,7 @@ import type { ThreadAction } from '../core/engine.js';
 import { describeError, isProjectError } from '../core/errors.js';
 import { describeKnowledge } from '../core/knowledge.js';
 import { renderOverviewMarkdown } from '../core/overview.js';
+import { renderUsageMarkdown } from '../core/usage.js';
 import type { HostCommandDefinition, HostCommandDefinition as CommandDef } from './hostTypes.js';
 
 /** Every management verb the `thread` sub-command accepts, validated before dispatch. */
@@ -50,6 +51,7 @@ export const PROJECT_USAGE = [
   '- `/project` or `/project overview` — the six buckets plus daily quota',
   '- `/project init [name]` — create the project record for this workspace',
   '- `/project deinit` — delete the record; running threads keep running',
+  '- `/project deinit --purge` — also wipe `.dsh-project/` (your PROJECT_INSTRUCTIONS.md is saved first)',
   '- `/project goal` — the one line this project is working toward (and the recent coordinator messages)',
   '- `/project goal <text>` — set the goal; `/project goal clear` forgets it',
   '- `/project memory` — list shared decisions',
@@ -61,6 +63,7 @@ export const PROJECT_USAGE = [
   '- `/project knowledge add <path...>` — bind files or folders and reindex',
   '- `/project knowledge rm <path...>` — unbind paths and reindex',
   '- `/project knowledge rebuild` — re-read every bound file and rebuild the index',
+  '- `/project usage` — token spend per thread and per model',
   '- `/project library` — files the threads produced',
   '- `/project library read <path>` — one produced file, read out of its worktree',
   '- `/project heal` — poll CI and review comments once and act on what is found',
@@ -69,6 +72,8 @@ export const PROJECT_USAGE = [
   '- `/project start [n...]` — start every proposed thread, or only the listed 1-based ones',
   '- `/project drop` — discard the proposed threads',
   '- `/project resume` — undo a pause; interrupted threads stay resumable',
+  '- `/project archive` — stop everything and take the project out of the way',
+  '- `/project unarchive` — bring it back; interrupted threads still need a retry or a steer',
 ].join('\n');
 
 /** Split a raw argument line into verb and remainder. */
@@ -227,8 +232,24 @@ export function buildProjectCommand(source: CommandContextSource): CommandDef {
           }
           case 'deinit': {
             const engine = await source.engineFor(invocation.agent, undefined);
-            await engine.deinit();
-            return { kind: 'success', text: 'project record deleted. Threads already running keep running; their descriptors are gone.' };
+            const purge = rest.split(/\s+/).includes('--purge');
+            const outcome = await engine.deinit({ purge });
+            const base =
+              'project record deleted. Threads already running keep running; their descriptors are gone.';
+            if (!purge) {
+              return {
+                kind: 'success',
+                text: `${base} Files under .dsh-project/ are still on disk; add --purge to remove them.`,
+              };
+            }
+            const saved =
+              outcome.savedInstructions === undefined
+                ? ''
+                : ` Your PROJECT_INSTRUCTIONS.md was copied to ${outcome.savedInstructions} first.`;
+            return {
+              kind: 'success',
+              text: `${base} Purged ${String(outcome.purged.length)} path(s) under .dsh-project/.${saved}`,
+            };
           }
           case 'overview': {
             const engine = await source.engineFor(invocation.agent, undefined);
@@ -347,6 +368,30 @@ export function buildProjectCommand(source: CommandContextSource): CommandDef {
               text: `paused${rest.length === 0 ? '' : `: ${rest}`} — ${interrupted}. Nothing starts or advances until \`/project resume\`.`,
             };
           }
+          case 'archive': {
+            const engine = await source.engineFor(invocation.agent, undefined);
+            await requireReady(engine);
+            const result = await engine.archive(invocation.agent);
+            const interrupted =
+              result.interrupted.length === 0 ? 'no live threads to interrupt' : `interrupted ${result.interrupted.join(', ')}`;
+            return {
+              kind: 'success',
+              text: result.wasArchived
+                ? `already archived — ${interrupted}`
+                : `archived — ${interrupted}. Nothing runs and nothing polls until \`/project unarchive\`.`,
+            };
+          }
+          case 'unarchive': {
+            const engine = await source.engineFor(invocation.agent, undefined);
+            await requireReady(engine);
+            const result = await engine.unarchive(invocation.agent);
+            return {
+              kind: 'success',
+              text: result.wasArchived
+                ? 'unarchived — interrupted threads stay put until you retry or steer them'
+                : 'not archived; nothing to unarchive',
+            };
+          }
           case 'resume': {
             const engine = await source.engineFor(invocation.agent, undefined);
             await requireReady(engine);
@@ -383,6 +428,11 @@ export function buildProjectCommand(source: CommandContextSource): CommandDef {
             }
             return { kind: 'success', text: lines.join('\n') };
           }
+          case 'usage': {
+            const engine = await source.engineFor(invocation.agent, undefined);
+            await requireReady(engine);
+            return { kind: 'success', text: renderUsageMarkdown(await engine.usageSummary()) };
+          }
           case 'heal': {
             const engine = await source.engineFor(invocation.agent, undefined);
             await requireReady(engine);
@@ -394,6 +444,11 @@ export function buildProjectCommand(source: CommandContextSource): CommandDef {
               `settled ${String(sweep.settled.length)}`,
               `waiting ${String(sweep.waiting.length)}`,
             ];
+            if (sweep.timedOut.length > 0) {
+              // Named separately from "healed": a timeout is a policy event the user may need to
+              // revisit (raise the budget), not a repair the engine performed.
+              parts.push(`timed out ${sweep.timedOut.map((thread) => thread.threadId).join(', ')}`);
+            }
             if (sweep.errors.length > 0) {
               parts.push(`errors: ${sweep.errors.map((error) => `${error.threadId}: ${error.message}`).join('; ')}`);
             }

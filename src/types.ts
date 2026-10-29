@@ -133,6 +133,15 @@ export interface ProjectThreadDescriptor {
   /** Sorted names of the failing checks the last healing round was issued against. */
   failureSignature?: string;
   /**
+   * Wall-clock limit for this thread's current run, or absent when it has none.
+   *
+   * A stuck child session holds `running` forever, and the only cure today is a human noticing.
+   * The deadline is enforced by the sweep, which interrupts and hands the thread back as
+   * `needs_feedback` — it did not fail, it ran out of time. Refreshed whenever the thread is woken
+   * for new work, so a retry gets a whole new window rather than inheriting a stale one.
+   */
+  deadlineAt?: number;
+  /**
    * Set when the thread stops being polled for CI/review state. Merged or closed pull
    * requests set it automatically; `unwatch` sets it by hand. Cleared by `watch`.
    */
@@ -261,6 +270,14 @@ export interface ProjectManifest {
    * switch, so it must survive a restart — hence a stored timestamp rather than a flag.
    */
   pausedAt?: number;
+  /**
+   * When the project was archived, or absent while it is live.
+   *
+   * Distinct from {@link pausedAt}: pause is "not right now", archive is "out of the way". Both
+   * stop background work, but unarchiving is a deliberate return to the project rather than
+   * resuming the same session.
+   */
+  archivedAt?: number;
   /** Why it was paused, for the panel and for the agent that asks later. */
   pauseReason?: string;
   /**
@@ -409,6 +426,8 @@ export interface ProjectOverview {
   };
   /** Present only while the project is paused; carries the reason given at pause time. */
   paused?: { since: number; reason?: string };
+  /** Present only while the project is archived. */
+  archived?: { since: number };
   /**
    * Irreversible actions this project will not perform without a human sign-off.
    *

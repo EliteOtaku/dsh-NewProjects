@@ -352,6 +352,32 @@ describe('/project goal', () => {
   });
 });
 
+describe('/project archive', () => {
+  it('archives, refuses work, and unarchives', async () => {
+    const { engine } = await harness();
+    await run(engine, 'init');
+
+    const archived = await run(engine, 'archive');
+    assert.equal(archived.kind, 'success');
+    assert.match(archived.text, /archived — no live threads to interrupt/);
+    assert.match(archived.text, /\/project unarchive/);
+
+    const again = await run(engine, 'archive');
+    assert.match(again.text, /already archived/);
+
+    const refused = await run(engine, 'coordinate - one');
+    assert.equal(refused.kind, 'error');
+    assert.match(refused.text, /unarchive/);
+
+    const back = await run(engine, 'unarchive');
+    assert.equal(back.kind, 'success');
+    assert.match(back.text, /unarchived/);
+
+    const empty = await run(engine, 'unarchive');
+    assert.match(empty.text, /not archived/);
+  });
+});
+
 describe('/project heal', () => {
   it('summarises a sweep with nothing to do', async () => {
     const { engine } = await harness();
@@ -378,6 +404,25 @@ describe('/project without a project record', () => {
     const { engine } = await harness();
     assert.equal((await run(engine, 'init')).kind, 'success');
     assert.equal((await run(engine, 'deinit')).kind, 'success');
+  });
+});
+
+describe('/project usage', () => {
+  it('says the numbers are unavailable instead of printing zeros', async () => {
+    const { engine } = await harness();
+    await engine.init({ name: 'demo' });
+    const result = await run(engine, 'usage');
+    assert.equal(result.kind, 'success');
+    // No usage port on this engine: the honest answer is "not reported", not "0 tokens".
+    assert.match(result.text, /## Usage/);
+    assert.match(result.text, /not reported: .*no session log/);
+  });
+
+  it('needs a project record first', async () => {
+    const { engine } = await harness();
+    const result = await run(engine, 'usage');
+    assert.equal(result.kind, 'error');
+    assert.match(result.text, /\/project init/);
   });
 });
 

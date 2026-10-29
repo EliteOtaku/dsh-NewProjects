@@ -237,6 +237,7 @@ export function buildOverview(
             ...(manifest.pauseReason === undefined ? {} : { reason: manifest.pauseReason }),
           },
         }),
+    ...(manifest.archivedAt === undefined ? {} : { archived: { since: manifest.archivedAt } }),
     // An expired plan is still reported: dropping it is a write, and the panel is a reader.
     // It is marked stale so the panel cannot offer threads that will refuse to start.
     ...(manifest.plan === undefined
@@ -290,6 +291,11 @@ export function renderOverviewMarkdown(overview: ProjectOverview): string {
     lines.push(
       `- PAUSED${overview.paused.reason === undefined ? '' : `: ${overview.paused.reason}`} (\`/project resume\`)`,
     );
+  }
+  if (overview.archived !== undefined) {
+    // Above the pause line's neighbour slot: an archived project is not in the sidebar at all, so
+    // anyone reading this panel got here by asking for it by name and needs to know why nothing runs.
+    lines.push(`- ARCHIVED (\`/project unarchive\`)`);
   }
   if (overview.approvalsRequired !== undefined && overview.approvalsRequired.length > 0) {
     // Next to the pause line and for the same reason: "why did my thread stop before pushing"
