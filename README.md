@@ -1,6 +1,6 @@
 # dsh-newprojects
 
-Claude Code **Projects (Beta)** 式的动态协作中枢，作为 DeepSeek Harness 插件运行。
+复刻 Claude Code **Projects** 功能的动态协作中枢，作为 DeepSeek Harness 插件运行。
 
 把一个高层目标拆成互不阻塞的子任务，每个子任务交给一个**独立 git worktree 上的后台线程**去干；
 线程跨轮次持续运行、跨线程共享同一份项目决策记忆、CI 失败或 PR 收到审查意见时自动唤醒修复。
