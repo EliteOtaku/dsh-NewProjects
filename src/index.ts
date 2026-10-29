@@ -33,6 +33,7 @@ import { buildCommands, type CommandContextSource } from './host/commands.js';
 import { SubagentThreadRuntime } from './host/subagents.js';
 import { buildProjectStateProjection } from './host/projections.js';
 import { buildTools, type ToolContextSource } from './host/tools.js';
+import type { ApprovalAction } from './types.js';
 import type {
   HostCommands,
   HostContext,
@@ -72,6 +73,14 @@ export interface ProjectBetaConfig {
    * several Harness profiles that should not share a budget.
    */
   quotaLedgerPath?: string;
+  /**
+   * Irreversible git actions that need a human sign-off in every project this plugin serves.
+   *
+   * Empty by default, which keeps the documented behaviour: threads push and open pull requests
+   * on their own. Listing an action makes the engine refuse it until it is approved per thread,
+   * and makes thread prompts stop before it and ask.
+   */
+  requireApprovalFor?: ApprovalAction[];
 }
 
 /**
@@ -104,6 +113,7 @@ function createRuntime(options: {
   runner: ReturnType<typeof createCommandRunner>;
   threads: ThreadRuntime;
   quotaLedgerPath?: string;
+  requireApprovalFor?: ApprovalAction[];
   /**
    * Where to send state snapshots. Supplied once `sessions` is available; absent until then
    * and in tests, which is why publishing is a no-op rather than an error.
@@ -127,6 +137,8 @@ function createRuntime(options: {
       runner: options.runner,
       threads: options.threads,
       ...(options.quotaLedgerPath === undefined ? {} : { quotaLedgerPath: options.quotaLedgerPath }),
+      ...(options.requireApprovalFor === undefined ? {} : { requireApprovalFor: options.requireApprovalFor }),
+      ...(options.requireApprovalFor === undefined ? {} : { requireApprovalFor: options.requireApprovalFor }),
     });
     if (publisher !== undefined) engine.setStatePublisher(publisher);
     engines.set(root, engine);
@@ -193,6 +205,7 @@ export function apply(ctx: HostContext, config: ProjectBetaConfig = {}): void {
     runner: createCommandRunner(subprocess),
     threads,
     ...(config.quotaLedgerPath === undefined ? {} : { quotaLedgerPath: config.quotaLedgerPath }),
+    ...(config.requireApprovalFor === undefined ? {} : { requireApprovalFor: config.requireApprovalFor }),
   });
   ctx.effect(() => runtime.dispose);
 

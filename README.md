@@ -70,6 +70,7 @@ cmd /c mklink /J "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-newp
 /project drop                 # 丢弃建议列表
 /project pause <原因>          # 停下一切：不起新线程、不巡检、不交付，活跃线程被中断
 /project resume               # 撤销暂停，被中断的线程仍可继续
+/project thread <id> approve push|pr|merge   # 放行被 requireApprovalFor 门住的动作
 /project knowledge            # 知识层状态：文档数、字符数、绑定路径
 /project knowledge add <path> [path...]   # 绑定文件或目录
 /project knowledge rm <path>  # 解绑
@@ -144,7 +145,7 @@ docs/              GAPS.md（差距登记簿）· REVIEW-REQUEST.md ·
                    REVIEW-RESPONSE.md / REVIEW-RESPONSE-2.md（外部复核，两轮）
 ```
 
-共 **375 项测试**（`node:test`）。除集成测试外全部跑在内存 fake 上，不需要 git 或真实子会话。
+共 **406 项测试**（`node:test`）。除集成测试外全部跑在内存 fake 上，不需要 git 或真实子会话。
 
 `src/core/` **不 import 任何 `@deepseek-ai/dsh-*`**：外部插件解析不到 Host 内部包。
 Git 与 `gh` 一律经 `CommandRunner` 端口调用，因此 SSH / 容器部署时命令在正确机器上执行。

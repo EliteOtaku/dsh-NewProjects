@@ -9,6 +9,7 @@
  */
 
 import type { ProjectEngine } from '../core/engine.js';
+import type { ApprovalAction } from '../types.js';
 import { describeThread } from '../core/engine.js';
 import type { ThreadAction } from '../core/engine.js';
 import { describeError, isProjectError } from '../core/errors.js';
@@ -295,6 +296,16 @@ export function buildProjectCommand(source: CommandContextSource): CommandDef {
             if (threadId.length === 0) return { kind: 'error', text: 'usage: `/project thread <id> [action] [text]`' };
             const inner = splitVerb(tail);
             const action = inner.verb === 'overview' || inner.verb.length === 0 ? 'inspect' : inner.verb;
+            if (action === 'approve') {
+              if (inner.rest.length === 0) {
+                return { kind: 'error', text: `usage: \`/project thread <id> approve <push|pr|merge|force-push>\`` };
+              }
+              const approved = await engine.approve(
+                threadId,
+                inner.rest.split(/\s+/)[0] as ApprovalAction,
+              );
+              return { kind: 'success', text: `approved ${inner.rest.trim()} for ${threadId}\n${describeThread(approved)}` };
+            }
             if (action === 'deliver') {
               const delivered = await engine.deliverThread(threadId, inner.rest.length === 0 ? {} : { body: inner.rest });
               return { kind: 'success', text: delivered.message };

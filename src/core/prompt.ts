@@ -22,7 +22,7 @@ import {
   type KnowledgeIndex,
   type KnowledgeState,
 } from './knowledge.js';
-import type { ProjectManifest, ProjectThreadDescriptor } from '../types.js';
+import type { ApprovalAction, ProjectManifest, ProjectThreadDescriptor } from '../types.js';
 
 /**
  * Budget for project instructions, in characters.
@@ -131,6 +131,14 @@ export function renderThreadTask(
     worktreePath?: string;
     /** Shared-memory keys this thread must treat as binding. */
     memoryKeys?: readonly string[];
+    /**
+     * Actions this project wants a human to sign off on.
+     *
+     * When a publishing action is in the list the finish instructions change shape: the thread
+     * must stop *before* it and say what it needs, because nothing inside a subagent can block
+     * on a human.
+     */
+    approvals?: readonly ApprovalAction[];
   } = {},
 ): string {
   const blocks: string[] = [];
@@ -153,12 +161,20 @@ export function renderThreadTask(
     blocks.push(`- binding decisions: ${options.memoryKeys.map((key) => `\`${key}\``).join(', ')}`);
   }
   blocks.push('');
+  const gated = options.approvals ?? [];
+  const gatedPush = gated.includes('push') || gated.includes('pr');
   blocks.push('## How to finish');
   blocks.push('');
   blocks.push('1. Implement the task in your scope.');
-  blocks.push('2. Run the project\'s own verification (tests, typecheck, lint) for the code you touched.');
+  blocks.push('2. Run the project verification (tests, typecheck, lint) for the code you touched.');
   blocks.push('3. Commit the work on your branch with a message that states what changed and why.');
-  if (thread.branch !== undefined) {
+  if (thread.branch !== undefined && gatedPush) {
+    // Nothing inside a subagent can block on a human, so the gate has to be a stop: the thread
+    // ends its turn with the request and the coordinator asks the user. Telling it to "wait for
+    // approval" without a place to wait would just make it push anyway.
+    blocks.push(`4. **Stop before publishing.** This project asks for sign-off, so do not run \`git push\` or \`gh pr create\`. End your turn with the commit hash, the verification you ran, and one line: approve push and open a PR for ${thread.branch}.`);
+    blocks.push('5. If you are sent an approval message, then push and open the pull request and report its URL.');
+  } else if (thread.branch !== undefined) {
     blocks.push(`4. Push the branch and open a pull request: \`git push -u origin ${thread.branch}\` then \`gh pr create --head ${thread.branch} --fill\`.`);
     blocks.push('5. Report the pull request URL and the verification you ran.');
   } else {

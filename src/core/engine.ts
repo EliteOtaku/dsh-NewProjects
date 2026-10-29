@@ -19,7 +19,15 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { describeError, isProjectError, ProjectError } from './errors.js';
 import { CommandError } from './exec.js';
 import type { CommandRunner } from './exec.js';
-import { decideHealAction, failureSignature, mergeSnapshot, toCheckStates, toReviewComments, type HealAction } from './healing.js';
+import {
+  buildHealPrompt,
+  decideHealAction,
+  failureSignature,
+  mergeSnapshot,
+  toCheckStates,
+  toReviewComments,
+  type HealAction,
+} from './healing.js';
 import {
   buildIndex,
   MAX_KNOWLEDGE_FILES,
@@ -58,6 +66,7 @@ import { QuotaLedger, defaultQuotaLedgerPath, type QuotaLedgerState } from './qu
 import { systemClock, systemIds, dayKey } from './util.js';
 import type { Clock, IdFactory } from './util.js';
 import type {
+  ApprovalAction,
   CoordinateResult,
   OverviewBucket,
   PlanOrigin,
@@ -120,6 +129,14 @@ export interface EngineDeps {
    * couple test cases to each other.
    */
   quotaLedgerPath?: string;
+  /**
+   * Irreversible git actions that need human sign-off in this project.
+   *
+   * Defaults to empty, which keeps the original behaviour: threads push and open pull requests
+   * on their own. When an action is listed, the engine refuses to perform it until
+   * {@link ProjectEngine.approve} records a grant, and thread prompts stop before it and ask.
+   */
+  requireApprovalFor?: readonly ApprovalAction[];
 }
 
 /** Options accepted by {@link ProjectEngine.init}. */
@@ -191,6 +208,9 @@ export interface HealSweepResult {
 }
 
 /** Thread-management verbs exposed to the model and the `/project` command. */
+/** Actions that can be gated on human sign-off. */
+export const APPROVAL_ACTIONS: readonly ApprovalAction[] = ['push', 'pr', 'merge', 'force-push'];
+
 export type ThreadAction =
   | 'inspect'
   | 'steer'
@@ -208,6 +228,8 @@ export type ThreadAction =
 /** The orchestration core. */
 export class ProjectEngine {
   readonly store: ManifestStore;
+  /** Actions this project gates on human sign-off; empty means the original behaviour. */
+  private readonly requireApprovalFor: ApprovalAction[];
   private readonly runner: CommandRunner;
   private readonly threads: ThreadRuntime;
   private readonly clock: Clock;
@@ -249,6 +271,7 @@ export class ProjectEngine {
     this.clock = deps.clock ?? systemClock;
     this.ids = deps.ids ?? systemIds;
     this.watermarks = deps.memoryWatermarks ?? new Map();
+    this.requireApprovalFor = [...(deps.requireApprovalFor ?? [])];
     this.store = new ManifestStore(rootDir, this.clock);
     this.ledger = new QuotaLedger(deps.quotaLedgerPath ?? defaultQuotaLedgerPath());
   }
@@ -891,6 +914,7 @@ export class ProjectEngine {
     const promptText = renderThreadTask(descriptor, {
       ...(worktreePath === undefined ? {} : { worktreePath }),
       ...(options.memoryKeys === undefined ? {} : { memoryKeys: options.memoryKeys }),
+      ...(this.requireApprovalFor.length === 0 ? {} : { approvals: this.requireApprovalFor }),
     });
 
     let handle: ThreadHandle;
@@ -1147,6 +1171,7 @@ export class ProjectEngine {
           throw new ProjectError('INVALID_INPUT', `${threadId} has no pull request to merge`, { threadId });
         }
         await this.refuseWhilePaused('merge a pull request');
+        this.assertApproved(thread, ['merge'], 'merging this pull request');
         await this.checkoutFor(thread);
         await this.threads.resume(parent, thread.childSessionId, renderMergeRequest(thread, { prUrl }), signal);
         this.live.set(thread.childSessionId, threadId);
@@ -1415,7 +1440,13 @@ export class ProjectEngine {
       threadTitle: thread.title,
       prRef,
     };
-    const action = decideHealAction(input);
+    const decision = decideHealAction(input);
+    // The gate has to reach the healing prompt too, otherwise the one turn most likely to push
+    // is the one turn that skipped the approval.
+    const action =
+      decision.kind === 'heal' && this.requireApprovalFor.includes('push')
+        ? { ...decision, prompt: buildHealPrompt(input, snapshot.checks.filter((check) => check.conclusion === 'fail'), snapshot.comments.filter((comment) => !snapshot.consumedCommentIds.includes(comment.id)), undefined, this.requireApprovalFor) }
+        : decision;
 
     if (action.kind === 'transition') {
       await this.updateThread(thread.threadId, (draft) => {
@@ -1610,7 +1641,10 @@ export class ProjectEngine {
       );
       if (globalWarning !== undefined) collected.push(globalWarning);
     }
-    const overview = buildOverview(manifest, this.clock.now(), collected, options);
+    const overview = buildOverview(manifest, this.clock.now(), collected, {
+      ...options,
+      ...(this.requireApprovalFor.length === 0 ? {} : { approvalsRequired: this.requireApprovalFor }),
+    });
     if (global === undefined) return overview;
     return { ...overview, quota: { ...overview.quota, global: { created: global.created, max: global.max } } };
   }
@@ -1682,6 +1716,48 @@ export class ProjectEngine {
    * Read-only actions stay available: a user who paused the project to answer a question or
    * close a thread should not have to resume first.
    */
+  /** Actions this project gates on human sign-off. */
+  approvalsRequired(): ApprovalAction[] {
+    return [...this.requireApprovalFor];
+  }
+
+  /**
+   * Record a human sign-off for one action on one thread.
+   *
+   * Grants live on the descriptor rather than in a turn-scoped variable: a permission that
+   * vanished on reload would be asked for again after every restart, and a prompt people have
+   * to answer repeatedly is a prompt they learn to answer without reading.
+   */
+  async approve(threadId: string, action: ApprovalAction, approver = 'user'): Promise<ProjectThreadDescriptor> {
+    const thread = await this.requireThread(threadId);
+    if (!APPROVAL_ACTIONS.includes(action)) {
+      throw new ProjectError('INVALID_INPUT', `unknown approval action \`${action}\`; expected one of ${APPROVAL_ACTIONS.join(', ')}`, { threadId, action });
+    }
+    return this.updateThread(threadId, (draft) => {
+      draft.approvals = { ...draft.approvals, [action]: this.clock.now() };
+      draft.note = `approved ${action} by ${approver}`;
+      draft.updatedAt = this.clock.now();
+    }).then(() => this.requireThread(thread.threadId));
+  }
+
+  /**
+   * Refuse a gated action until every required grant is present.
+   *
+   * Refusing rather than proceeding-with-a-warning is the point: the action is irreversible, so
+   * a missing grant has to be an error the caller can see, not a footnote in a log.
+   */
+  private assertApproved(thread: ProjectThreadDescriptor, actions: readonly ApprovalAction[], verb: string): void {
+    const missing = actions.filter(
+      (action) => this.requireApprovalFor.includes(action) && thread.approvals?.[action] === undefined,
+    );
+    if (missing.length === 0) return;
+    throw new ProjectError(
+      'APPROVAL_REQUIRED',
+      `${verb} needs sign-off for ${missing.join(' + ')}; ask the user, then run \`/project thread ${thread.threadId} approve ${missing[0] ?? ''}\``,
+      { threadId: thread.threadId, missing },
+    );
+  }
+
   private async refuseWhilePaused(action: string): Promise<void> {
     const manifest = await this.requireManifest();
     if (manifest.pausedAt === undefined) return;
@@ -1709,6 +1785,7 @@ export class ProjectEngine {
       warnings: overview.warnings,
       memories: overview.memories,
       ...(overview.paused === undefined ? {} : { paused: overview.paused }),
+      ...(overview.approvalsRequired === undefined ? {} : { approvalsRequired: overview.approvalsRequired }),
       knowledge: knowledge === undefined ? undefined : {
         docs: knowledge.state.docs,
         chunks: knowledge.state.chunks,
@@ -1809,6 +1886,7 @@ export class ProjectEngine {
   ): Promise<{ thread: ProjectThreadDescriptor; prRef?: string; message: string }> {
     await this.refuseWhilePaused('deliver a thread');
     const thread = await this.requireThread(threadId);
+    this.assertApproved(thread, ['push', 'pr'], 'delivering this thread');
     const cwd = await this.checkoutFor(thread);
     const commit = await commitAll(this.runner, {
       cwd,

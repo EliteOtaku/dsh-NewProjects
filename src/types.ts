@@ -13,6 +13,14 @@
  * being renamed to `idle`: it is already on disk in every existing manifest, and the
  * rename would buy nothing a comment does not. It maps to the panel's `idle` bucket.
  */
+/**
+ * An irreversible git action a project may require human sign-off for.
+ *
+ * Chosen from OFFICIAL's own list ("Don't merge, force-push, or change CI configuration without
+ * asking me") plus the two steps that put work in front of other people (`push`, `pr`).
+ */
+export type ApprovalAction = 'push' | 'pr' | 'merge' | 'force-push';
+
 export type ThreadStatus =
   | 'queued'
   | 'running'
@@ -137,6 +145,14 @@ export interface ProjectThreadDescriptor {
    * after the bytes are gone.
    */
   outputs?: ProjectOutputFile[];
+  /**
+   * Human sign-offs granted for this thread, keyed by action.
+   *
+   * Recorded on the descriptor so a grant survives a restart and is visible in the overview: a
+   * permission that lives only in one turn's memory would have to be asked for again after every
+   * reload, which is exactly how people learn to click "approve" without reading.
+   */
+  approvals?: Record<string, number>;
   /** When `outputs` was last recorded. */
   outputsAt?: number;
   /** Last observed CI/review snapshot. */
@@ -360,6 +376,13 @@ export interface ProjectOverview {
   };
   /** Present only while the project is paused; carries the reason given at pause time. */
   paused?: { since: number; reason?: string };
+  /**
+   * Irreversible actions this project will not perform without a human sign-off.
+   *
+   * Absent when nothing is gated, which is the default: an empty array would suggest the
+   * project has a gate and it is simply closed.
+   */
+  approvalsRequired?: ApprovalAction[];
   /**
    * Files threads produced, deduplicated by path.
    *

@@ -252,7 +252,7 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
   const manage: HostToolDefinition = {
     name: 'project_thread_manage',
     description:
-      'Inspect or intervene in one background thread. `respond` answers a thread that is waiting for a human decision and restarts it; `steer` adds mid-course guidance to a live thread; `retry` resumes a stopped thread on its existing branch; `deliver` commits, pushes, and opens a pull request; `heal` polls CI and review comments and fixes them; `unwatch` stops polling a thread for CI and review state while keeping its branch, pull request, and record; `watch` resumes that polling. `start` launches threads from the proposed plan (all of them, or the 1-based `indices` given); `drop` discards that plan.',
+      'Inspect or intervene in one background thread. `respond` answers a thread that is waiting for a human decision and restarts it; `steer` adds mid-course guidance to a live thread; `retry` resumes a stopped thread on its existing branch; `deliver` commits, pushes, and opens a pull request; `heal` polls CI and review comments and fixes them; `unwatch` stops polling a thread for CI and review state while keeping its branch, pull request, and record; `watch` resumes that polling; `approve` records a human sign-off for one gated action (`push`, `pr`, `merge`, `force-push`) in projects configured to require it. `start` launches threads from the proposed plan (all of them, or the 1-based `indices` given); `drop` discards that plan.',
     parameters: {
       type: 'object',
       properties: {
@@ -278,10 +278,16 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
             'merge',
             'conflicts',
             'review',
+            'approve',
           ],
           description: 'What to do. Defaults to list.',
         },
         message: { type: 'string', description: 'The message for steer/respond, or the PR body/title text for deliver.' },
+        approval: {
+          type: 'string',
+          enum: ['push', 'pr', 'merge', 'force-push'],
+          description: 'For action "approve": the gated action you are signing off on.',
+        },
         indices: {
           type: 'array',
           description: 'For action "start": 1-based positions from the proposed plan. Omit to start all of them.',
@@ -297,6 +303,7 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
         const action = readString(args, 'action') ?? 'list';
         const threadId = readString(args, 'threadId');
         const message = readString(args, 'message');
+        const approval = readString(args, 'approval');
 
         if (action === 'list') {
           const threads = await engine.listThreads();
@@ -344,6 +351,25 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
         if (action === 'deliver') {
           const delivered = await engine.deliverThread(threadId, message === undefined ? {} : { body: message });
           return { ok: true, prRef: delivered.prRef, message: delivered.message, thread: delivered.thread };
+        }
+        if (action === 'approve') {
+          if (threadId === undefined) {
+            return { ok: false, code: 'INVALID_INPUT', message: 'approve needs a threadId' };
+          }
+          if (
+            approval !== 'push' &&
+            approval !== 'pr' &&
+            approval !== 'merge' &&
+            approval !== 'force-push'
+          ) {
+            return {
+              ok: false,
+              code: 'INVALID_INPUT',
+              message: 'approve needs an approval action: push, pr, merge, or force-push',
+            };
+          }
+          const approved = await engine.approve(threadId, approval);
+          return { ok: true, message: `approved ${approval} for ${threadId}`, thread: approved };
         }
         if (
           action === 'inspect' ||

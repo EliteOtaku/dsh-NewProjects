@@ -73,7 +73,7 @@
 | **P1** | 会静默产出错误结果 | ~~`GAP-23`~~ ✅ ~~`GAP-24`~~ ✅（`GAP-22` / `GAP-22a` 已关闭）—— **P1 已清空** |
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | ~~`GAP-03`~~ ✅ ~~`GAP-04`~~ ✅ ~~`GAP-05`~~ ✅（2026-10-29 关闭） |
 | **P3** | 官方有、我们无，独立功能 | `GAP-06` `GAP-09` `GAP-13` `GAP-29`（`GAP-10` / `GAP-11` / `GAP-12` 已于 2026-10-29 关闭） |
-| **P4** | 项目管理类，缺了不能「管起来」 | `GAP-15` `GAP-17` `GAP-18` `GAP-28`（`GAP-14`/`GAP-25` 已于 2026-10-29 关闭） |
+| **P4** | 项目管理类，缺了不能「管起来」 | `GAP-15` `GAP-17` `GAP-28`（`GAP-14`/`GAP-18`/`GAP-25` 已于 2026-10-29 关闭） |
 | **P5** | 磁盘、性能与健壮性，不出错 | `GAP-20` `GAP-27`（`GAP-19` 已于 2026-10-29 关闭） |
 | **ARCH** | 架构性差异，记录不排期 | `GAP-A1` ~ `GAP-A4` |
 | **BOUND** | 有意为之的边界，非缺陷 | `BOUND-1` ~ `BOUND-4` |
@@ -520,25 +520,35 @@
 - **做法**：descriptor 加 `deadlineAt`；`healSweep` 检查超时并 `interrupt` + 置 `needs_feedback`（**不是 `failed`** —— 超时是「没跑完」，不是「跑失败」）。
 - **验收标准**：超时线程被中断且状态可解释；不误杀长任务（阈值可配，默认足够宽）。
 
-### GAP-18 未接入审批（需按 DSH 的授权模型改写）
+### GAP-18 未接入审批 — ✅ 已做
 
 - **依据**：`OFFICIAL`「When a thread needs your approval, the prompt is **inside that thread** and the thread waits until you answer it **there**. Telling Claude in the project conversation to go ahead **doesn't reach it**.」+「Threads run in **auto mode**」+「Don't **merge**, **force-push**, or **change CI configuration** without asking me in the thread.」
-- **现状**：线程自己 push、自己开 PR，不请求审批（`grep -rn "approval" src/` 返回空）。
 - **⚠️ 关键约束：官方那种「在线程内阻塞等人」在 DSH 上做不到。** 已核实两个 Host 服务：
   - `userQuestions.ask(req)` 在 `agent` 被别的 agent 拥有时直接抛 **`DELEGATED_CALLER`**，且要求是注册表里的**精确 live root**（否则 `CALLER_NOT_LIVE`）——**子线程没有人类应答者，问不了人**；
   - `approval.request(req)` 要求 `toolName`（它是给**单次工具调用**做门的），且**必须有 open turn**，否则直接拒绝。
-- **所以必须改译为「根会话问人、线程执行」**：
-  1. 线程在需要放行时 **结束本轮**并把「我要做 X，需要批准」写进结束消息（走现有 `needs_feedback` 通道，这是 DSH 上唯一能挂起等人又不阻塞的做法）；
-  2. 协调者（根会话）用 `userQuestions.ask` 问人（它才是 live root，有应答者）；
-  3. 拿到答案后 `sendMessage` 给线程继续。
-  - 语义与官方等价（球在人手上、线程等着），**落点不同**（官方的「线程内阻塞」改为「线程结束 + 根会话代问」）。
-- **本地的额外优势，应当利用**：官方云线程**不读** `.claude/settings.json` 的权限规则（"Not applied"），只能靠 auto mode + 线程内逐次批准。我们在本地**可以**接 DSH 自己的权限体系（`approval.setPolicy` / `tools.guard`），这是相对官方的一个真实优势。
-- **做法**：配置项 `requireApprovalFor: ('push'|'pr'|'merge'|'force-push')[]`，**默认空数组**（保持当前行为）。非空时按上面三步走。
-- **验收标准**：
-  1. 默认行为不变（不引入审批往返）；
-  2. 开启后 push 前线程转 `needs_feedback`，协调者收到可答问题；
-  3. 拒绝时状态可解释（不是卡在 `running`）；
-  4. 不试图在子线程里调用 `userQuestions.ask`（有测试断言不会抛 `DELEGATED_CALLER`）。
+- **改译结果：「人放行 + 宿主执行」，不是「线程内阻塞」。** 线程不阻塞在任何东西上；放行记录落在 `thread.approvals`，宿主在**自己动手的那一刻**检查它。
+
+#### 实际做法（2026-10-29 落地）
+
+1. **配置项 `requireApprovalFor: ApprovalAction[]`**（`ApprovalAction = 'push' | 'pr' | 'merge' | 'force-push'`，`src/types.ts`），默认**空数组**，行为与从前完全一致。
+2. **放行记录挂在线程描述符上**：`ProjectThreadDescriptor.approvals?: Partial<Record<ApprovalAction, number>>`，值是**时间戳**不是布尔——和 `pausedAt` 同一个理由：要能回答「什么时候批的」，且跨重启跨进程仍在。
+3. **宿主在动作前检查，不靠线程自觉**：`engine.assertApproved(thread, actions, verb)` 只对 `requireApprovalFor` 里列出的动作生效，缺失时抛 `APPROVAL_REQUIRED`，消息点名**清掉它的那条命令**：``/<id> approve push``。检查点：`deliverThread` 的 push 与 pr（`assertApproved(thread, ['push'], 'push')` / `['pr']`）、`manageThread('merge')` 的 merge。
+4. **重试不会重新扣一次审批**：`push` 通过后 `pr` 仍需单独放行——两个动作是两件事（推分支可以，公开 PR 不行）。
+5. **线程被提前告知**：`renderThreadTask` 在 `approvals` 非空时插入 `Stop before publishing` 段，说明哪些动作被门住、以及**不要自己跑 `gh pr merge`**；`buildHealPrompt` 同样在自愈轮带上。理由：让线程撞一次硬错误再重试，比先告诉它贵。
+6. **面板与命令两条出口**：`overviewJson().approvalsRequired` 与 markdown 的 `sign-off required before: push, pr` 说明当前口径；`/project thread <id> approve <action>` 与工具 `project_thread_manage` 的 `approve` 动作都能放行。
+
+#### 为什么不按原计划让线程转 `needs_feedback`
+
+原方案要求「线程结束本轮、把请求写进结束消息」。实现时发现它有个更差的后果：**线程在等放行时已经做完了工作，转 `needs_feedback` 会把它从 `awaiting_review` 打回人的队列，而 PR 其实已经开好了**；人批准后还得再唤醒一轮才能继续。改成「宿主检查 + 记录放行」后，同一个线程状态不变，人批准是**一步**而不是两轮往返。球仍在人手上（没人批就不 push、不开 PR、不合），成本更低。
+
+#### 验收（全部有测试）
+
+1. 默认行为不变：`keeps the original behaviour when nothing is gated`（未配置时交付一次通过、零审批往返）。
+2. 开启后未放行一律拒绝并给出可执行命令：`refuses to publish until push and pr are approved, and says how`（拒绝时 `git push` 从未发生；逐项放行后交付成功）。
+3. 放行按动作独立：`gates merging separately from publishing`（`requireApprovalFor: ['merge']` 时交付照常、`merge` 被拒；放行后转 `landing`）。
+4. 非法动作不被静默记录：`rejects an unknown approval action instead of recording it`。
+5. 线程被提前告知、面板口径可见：`tells a fresh thread to stop before publishing, and the panel says what is gated`。
+6. 不在子线程里调用 `userQuestions.ask`（有测试断言不会抛 `DELEGATED_CALLER`）：宿主侧**没有任何** `userQuestions` 调用，`grep -rn userQuestions src/` 为空——这条约束靠「根本不写」保证，而不是靠运行期捕获。
 
 ### GAP-25 heal prompt 没禁止 force-push 与改 CI 配置 — ✅ 已做
 
@@ -749,7 +759,7 @@
 | **第一批 让输出可信** | `GAP-01` 全局配额 ✅ + `GAP-22` 知识 paths-first ✅ | 无 | 2026-10-27 `9c7ef10`：`GAP-01` 关闭，`GAP-22` 的减法做完（确实净减）；2026-10-29：`GAP-22a`（路径锚定项目根）关闭 —— **第一批完成** |
 | **第二批 让拆解可信** | `GAP-26` 模型优先拆解 + Suggested threads ✅ | 无（可与一批并行） | 后者是前者的保险，必须同批。2026-10-29 关闭 —— **第二批完成** |
 | **第三批 让报回可用** | `GAP-03` 投影 ✅ + `GAP-04` 六分组 ✅ + `GAP-05` 终态 ✅ + `GAP-10` Library ✅ + `GAP-11` PR 聚合 ✅ | 03 与 04 **可同批**（原判断的串行约束不成立） | 2026-10-29 全部关闭 —— **第三批完成** |
-| **第四批 让裁定可用** | ~~`GAP-12` 卡片动作~~ ✅ + ~~`GAP-25` 禁令~~ ✅ + ~~`GAP-19` worktree 回收~~ ✅ + `GAP-18` 审批 + ~~`GAP-14` Pause~~ ✅ | 19 依赖 10（先有清单再删目录）| **不可逆动作（19）与它的防护同批**，不推到最后。`GAP-12`/`GAP-25`/`GAP-19`/`GAP-14` 已于 2026-10-29 完成 |
+| **第四批 让裁定可用** ✅ | ~~`GAP-12` 卡片动作~~ ✅ + ~~`GAP-25` 禁令~~ ✅ + ~~`GAP-19` worktree 回收~~ ✅ + ~~`GAP-18` 审批~~ ✅ + ~~`GAP-14` Pause~~ ✅ | 19 依赖 10（先有清单再删目录）| **整批已于 2026-10-29 完成**。不可逆动作（19）与它的防护（18/25）同批，没有推到最后一刻 |
 | **第五批 减少重复交代** | `GAP-06` goal + `GAP-09` 仓库约定 + `GAP-29` 三件套 | 无 | |
 | **第六批 卫生** | `GAP-13` Usage + `GAP-15` Archive + `GAP-17` 超时 + `GAP-20` purge + `GAP-27` 锁重试 | 无 | |
 | **按需** | `GAP-28` 并发偏好 | 无 | ~~`GAP-23`~~ ✅ 已于 2026-10-29 提前做完 |

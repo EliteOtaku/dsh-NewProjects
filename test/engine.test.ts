@@ -15,8 +15,10 @@ import { after, describe, it } from 'node:test';
 
 const test = it;
 
+import type { ApprovalAction } from '../src/types.js';
 import { ProjectEngine } from '../src/core/engine.js';
 import { isProjectError } from '../src/core/errors.js';
+import { renderOverviewMarkdown } from '../src/core/overview.js';
 import { PROJECT_DIR } from '../src/core/manifest.js';
 import { dayKey } from '../src/core/util.js';
 import type { ProjectManifest } from '../src/types.js';
@@ -44,7 +46,7 @@ async function freshRoot(): Promise<string> {
 }
 
 /** Build an engine over a fresh temp root. */
-async function harness(): Promise<{
+async function harness(extra: { requireApprovalFor?: ApprovalAction[] } = {}): Promise<{
   engine: ProjectEngine;
   runner: FakeRunner;
   threads: FakeThreads;
@@ -61,6 +63,7 @@ async function harness(): Promise<{
     clock,
     ids: sequentialIds(),
     quotaLedgerPath: join(root, 'quota-ledger.json'),
+    ...(extra.requireApprovalFor === undefined ? {} : { requireApprovalFor: extra.requireApprovalFor }),
   });
   return { engine, runner, threads, root, clock };
 }
@@ -1332,6 +1335,8 @@ async function awaitingThread(): Promise<{
   assert.ok(branch !== undefined, 'the thread must have its own branch');
 
   const prNumber = 7;
+    // No pull request exists for the branch yet, so delivery is expected to create one.
+    runner.on('gh pr view', { exitCode: 1, stderr: 'no pull requests found for branch' });
   runner.on('gh pr create', { stdout: `https://github.com/acme/demo/pull/${prNumber}\n` });
   runner.on(`gh pr view ${branch}`, {
     stdout: JSON.stringify({
@@ -1486,3 +1491,138 @@ describe('healSweep: manual subscription', () => {
   });
 });
 
+describe('approvals', () => {
+  test('keeps the original behaviour when nothing is gated', async () => {
+    const { engine, runner, threads } = await harness();
+    repoReady(runner);
+    runner.on('git status --porcelain', { stdout: '' });
+    runner.on('gh pr create', { stdout: 'https://github.com/acme/demo/pull/9\n' });
+    await engine.init({ name: 'demo' });
+    const plan = await engine.coordinate(PARENT, '- add a thing', { planOnly: false });
+    const threadId = plan.started[0]?.threadId;
+    assert.ok(threadId !== undefined);
+    assert.deepEqual(engine.approvalsRequired(), []);
+    await engine.deliverThread(threadId);
+    // Nothing was gated, so delivery proceeded without a single approval round.
+    assert.equal(threads.resumes.length, 0);
+  });
+
+  test('refuses to publish until push and pr are approved, and says how', async () => {
+    const { engine, runner } = await harness({ requireApprovalFor: ['push', 'pr'] });
+    repoReady(runner);
+    runner.on('git status --porcelain', { stdout: ' M src/a.ts\n' });
+    runner.on('git add', { exitCode: 0 });
+    runner.on('git commit', { stdout: '[main abc1234] feat\n' });
+    // First read is the pre-check (no pull request yet); after `gh pr create` the read-back has
+    // to answer, otherwise delivery treats the pull request it just made as unreadable.
+    runner.onCommand('gh pr view', (spec) => {
+      // Nothing exists before the PR is created; after it, the read-back has to answer.
+      if (!runner.saw('gh pr create')) return { exitCode: 1, stderr: 'no pull requests found for branch' };
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 9,
+          url: 'https://github.com/acme/demo/pull/9',
+          state: 'OPEN',
+          isDraft: false,
+          headRefName: spec.argv[3] ?? '',
+          reviewDecision: '',
+          mergeable: 'MERGEABLE',
+        }),
+      };
+    });
+    runner.on('gh pr create', { stdout: 'https://github.com/acme/demo/pull/9\n' });
+    await engine.init({ name: 'demo' });
+    const plan = await engine.coordinate(PARENT, '- add a thing', { planOnly: false });
+    const threadId = plan.started[0]?.threadId;
+    assert.ok(threadId !== undefined);
+    await assert.rejects(
+      () => engine.deliverThread(threadId),
+      (error: unknown) => {
+        assert.ok(isProjectError(error));
+        assert.equal(error.code, 'APPROVAL_REQUIRED');
+        // A refusal nobody can resolve is a dead end, so it names the command that clears it.
+        assert.match(error.message, /\/project thread .* approve push/);
+        return true;
+      },
+    );
+    // Nothing was published while the gate was closed.
+    assert.equal(runner.saw('git push'), false);
+    await engine.approve(threadId, 'push');
+    await assert.rejects(
+      () => engine.deliverThread(threadId),
+      (error: unknown) => isProjectError(error) && error.code === 'APPROVAL_REQUIRED',
+    );
+    await engine.approve(threadId, 'pr');
+    const delivered = await engine.deliverThread(threadId);
+    assert.ok(delivered.prRef !== undefined);
+    assert.equal(runner.saw('git push'), true);
+  });
+
+  test('gates merging separately from publishing', async () => {
+    const { engine, runner, threads } = await harness({ requireApprovalFor: ['merge'] });
+    repoReady(runner);
+    runner.on('git status --porcelain', { stdout: ' M src/b.ts\n' });
+    runner.on('git add', { exitCode: 0 });
+    runner.on('git commit', { stdout: '[main abc1234] feat\n' });
+    // First read is the pre-check (no pull request yet); after `gh pr create` the read-back has
+    // to answer, otherwise delivery treats the pull request it just made as unreadable.
+    runner.onCommand('gh pr view', (spec) => {
+      // Nothing exists before the PR is created; after it, the read-back has to answer.
+      if (!runner.saw('gh pr create')) return { exitCode: 1, stderr: 'no pull requests found for branch' };
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 3,
+          url: 'https://github.com/acme/demo/pull/3',
+          state: 'OPEN',
+          isDraft: false,
+          headRefName: spec.argv[3] ?? '',
+          reviewDecision: '',
+          mergeable: 'MERGEABLE',
+        }),
+      };
+    });
+    runner.on('gh pr create', { stdout: 'https://github.com/acme/demo/pull/3\n' });
+    await engine.init({ name: 'demo' });
+    const plan = await engine.coordinate(PARENT, '- add a thing', { planOnly: false });
+    const threadId = plan.started[0]?.threadId;
+    assert.ok(threadId !== undefined);
+    // Publishing is not gated here, so this path also proves the gate is per action.
+    await engine.deliverThread(threadId);
+    await assert.rejects(
+      () => engine.manageThread(PARENT, threadId, 'merge', undefined, AbortSignal.timeout(1_000)),
+      (error: unknown) => isProjectError(error) && error.code === 'APPROVAL_REQUIRED',
+    );
+    assert.equal(threads.resumes.length, 0);
+    await engine.approve(threadId, 'merge');
+    const merged = await engine.manageThread(PARENT, threadId, 'merge', undefined, AbortSignal.timeout(1_000));
+    assert.equal(merged.thread.status, 'landing');
+  });
+
+  test('rejects an unknown approval action instead of recording it', async () => {
+    const { engine, runner } = await harness({ requireApprovalFor: ['push'] });
+    repoReady(runner);
+    await engine.init({ name: 'demo' });
+    const plan = await engine.coordinate(PARENT, '- add a thing', { planOnly: false });
+    const threadId = plan.started[0]?.threadId;
+    assert.ok(threadId !== undefined);
+    await assert.rejects(
+      () => engine.approve(threadId, 'everything' as ApprovalAction),
+      (error: unknown) => isProjectError(error) && error.code === 'INVALID_INPUT',
+    );
+  });
+
+  test('tells a fresh thread to stop before publishing, and the panel says what is gated', async () => {
+    const { engine, runner, threads } = await harness({ requireApprovalFor: ['push', 'pr'] });
+    repoReady(runner);
+    await engine.init({ name: 'demo' });
+    await engine.coordinate(PARENT, '- add a thing', { planOnly: false });
+    const prompt = threads.launches[0]?.prompt ?? '';
+    assert.match(prompt, /Stop before publishing/);
+    assert.match(prompt, /approve push and open a PR/);
+    const overview = await engine.overviewJson();
+    assert.deepEqual(overview.approvalsRequired, ['push', 'pr']);
+    assert.match(renderOverviewMarkdown(await engine.overview()), /sign-off required before: push, pr/);
+  });
+});

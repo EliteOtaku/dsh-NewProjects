@@ -21,7 +21,7 @@
  * because at that point the previous round did make progress.
  */
 
-import type { ProjectCheckState, ProjectReviewComment, ProjectReviewSnapshot, ThreadStatus } from '../types.js';
+import type { ApprovalAction, ProjectCheckState, ProjectReviewComment, ProjectReviewSnapshot, ThreadStatus } from '../types.js';
 
 /** Consecutive rounds against an unchanged failure signature before escalating. */
 export const MAX_HEAL_ATTEMPTS = 3;
@@ -135,7 +135,13 @@ export interface HealInput {
 }
 
 /** Render the healing prompt for one round from the observed failure evidence. */
-export function buildHealPrompt(input: HealInput, failures: ProjectCheckState[], comments: ProjectReviewComment[], logExcerpt?: string): string {
+export function buildHealPrompt(
+  input: HealInput,
+  failures: ProjectCheckState[],
+  comments: ProjectReviewComment[],
+  logExcerpt?: string,
+  approvals: readonly ApprovalAction[] = [],
+): string {
   const blocks: string[] = [];
   blocks.push(`Your pull request ${input.prRef} (${input.threadTitle}) needs another pass before it can merge.`);
   blocks.push('');
@@ -166,7 +172,13 @@ export function buildHealPrompt(input: HealInput, failures: ProjectCheckState[],
   blocks.push('1. Reproduce the failure locally in your checkout; do not guess from the log text alone.');
   blocks.push('2. Fix the root cause. Do not weaken, skip, or delete the failing assertion to make it pass.');
   blocks.push('3. Re-run the affected tests and confirm they pass.');
-  blocks.push(`4. Commit and push to your existing branch (${input.prRef} head). Do not open a second pull request: the review history on the same branch is what carries this change to merge.`);
+  const gatedPush = approvals.includes('push');
+  if (gatedPush) {
+    // Same gate as the first turn: the fix is only worth having if a human agreed to publish it.
+    blocks.push(`4. Commit to your existing branch (${input.prRef} head), then **stop before pushing**. This project asks for sign-off, so end your turn stating the commit hash, what you changed, and one line: approve push for ${input.prRef}.`);
+  } else {
+    blocks.push(`4. Commit and push to your existing branch (${input.prRef} head). Do not open a second pull request: the review history on the same branch is what carries this change to merge.`);
+  }
   blocks.push('5. If the requested change contradicts a shared project memory entry or needs a product decision you cannot make, stop and say exactly what needs deciding — do not implement a guess.');
   blocks.push('');
   // Official: "Don't merge, force-push, or change CI configuration without asking me in the

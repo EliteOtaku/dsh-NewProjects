@@ -18,7 +18,9 @@ export type ProjectErrorCode =
   /** Bad caller input that passed JSON-schema validation but is semantically wrong. */
   | 'INVALID_INPUT'
   /** The project is paused — resume it before starting or advancing any thread. */
-  | 'PROJECT_PAUSED';
+  | 'PROJECT_PAUSED'
+  /** This project asks for human sign-off before an irreversible git action. */
+  | 'APPROVAL_REQUIRED';
 
 export class ProjectError extends Error {
   readonly code: ProjectErrorCode;
