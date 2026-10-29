@@ -74,9 +74,9 @@
   | **Ready for review** | "pull request is open and awaiting review" | `awaiting_review` |
   | **Waiting on you** | "need your reply or approval, **or that failed**" | `needs_feedback` + `failed` |
   | **Working** | "still running" | `queued` / `running` / `ci_fixing` |
-  | **Landing** | "approved or **queued to merge**" | 缺（`GAP-04`） |
-  | **Idle** | "finished and **aren't waiting on anything**" | 缺（`GAP-04`） |
-  | **Resolved** | "marked done… or **automatically after a week with no activity**"，**可 reopen** | 缺（`GAP-05`） |
+  | **Landing** | "approved or **queued to merge**" | `landing` |
+  | **Idle** | "finished and **aren't waiting on anything**" | `completed` |
+  | **Resolved** | "marked done… or **automatically after a week with no activity**"，**可 reopen** | `resolved` |
 
   **分组是 state 的投影，不是两层模型。** `bucketOf(status)` 就是那个派生函数；加 `landing` / `idle` / `resolved` 只改它的 case，不需要重构状态枚举，也不需要升 `stateVersion`。**2026-10-29 已按此落地**（六组齐全，`bucketOf` 带优先级）。
 - **`failed` 不单独成组**：官方把它并入 `Waiting on you`（"or that failed"）。分开列会让用户在两个地方找同一件事。
@@ -86,6 +86,8 @@
 > - `sessionProjections` **尚未接入**，目前只有 `project_overview` 工具与 `/project` 命令两种主动拉取表面。见 `GAP-03`。
 >   - **它不再被状态模型阻塞**：投影暴露的是**桶**不是枚举，`bucketOf` 已解耦，两者可同批实现（原判断的串行约束不成立）。**2026-10-29 已实现**：`project-beta/state` 事件 + `projectBeta` 投影键，写入后自动发布。
 > - Overview 另有三个标签页官方有而我们无：**Library**（`GAP-10`）、**Pull requests**（`GAP-11`）、**Scheduled tasks**（未列为差距，见下方第 4 节）。
+>   - **2026-10-29 已补齐前两个**。`Library` 的实现要点：本地没有云端「沙箱消失」的约束，文件本来就在盘上，所以它是**清单 + 按需读取**而**不是存储层** —— `deliverThread` 记 `git diff --name-status --no-renames <base>..<branch>` 进 descriptor（关掉重命名检测，好让旧路径留在清单里），worktree 回收后清单仍在，`read` 现读现取、文件不在就报不可读；`Pull requests` 从各线程最后一次观察快照分组，带 checks 计数与未消费评论数，**面板不自己查 GitHub**（那是自愈巡检的活，面板查会白烧 API 配额）。两者都**没有内容时整个字段不出现**。
+>   - `Scheduled tasks` 明确不做：DSH 已有 `automation_create`，重复实现只会多一套调度器。
 
 ## 3. 暴露接口要求
 

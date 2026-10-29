@@ -80,6 +80,8 @@ function repoReady(runner: FakeRunner): void {
   runner.on('git commit', { exitCode: 0 });
   runner.on('git push', { exitCode: 0 });
   runner.on('git worktree', { exitCode: 0 });
+  // Diff for the Library: the branches these fixtures model changed nothing on their own.
+  runner.on('git diff', { stdout: '' });
 }
 
 describe('init / deinit', () => {
@@ -802,6 +804,112 @@ describe('deliverThread', () => {
       () => engine.deliverThread(threadId),
       (error: unknown) => isProjectError(error) && /already exists/.test(error.message),
     );
+  });
+});
+
+describe('library', () => {
+  /** A project with one started, delivered thread whose branch changed two files. */
+  async function delivered(): Promise<{
+    engine: ProjectEngine;
+    runner: FakeRunner;
+    root: string;
+    threadId: string;
+    worktreePath: string;
+  }> {
+    const { engine, runner, root } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const result = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
+    const threadId = result.started[0]?.threadId ?? '';
+    runner.on('git status --porcelain', { stdout: ' M src/a.ts\n' });
+    runner.on('git commit', { stdout: '[project/demo/1-one abc1234] one\n' });
+    runner.on('git push', { exitCode: 0 });
+    runner.on('gh pr create', { stdout: 'https://github.com/o/r/pull/7\n' });
+    runner.on('gh pr view', {
+      stdout: JSON.stringify({
+        number: 7,
+        url: 'https://github.com/o/r/pull/7',
+        state: 'OPEN',
+        isDraft: false,
+        headRefName: 'project/demo/1-one',
+        reviewDecision: '',
+        mergeable: 'MERGEABLE',
+      }),
+    });
+    runner.on('git diff', { stdout: 'A\tsrc/a.ts\nM\tsrc/b.ts\n' });
+    await engine.deliverThread(threadId);
+    const thread = await engine.requireThread(threadId);
+    return { engine, runner, root, threadId, worktreePath: thread.worktreePath ?? '' };
+  }
+
+  it('records what the branch changed when the thread delivers', async () => {
+    const { engine, threadId } = await delivered();
+    const thread = await engine.requireThread(threadId);
+    assert.deepEqual(thread.outputs, [
+      { path: 'src/a.ts', change: 'added' },
+      { path: 'src/b.ts', change: 'modified' },
+    ]);
+    assert.ok((thread.outputsAt ?? 0) > 0);
+    const files = await engine.library();
+    assert.deepEqual(files.map((row) => row.path), ['src/a.ts', 'src/b.ts']);
+    assert.deepEqual(files[0]?.threads, [threadId]);
+  });
+
+  it('records the outputs even when this call commits nothing', async () => {
+    // The thread may have committed during its own turn; an empty Library would then claim
+    // it produced nothing.
+    const { engine, runner, threadId } = await delivered();
+    runner.on('git status --porcelain', { stdout: '' });
+    const second = await engine.deliverThread(threadId);
+    assert.equal(second.message, 'nothing to commit');
+    const thread = await engine.requireThread(threadId);
+    assert.equal(thread.outputs?.length, 2);
+  });
+
+  it('keeps the previous list when the diff cannot be computed', async () => {
+    // "we could not look" is not "nothing changed": an unreadable range must not wipe rows.
+    const { engine, runner, threadId } = await delivered();
+    runner.on('git status --porcelain', { stdout: '' });
+    runner.on('git diff', { exitCode: 128, stderr: 'fatal: bad revision\n' });
+    await engine.deliverThread(threadId);
+    const thread = await engine.requireThread(threadId);
+    assert.equal(thread.outputs?.length, 2);
+  });
+
+  it('reads a produced file out of the thread worktree', async () => {
+    const { engine, threadId, worktreePath } = await delivered();
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await mkdir(join(worktreePath, 'src'), { recursive: true });
+    await writeFile(join(worktreePath, 'src', 'a.ts'), 'export const a = 1;\n');
+    const result = await engine.readOutputFile('src/a.ts');
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.text, 'export const a = 1;\n');
+      assert.equal(result.source, join(worktreePath, 'src', 'a.ts'));
+    }
+    // Reading through an explicit thread id is the same file, and an unknown id is an error
+    // rather than a silent fallback to some other thread's worktree.
+    const named = await engine.readOutputFile('src/a.ts', threadId);
+    assert.equal(named.ok, true);
+    await assert.rejects(
+      () => engine.readOutputFile('src/a.ts', 'thr-999'),
+      (error: unknown) => isProjectError(error) && error.code === 'THREAD_NOT_FOUND',
+    );
+  });
+
+  it('says a reclaimed worktree is unreadable instead of returning an empty file', async () => {
+    const { engine } = await delivered();
+    const result = await engine.readOutputFile('src/a.ts');
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.reason, /not on disk/);
+  });
+
+  it('reports no library rows before anything was delivered', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    await engine.coordinate(PARENT, '- one', { planOnly: false });
+    assert.deepEqual(await engine.library(), []);
   });
 });
 

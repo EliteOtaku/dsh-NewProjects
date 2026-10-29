@@ -129,12 +129,53 @@ export interface ProjectThreadDescriptor {
    * requests set it automatically; `unwatch` sets it by hand. Cleared by `watch`.
    */
   unwatchAt?: number;
+  /**
+   * Files this thread changed, recorded when it delivered.
+   *
+   * Stored on the descriptor rather than derived on demand: the worktree can be
+   * reclaimed, and the Library has to keep answering "what did this thread produce"
+   * after the bytes are gone.
+   */
+  outputs?: ProjectOutputFile[];
+  /** When `outputs` was last recorded. */
+  outputsAt?: number;
   /** Last observed CI/review snapshot. */
   review?: ProjectReviewSnapshot;
   /** Last error string, for `failed` threads and diagnostics. */
   lastError?: string;
   /** Free-form note shown on the overview panel. */
   note?: string;
+}
+
+/** One file a thread produced, as `git diff` reported it. */
+export interface ProjectOutputFile {
+  /** Path relative to the project root, with forward slashes. */
+  path: string;
+  change: ProjectOutputChange;
+}
+
+/** What happened to a path. */
+export type ProjectOutputChange = 'added' | 'modified' | 'deleted';
+
+/** One Library row: a path, what happened to it, and which threads touched it. */
+export interface ProjectLibraryEntry {
+  path: string;
+  change: ProjectOutputChange;
+  threads: string[];
+}
+
+/** One row of the Pull requests tab. */
+export interface ProjectPullRequestRow {
+  threadId: string;
+  title: string;
+  prRef: string;
+  url?: string;
+  state: ProjectReviewSnapshot['state'];
+  /** Check tallies from the last observation. */
+  checks: { total: number; passing: number; failing: number; pending: number };
+  /** Review comments not yet consumed by a healing round. */
+  newComments: number;
+  observedAt: number;
 }
 
 /** Daily thread-quota ledger. */
@@ -307,6 +348,19 @@ export interface ProjectOverview {
     /** True when at least one thread is waiting on you — the panel's dot. */
     needsAttention: boolean;
   };
+  /**
+   * Files threads produced, deduplicated by path.
+   *
+   * Absent when nothing has been delivered yet: an empty array would claim the Library
+   * exists and is empty, which is a different statement from "no thread has delivered".
+   */
+  library?: ProjectLibraryEntry[];
+  /**
+   * Pull requests opened by threads, grouped by state.
+   *
+   * Absent when no thread has a pull request — same reasoning as `library`.
+   */
+  pullRequests?: Partial<Record<ProjectReviewSnapshot['state'], ProjectPullRequestRow[]>>;
   /** Non-fatal diagnostics worth surfacing to the user. */
   warnings: string[];
 }

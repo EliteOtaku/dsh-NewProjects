@@ -70,6 +70,8 @@ function repoReady(runner: FakeRunner): void {
   runner.on('git branch', { exitCode: 0 });
   // Threads get their own checkout now, so the worktree command must be routed too.
   runner.on('git worktree', { exitCode: 0 });
+  // Diff for the Library: the branches these fixtures model changed nothing on their own.
+  runner.on('git diff', { stdout: '' });
 }
 
 describe('/project verb routing', () => {
@@ -310,5 +312,68 @@ describe('/project without a project record', () => {
     const { engine } = await harness();
     assert.equal((await run(engine, 'init')).kind, 'success');
     assert.equal((await run(engine, 'deinit')).kind, 'success');
+  });
+});
+
+describe('/project library', () => {
+  it('says the library is empty before any thread delivers', async () => {
+    const { engine } = await harness();
+    await engine.init({ name: 'demo' });
+    const result = await run(engine, 'library');
+    assert.equal(result.kind, 'success');
+    assert.match(result.text, /no files yet/);
+  });
+
+  it('lists a produced file with its change and the thread that made it', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const planned = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
+    const threadId = planned.started[0]?.threadId ?? '';
+    runner.on('git status --porcelain', { stdout: ' M src/a.ts\n' });
+    runner.on('git add', { exitCode: 0 });
+    runner.on('git commit', { stdout: '[project/demo/1-one abc1234] one\n' });
+    runner.on('git push', { exitCode: 0 });
+    runner.on('gh pr create', { stdout: 'https://github.com/o/r/pull/7\n' });
+    runner.on('gh pr view', {
+      stdout: JSON.stringify({
+        number: 7,
+        url: 'https://github.com/o/r/pull/7',
+        state: 'OPEN',
+        isDraft: false,
+        headRefName: 'project/demo/1-one',
+        reviewDecision: '',
+        mergeable: 'MERGEABLE',
+      }),
+    });
+    runner.on('git diff', { stdout: 'A\tsrc/a.ts\n' });
+    await engine.deliverThread(threadId);
+
+    const result = await run(engine, 'library');
+    assert.equal(result.kind, 'success');
+    assert.match(result.text, /src\/a\.ts/);
+    assert.match(result.text, /added/);
+    assert.match(result.text, new RegExp(threadId));
+  });
+
+  it('explains a file whose bytes are gone instead of printing nothing', async () => {
+    const { engine } = await harness();
+    await engine.init({ name: 'demo' });
+    const result = await run(engine, 'library read src/a.ts');
+    assert.equal(result.kind, 'error');
+    assert.match(result.text, /not readable/);
+    assert.match(result.text, /not on disk/);
+  });
+
+  it('needs a path and names an unknown verb', async () => {
+    const { engine } = await harness();
+    await engine.init({ name: 'demo' });
+    const noPath = await run(engine, 'library read');
+    assert.equal(noPath.kind, 'error');
+    assert.match(noPath.text, /needs a path/);
+    const unknown = await run(engine, 'library prune');
+    assert.equal(unknown.kind, 'error');
+    assert.match(unknown.text, /unknown library verb/);
+    assert.match(unknown.text, /\/project library read <path>/);
   });
 });

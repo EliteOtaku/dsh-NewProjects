@@ -14,6 +14,8 @@
 
 import { assertOk, runChecked, runProbe } from './exec.js';
 import type { CommandRunner } from './exec.js';
+import { parseNameStatus } from './library.js';
+import type { ProjectOutputFile } from '../types.js';
 
 /** Resolved git facts about the project root. */
 export interface RepoFacts {
@@ -132,6 +134,31 @@ export async function commitAll(
   });
   const head = await runChecked(runner, { argv: ['git', 'rev-parse', 'HEAD'], cwd });
   return { committed: true, commit: head.trim() };
+}
+
+/**
+ * Files changed between two revisions, as the Library reports them.
+ *
+ * `--no-renames` is deliberate: a rename becomes a deletion plus an addition, which is
+ * what the Library should say. Collapsing it into one `renamed` row hides the path a user
+ * may still be looking for, and the panel renders paths one per row anyway.
+ *
+ * Returns `undefined` when git refuses the range (a thread that never committed, a base
+ * commit that no longer exists). The caller treats that as "this thread produced nothing
+ * we can describe", which is honest; an empty list would claim it produced nothing at all.
+ */
+export async function readChangedFiles(
+  runner: CommandRunner,
+  cwd: string,
+  from: string,
+  to: string,
+): Promise<ProjectOutputFile[] | undefined> {
+  const probe = await runProbe(runner, {
+    argv: ['git', 'diff', '--name-status', '--no-renames', `${from}..${to}`],
+    cwd,
+  });
+  if (probe.exitCode !== 0) return undefined;
+  return parseNameStatus(probe.stdout);
 }
 
 /** Push a branch to `origin`, setting upstream on first push. */

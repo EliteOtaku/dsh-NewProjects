@@ -60,6 +60,8 @@ import type {
   ProjectMemoryEntry,
   ProjectOverview,
   ProjectPlan,
+  ProjectLibraryEntry,
+  ProjectOutputFile,
   ProjectReviewSnapshot,
   ProjectThreadDescriptor,
   SuggestStartResult,
@@ -73,12 +75,15 @@ import {
   createPullRequest,
   inspectRepo,
   pushBranch,
+  readChangedFiles,
   readChecks,
   readPrState,
   readReviewComments,
   readReviewVerdicts,
   type RepoFacts,
 } from './vcs.js';
+import { aggregateLibrary, readOutput as readOutputBytes } from './library.js';
+import type { OutputReadResult } from './library.js';
 
 /** Default poll cadence for the self-healing watcher. */
 export const DEFAULT_CI_POLL_INTERVAL_MS = 60_000;
@@ -1605,14 +1610,30 @@ export class ProjectEngine {
       cwd,
       message: options.message ?? `${thread.title}\n\nthread ${threadId}`,
     });
+    // Recorded even when this call commits nothing: the thread may have committed on its
+    // own during its turn, and an empty Library would then claim it produced nothing. The
+    // diff is taken against the thread's base commit, so it describes the whole branch rather
+    // than just this one commit.
+    const outputs = await this.readBranchOutputs(thread, cwd);
     if (!commit.committed) {
-      return { thread, message: 'nothing to commit' };
+      const unchanged =
+        outputs === undefined
+          ? thread
+          : await this.updateThread(threadId, (draft) => {
+              draft.outputs = outputs;
+              draft.outputsAt = this.clock.now();
+            });
+      return { thread: unchanged, message: 'nothing to commit' };
     }
     if (thread.branch === undefined) {
       const updated = await this.updateThread(threadId, (draft) => {
         draft.status = 'completed';
         draft.note = `committed ${commit.commit ?? ''}`.trim();
         draft.updatedAt = this.clock.now();
+        if (outputs !== undefined) {
+          draft.outputs = outputs;
+          draft.outputsAt = this.clock.now();
+        }
       });
       return { thread: updated, message: `committed ${commit.commit ?? ''} (no branch to push)`.trim() };
     }
@@ -1632,9 +1653,70 @@ export class ProjectEngine {
       draft.status = 'awaiting_review';
       draft.prOrDeliverableRef = created.pr.url;
       draft.updatedAt = this.clock.now();
+      if (outputs !== undefined) {
+        draft.outputs = outputs;
+        draft.outputsAt = this.clock.now();
+      }
     });
     return { thread: updated, prRef: created.pr.url, message: `opened ${created.pr.url}` };
   }
+  /**
+   * What this thread's branch changed relative to its base commit.
+   *
+   * `undefined` when the question cannot be answered (no base commit recorded, or git
+   * refused the range). The caller keeps the previous observation in that case rather than
+   * overwriting it with an empty list, because "we could not look" is not "nothing changed".
+   */
+  private async readBranchOutputs(
+    thread: ProjectThreadDescriptor,
+    cwd: string,
+  ): Promise<ProjectOutputFile[] | undefined> {
+    if (thread.baseCommit === undefined) return undefined;
+    const tip = thread.branch ?? 'HEAD';
+    return readChangedFiles(this.runner, cwd, thread.baseCommit, tip);
+  }
+
+  /** Every file any thread has produced, one row per path. */
+  async library(): Promise<ProjectLibraryEntry[]> {
+    const manifest = await this.requireManifest();
+    return aggregateLibrary(Object.values(manifest.threads));
+  }
+
+  /**
+   * Read one produced file out of the thread's own worktree.
+   *
+   * The bytes are read on demand rather than copied into the project record: on a local host
+   * the worktree already is the storage, and copying every produced file would double the disk
+   * cost of a thread for a file nobody may ever open. When the worktree is gone the read says
+   * so instead of returning an empty string, which reads as "the file is empty" — a different
+   * and false statement.
+   */
+  async readOutputFile(path: string, threadId?: string): Promise<OutputReadResult> {
+    const manifest = await this.requireManifest();
+    const named = threadId === undefined ? undefined : manifest.threads[threadId];
+    if (threadId !== undefined && named === undefined) {
+      throw new ProjectError('THREAD_NOT_FOUND', `unknown thread ${threadId}`, { threadId });
+    }
+    const owner = named ?? this.threadProducingPath(manifest, path);
+    const base = owner?.worktreePath ?? manifest.rootDir;
+    return readOutputBytes(base, path);
+  }
+
+  /** The thread whose worktree most plausibly still holds `path`. */
+  private threadProducingPath(
+    manifest: ProjectManifest,
+    path: string,
+  ): ProjectThreadDescriptor | undefined {
+    const candidates = Object.values(manifest.threads).filter((thread) =>
+      (thread.outputs ?? []).some((output) => output.path === path && output.change !== 'deleted'),
+    );
+    // Newest first: a file produced twice should be read from the thread that touched it last.
+    candidates.sort(
+      (left, right) => (right.outputsAt ?? right.updatedAt) - (left.outputsAt ?? left.updatedAt),
+    );
+    return candidates[0];
+  }
+
 }
 
 /**

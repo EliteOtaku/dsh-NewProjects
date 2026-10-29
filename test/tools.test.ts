@@ -73,6 +73,8 @@ function repoReady(runner: FakeRunner): void {
   runner.on('git branch', { exitCode: 0 });
   // Threads get their own checkout now, so the worktree command must be routed too.
   runner.on('git worktree', { exitCode: 0 });
+  // Diff for the Library: the branches these fixtures model changed nothing on their own.
+  runner.on('git diff', { stdout: '' });
 }
 
 describe('tool registration', () => {
@@ -87,6 +89,7 @@ describe('tool registration', () => {
         'project_overview',
         'project_knowledge_search',
         'project_knowledge',
+        'project_library',
       ],
     );
   });
@@ -337,6 +340,94 @@ describe('project_overview', () => {
       {},
       context(),
     )) as Record<string, unknown>;
+    assert.equal(result['code'], 'PROJECT_NOT_INITIALIZED');
+  });
+});
+
+describe('project_library', () => {
+  /** A project with one delivered thread that changed two files. */
+  async function delivered(): Promise<{ engine: ProjectEngine; runner: FakeRunner; threadId: string; worktreePath: string }> {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const planned = await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
+    const threadId = planned.started[0]?.threadId ?? '';
+    runner.on('git status --porcelain', { stdout: ' M src/a.ts\n' });
+    runner.on('git add', { exitCode: 0 });
+    runner.on('git commit', { stdout: '[project/demo/1-one abc1234] one\n' });
+    runner.on('git push', { exitCode: 0 });
+    runner.on('gh pr create', { stdout: 'https://github.com/o/r/pull/7\n' });
+    runner.on('gh pr view', {
+      stdout: JSON.stringify({
+        number: 7,
+        url: 'https://github.com/o/r/pull/7',
+        state: 'OPEN',
+        isDraft: false,
+        headRefName: 'project/demo/1-one',
+        reviewDecision: '',
+        mergeable: 'MERGEABLE',
+      }),
+    });
+    runner.on('git diff', { stdout: 'A\tsrc/a.ts\n' });
+    await engine.deliverThread(threadId);
+    const thread = await engine.requireThread(threadId);
+    return { engine, runner, threadId, worktreePath: thread.worktreePath ?? '' };
+  }
+
+  it('lists what the threads produced', async () => {
+    const { engine } = await delivered();
+    const source = { engineFor: () => Promise.resolve(engine), parentOf: () => PARENT };
+    const result = (await tool(source, 'project_library').execute({}, context())) as Record<string, unknown>;
+    assert.equal(result['ok'], true);
+    assert.equal(result['total'], 1);
+    const files = result['files'] as Array<Record<string, unknown>>;
+    assert.equal(files[0]?.['path'], 'src/a.ts');
+    assert.equal(files[0]?.['change'], 'added');
+  });
+
+  it('says the library is empty rather than pretending the tool failed', async () => {
+    const { engine } = await harness();
+    await engine.init();
+    const source = { engineFor: () => Promise.resolve(engine), parentOf: () => PARENT };
+    const result = (await tool(source, 'project_library').execute({}, context())) as Record<string, unknown>;
+    assert.equal(result['ok'], true);
+    assert.equal(result['total'], 0);
+    assert.match(String(result['hint']), /no thread has delivered/);
+  });
+
+  it('reads a produced file, and reports a missing one as missing', async () => {
+    const { engine, worktreePath } = await delivered();
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await mkdir(join(worktreePath, 'src'), { recursive: true });
+    await writeFile(join(worktreePath, 'src', 'a.ts'), 'export const a = 1;\n');
+    const source = { engineFor: () => Promise.resolve(engine), parentOf: () => PARENT };
+    const read = tool(source, 'project_library');
+
+    const ok = (await read.execute({ action: 'read', path: 'src/a.ts' }, context())) as Record<string, unknown>;
+    assert.equal(ok['ok'], true);
+    assert.equal(ok['text'], 'export const a = 1;\n');
+
+    // A body-less success would be indistinguishable from an empty file.
+    const missing = (await read.execute({ action: 'read', path: 'src/gone.ts' }, context())) as Record<string, unknown>;
+    assert.equal(missing['ok'], false);
+    assert.equal(missing['code'], 'NOT_READABLE');
+    assert.match(String(missing['message']), /not on disk/);
+  });
+
+  it('needs a path to read and names an unknown action', async () => {
+    const { engine } = await harness();
+    await engine.init();
+    const read = tool({ engineFor: () => Promise.resolve(engine), parentOf: () => PARENT }, 'project_library');
+    const noPath = (await read.execute({ action: 'read' }, context())) as Record<string, unknown>;
+    assert.equal(noPath['code'], 'INVALID_INPUT');
+    const bad = (await read.execute({ action: 'delete' }, context())) as Record<string, unknown>;
+    assert.match(String(bad['message']), /unknown action/);
+  });
+
+  it('returns an uninitialised result instead of throwing', async () => {
+    const { engine } = await harness();
+    const source = { engineFor: () => Promise.resolve(engine), parentOf: () => PARENT };
+    const result = (await tool(source, 'project_library').execute({}, context())) as Record<string, unknown>;
     assert.equal(result['code'], 'PROJECT_NOT_INITIALIZED');
   });
 });

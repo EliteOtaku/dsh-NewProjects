@@ -170,6 +170,7 @@ describe('apply', () => {
       'project_overview',
       'project_knowledge_search',
       'project_knowledge',
+      'project_library',
     ]);
     assert.deepEqual(commands.map((command) => command.name), ['project']);
   });
@@ -223,7 +224,7 @@ describe('apply', () => {
       commands: fakeCommands(commands),
     });
     apply(ctx.asContext());
-    assert.equal(tools.length, 6);
+    assert.equal(tools.length, 7);
     assert.equal(commands.length, 1);
   });
 
@@ -271,7 +272,7 @@ describe('apply', () => {
       systemPrompt: fakeSystemPrompt(sections),
     });
     apply(ctx.asContext());
-    assert.equal(tools.length, 6);
+    assert.equal(tools.length, 7);
     ctx.dispose();
     assert.deepEqual(tools, []);
     assert.deepEqual(commands, []);

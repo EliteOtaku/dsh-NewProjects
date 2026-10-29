@@ -6,6 +6,7 @@
  * agree — there is no second source of truth for "which bucket is this thread in".
  */
 
+import { aggregateLibrary } from './library.js';
 import { memoryPrefixFingerprint } from './memory.js';
 import { PLAN_TTL_MS } from './planner.js';
 import { quotaState } from './quota.js';
@@ -13,6 +14,8 @@ import type {
   OverviewBucket,
   ProjectManifest,
   ProjectOverview,
+  ProjectPullRequestRow,
+  ProjectReviewSnapshot,
   ProjectThreadDescriptor,
   ThreadStatus,
 } from '../types.js';
@@ -113,6 +116,71 @@ function byRecency(a: ProjectThreadDescriptor, b: ProjectThreadDescriptor): numb
 }
 
 /** Build the structured overview for one project. */
+/** Display order of the Pull requests tab, roughly the lifecycle. */
+const PULL_REQUEST_STATES: readonly ProjectReviewSnapshot['state'][] = [
+  'open',
+  'draft',
+  'merged',
+  'closed',
+  'unknown',
+];
+
+/**
+ * Group every thread that has a pull request by that pull request's state.
+ *
+ * Returns `undefined` when no thread has one. The official wording is that the Pull
+ * requests tab is "shown once threads have opened any", so an empty object would claim the
+ * tab exists and is empty — a different statement from "no thread has delivered".
+ *
+ * Tallies come from the last observation the healer made. They are not live: a panel that
+ * reached GitHub itself would spend the user's rate limit on every render, and the healer
+ * already polls when there is work to poll for.
+ */
+export function collectPullRequests(
+  threads: readonly ProjectThreadDescriptor[],
+): Partial<Record<ProjectReviewSnapshot['state'], ProjectPullRequestRow[]>> | undefined {
+  const grouped = new Map<ProjectReviewSnapshot['state'], ProjectPullRequestRow[]>();
+  for (const thread of threads) {
+    const review = thread.review;
+    if (review === undefined) continue;
+    const row: ProjectPullRequestRow = {
+      threadId: thread.threadId,
+      title: thread.title,
+      prRef: review.prRef,
+      state: review.state,
+      checks: tallyChecks(review),
+      newComments: review.comments.filter((comment) => !review.consumedCommentIds.includes(comment.id)).length,
+      observedAt: review.observedAt,
+      ...(review.prUrl === undefined ? {} : { url: review.prUrl }),
+    };
+    const bucket = grouped.get(review.state);
+    if (bucket === undefined) grouped.set(review.state, [row]);
+    else bucket.push(row);
+  }
+  if (grouped.size === 0) return undefined;
+  const ordered: Partial<Record<ProjectReviewSnapshot['state'], ProjectPullRequestRow[]>> = {};
+  for (const state of PULL_REQUEST_STATES) {
+    const rows = grouped.get(state);
+    if (rows === undefined || rows.length === 0) continue;
+    rows.sort((left, right) => left.threadId.localeCompare(right.threadId));
+    ordered[state] = rows;
+  }
+  return ordered;
+}
+
+/** Count checks by conclusion, using the vocabulary `toCheckStates` already normalised. */
+function tallyChecks(review: ProjectReviewSnapshot): ProjectPullRequestRow['checks'] {
+  let passing = 0;
+  let failing = 0;
+  let pending = 0;
+  for (const check of review.checks) {
+    if (check.conclusion === 'pass') passing += 1;
+    else if (check.conclusion === 'fail') failing += 1;
+    else if (check.conclusion === 'pending') pending += 1;
+  }
+  return { total: review.checks.length, passing, failing, pending };
+}
+
 export function buildOverview(
   manifest: ProjectManifest,
   nowMs: number,
@@ -157,6 +225,17 @@ export function buildOverview(
             tasks: manifest.plan.tasks,
           },
         }),
+    // Both tabs read from every thread, including the resolved ones: a merged pull request
+    // and the files it produced are still part of the project's record after the thread is
+    // out of the way.
+    ...(() => {
+      const library = aggregateLibrary(all);
+      return library.length === 0 ? {} : { library };
+    })(),
+    ...(() => {
+      const pullRequests = collectPullRequests(all);
+      return pullRequests === undefined ? {} : { pullRequests };
+    })(),
     totals: {
       threads: threads.length,
       active: threads.filter((thread) => isActiveStatus(thread.status)).length,

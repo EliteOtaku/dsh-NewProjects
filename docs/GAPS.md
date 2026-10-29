@@ -72,7 +72,7 @@
 | **P0** | 违背规格或官方原文 | ~~`GAP-01`~~ ✅ 已关闭 2026-10-27 |
 | **P1** | 会静默产出错误结果 | ~~`GAP-23`~~ ✅ ~~`GAP-24`~~ ✅（`GAP-22` / `GAP-22a` 已关闭）—— **P1 已清空** |
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | ~~`GAP-03`~~ ✅ ~~`GAP-04`~~ ✅ ~~`GAP-05`~~ ✅（2026-10-29 关闭） |
-| **P3** | 官方有、我们无，独立功能 | `GAP-06` `GAP-09` ~ `GAP-13` `GAP-29` |
+| **P3** | 官方有、我们无，独立功能 | `GAP-06` `GAP-09` `GAP-12` `GAP-13` `GAP-29`（`GAP-10` / `GAP-11` 已于 2026-10-29 关闭） |
 | **P4** | 项目管理类，缺了不能「管起来」 | `GAP-14` `GAP-15` `GAP-17` `GAP-18` `GAP-25` `GAP-28` |
 | **P5** | 磁盘、性能与健壮性，不出错 | `GAP-19` `GAP-20` `GAP-27` |
 | **ARCH** | 架构性差异，记录不排期 | `GAP-A1` ~ `GAP-A4` |
@@ -336,7 +336,7 @@
   3. 文件不存在时静默跳过，不产生空段落；
   4. **子目录的 `CLAUDE.md` 不被读取**（有测试断言）。
 
-### GAP-10 没有 Library（线程产出文件）
+### GAP-10 没有 Library（线程产出文件）—— ✅ 已做
 
 - **依据**：`OFFICIAL`「**Library**: the files **and folders** you added and the files threads produced」；非代码项目「threads deliver each write-up **as a file** on the project's Library tab」。
 - **现状**：只收集用户绑定的知识路径。**线程产出的文件完全不收集**，只留在 `.dsh-project/worktrees/<threadId>`，worktree 一回收就没了。
@@ -349,12 +349,35 @@
   3. worktree 删除后清单仍在，读取时明确报不可读；
   4. 非代码产出（文档类）同样进清单。
 
-### GAP-11 没有 Pull requests 聚合视图
+**实际做法（2026-10-29 落地）**：
+
+1. 新模块 `src/core/library.ts`（纯逻辑，唯一碰盘的函数是 `readOutput`）：`parseNameStatus` 把 `git diff --name-status` 转成 `{path, change}`；`aggregateLibrary` 按 path 去重、合并 `threads`、变更类型取强（`added > modified > deleted`，某分支上仍存在就不算删除）。
+2. `src/core/vcs.ts` 新增 `readChangedFiles(runner, cwd, from, to)`，用 `git diff --name-status --no-renames <base>..<branch>`；**故意关掉重命名检测** —— 重命名显示为「删除 + 新增」，用户要的旧路径不会消失。非零退出返回 `undefined`，调用方保留上一次观察（「没能查」不等于「没变化」）。
+3. `deliverThread` 在提交前后各记一次（含 `git status --porcelain` 为空的早退路径），因为线程可能在自己的回合里已经提交过。
+4. `engine.library()` 汇总；`buildOverview` 用 **全部线程（含 resolved）** 聚合 —— resolved 只是把人从面板上挪开，不是把工作结果抹掉。
+5. 新增第 7 个工具 `project_library`（`list` / `read`）与 `/project library [read <path>]`。
+6. **`readOutput` 拒绝越权路径**：`resolve` 后做包含性校验，`../..` 无法爬到项目根之外（路径来自模型或命令行，不能信）。
+
+**验收（全部有测试）**：
+
+1. ✅ `deliverThread` 后 descriptor 有清单且含 `added`/`modified` —— `test/engine.test.ts`「records what the branch changed when the thread delivers」；
+2. ✅ overview 去重合并 —— `test/unit/overview.test.ts`「aggregates the files two threads produced into one row each」；
+3. ✅ worktree 不在时清单仍在、读取明确报 `not on disk` —— `test/engine.test.ts`「says a reclaimed worktree is unreadable instead of returning an empty file」；
+4. ✅ 非代码产出同样进清单（`parseNameStatus` 与路径无关）—— `test/unit/library.test.ts`；
+5. ✅ 空库不假装有内容 —— `test/tools.test.ts`「says the library is empty rather than pretending the tool failed」。
+
+### GAP-11 没有 Pull requests 聚合视图 —— ✅ 已做
 
 - **依据**：`OFFICIAL`「**Pull requests**: shown once threads have opened any」。
 - **现状**：每线程一个 `prOrDeliverableRef` 字符串，没有聚合。
 - **做法**：`overviewJson()` 加 `pullRequests`，从各 descriptor 的 `review` 快照提取；带 `state` / checks 摘要 / `url` / `threadId`。
 - **验收标准**：有 PR 的线程出现在聚合里并按状态分组；无 PR 时**不返回该字段**（不要返回空数组假装有）。
+
+**实际做法（2026-10-29 落地）**：`src/core/overview.ts` 新增 `collectPullRequests(threads)`，按 `review.state` 分组（固定顺序 open → draft → merged → closed → unknown，组内按 threadId 排序），每行带 `threadId` / `title` / `prRef` / `url?` / `checks{total,passing,failing,pending}` / `newComments`（未消费的审查评论数）/ `observedAt`。**全部线程参与，含 resolved**：合掉的 PR 仍是这个项目的历史。
+
+要小心的一点：checks 与 state 都是**上一次自愈轮观察到的快照**，不是实时 GitHub 数据。面板自己不去查 GitHub —— 那会在每次渲染时花掉用户的 API 配额，而自愈器本来就在轮询。
+
+**验收（全部有测试）**：✅ 按状态分组、计数正确 —— `test/unit/overview.test.ts`「groups pull requests by state and tallies their checks」；✅ 无 PR 时字段不出现 —— 同文件「stays absent until a thread produces something」；✅ 空状态组不出现 —— 「omits a state group no thread is in」。
 
 ### GAP-12 线程卡片动作缺 Merge it / Resolve conflicts / Review PR
 
@@ -685,7 +708,7 @@
 | --- | --- | --- | --- |
 | **第一批 让输出可信** | `GAP-01` 全局配额 ✅ + `GAP-22` 知识 paths-first ✅ | 无 | 2026-10-27 `9c7ef10`：`GAP-01` 关闭，`GAP-22` 的减法做完（确实净减）；2026-10-29：`GAP-22a`（路径锚定项目根）关闭 —— **第一批完成** |
 | **第二批 让拆解可信** | `GAP-26` 模型优先拆解 + Suggested threads ✅ | 无（可与一批并行） | 后者是前者的保险，必须同批。2026-10-29 关闭 —— **第二批完成** |
-| **第三批 让报回可用** | `GAP-03` 投影 ✅ + `GAP-04` 六分组 ✅ + `GAP-05` 终态 ✅ + `GAP-10` Library + `GAP-11` PR 聚合 | 03 与 04 **可同批**（原判断的串行约束不成立） | 状态三件 2026-10-29 关闭；Library 与 PR 聚合仍在本批 |
+| **第三批 让报回可用** | `GAP-03` 投影 ✅ + `GAP-04` 六分组 ✅ + `GAP-05` 终态 ✅ + `GAP-10` Library ✅ + `GAP-11` PR 聚合 ✅ | 03 与 04 **可同批**（原判断的串行约束不成立） | 2026-10-29 全部关闭 —— **第三批完成** |
 | **第四批 让裁定可用** | `GAP-12` 卡片动作 + `GAP-18` 审批 + `GAP-14` Pause + `GAP-19` worktree 回收 + `GAP-25` 禁令 | 19 依赖 10（先有清单再删目录） | **不可逆动作（19）与它的防护同批**，不推到最后。~~`GAP-24` 退订~~ ✅ 已于 2026-10-29 提前做完 |
 | **第五批 减少重复交代** | `GAP-06` goal + `GAP-09` 仓库约定 + `GAP-29` 三件套 | 无 | |
 | **第六批 卫生** | `GAP-13` Usage + `GAP-15` Archive + `GAP-17` 超时 + `GAP-20` purge + `GAP-27` 锁重试 | 无 | |

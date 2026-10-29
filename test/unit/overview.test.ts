@@ -251,3 +251,87 @@ describe('renderOverviewMarkdown', () => {
     assert.match(markdown, /threads --all/);
   });
 });
+
+describe('the Library and Pull requests tabs', () => {
+  /** A review snapshot with one passing and one failing check plus an unconsumed comment. */
+  function review(overrides: Record<string, unknown> = {}) {
+    return {
+      prRef: 'https://github.com/o/r/pull/7',
+      prUrl: 'https://github.com/o/r/pull/7',
+      state: 'open' as const,
+      checks: [
+        { name: 'build', conclusion: 'pass' as const },
+        { name: 'test', conclusion: 'fail' as const },
+        { name: 'lint', conclusion: 'pending' as const },
+      ],
+      comments: [
+        { id: '1', author: 'rev', body: 'fix the name', createdAt: NOW },
+        { id: '2', author: 'rev', body: 'already handled', createdAt: NOW },
+      ],
+      consumedCommentIds: ['2'],
+      observedAt: NOW,
+      ...overrides,
+    };
+  }
+
+  it('stays absent until a thread produces something', () => {
+    // An empty array would claim the tab exists and is empty, which is a different statement
+    // from "no thread has delivered yet".
+    const manifest = makeManifest();
+    manifest.threads['a'] = thread('a', 'running');
+    const overview = buildOverview(manifest, NOW);
+    assert.equal(overview.library, undefined);
+    assert.equal(overview.pullRequests, undefined);
+  });
+
+  it('aggregates the files two threads produced into one row each', () => {
+    const manifest = makeManifest();
+    manifest.threads['a'] = thread('a', 'awaiting_review', {
+      outputs: [
+        { path: 'src/a.ts', change: 'added' },
+        { path: 'src/shared.ts', change: 'modified' },
+      ],
+    });
+    manifest.threads['b'] = thread('b', 'awaiting_review', {
+      outputs: [{ path: 'src/shared.ts', change: 'modified' }],
+    });
+    const overview = buildOverview(manifest, NOW);
+    assert.deepEqual(overview.library?.map((row) => row.path), ['src/a.ts', 'src/shared.ts']);
+    assert.deepEqual(overview.library?.[1]?.threads, ['a', 'b']);
+  });
+
+  it('keeps a resolved thread\'s products in the Library', () => {
+    // Resolved hides the thread from the panel, not the work it did.
+    const manifest = makeManifest();
+    manifest.threads['done'] = thread('done', 'resolved', {
+      outputs: [{ path: 'src/a.ts', change: 'added' }],
+    });
+    const overview = buildOverview(manifest, NOW);
+    assert.equal(overview.buckets.resolved.length, 0, 'resolved is hidden by default');
+    assert.equal(overview.library?.length, 1);
+  });
+
+  it('groups pull requests by state and tallies their checks', () => {
+    const manifest = makeManifest();
+    manifest.threads['a'] = thread('a', 'awaiting_review', { review: review() });
+    manifest.threads['b'] = thread('b', 'landing', {
+      review: review({ state: 'merged', prRef: 'https://github.com/o/r/pull/8' }),
+    });
+    const overview = buildOverview(manifest, NOW);
+    assert.deepEqual(Object.keys(overview.pullRequests ?? {}), ['open', 'merged']);
+    const row = overview.pullRequests?.open?.[0];
+    assert.equal(row?.threadId, 'a');
+    assert.equal(row?.url, 'https://github.com/o/r/pull/7');
+    assert.deepEqual(row?.checks, { total: 3, passing: 1, failing: 1, pending: 1 });
+    // Only the comment nobody has consumed yet counts as new work.
+    assert.equal(row?.newComments, 1);
+  });
+
+  it('omits a state group no thread is in', () => {
+    const manifest = makeManifest();
+    manifest.threads['a'] = thread('a', 'awaiting_review', { review: review() });
+    const overview = buildOverview(manifest, NOW);
+    assert.deepEqual(Object.keys(overview.pullRequests ?? {}), ['open']);
+    assert.equal(overview.pullRequests?.merged, undefined);
+  });
+});
