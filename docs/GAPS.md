@@ -691,6 +691,7 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
   6. ✅ 不设偏好时行为完全不变 —— `changes nothing when no preference is set`
   7. ✅ 面板可见、未设时不出现、位置在配额附近 —— `shows up on the panel beside the quota, and its absence is silent`
   8. ✅ 纯函数边界（0/负/分数/超上限/空轮/坏 limit）—— `test/unit/concurrency.test.ts` 全部 16 项
+  9. ✅ 命令层读/写/清/非法值/不可达值 —— `test/commands.test.ts` 的 `describe('/project concurrent')` 两项
 
 ---
 

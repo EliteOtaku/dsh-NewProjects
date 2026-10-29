@@ -312,6 +312,50 @@ describe('/project pause', () => {
   });
 });
 
+describe('/project concurrent', () => {
+  it('reads, sets, validates, and clears the concurrency preference', async () => {
+    const { engine } = await harness();
+    await run(engine, 'init');
+
+    const empty = await run(engine, 'concurrent');
+    assert.equal(empty.kind, 'success');
+    assert.match(empty.text, /no concurrency preference/);
+
+    const set = await run(engine, 'concurrent 3');
+    assert.equal(set.kind, 'success');
+    assert.match(set.text, /set to 3/);
+    // The message has to keep saying this, because the whole point is that it is not a cap.
+    assert.match(set.text, /not a cap/);
+    assert.match(set.text, /already running/);
+
+    const read = await run(engine, 'concurrent');
+    assert.match(read.text, /concurrency preference: 3 at a time/);
+
+    const same = await run(engine, 'concurrent 3');
+    assert.match(same.text, /already 3/);
+
+    const bad = await run(engine, 'concurrent lots');
+    assert.equal(bad.kind, 'error');
+    assert.match(bad.text, /not a number/);
+    assert.match(bad.text, /concurrent off/);
+
+    const off = await run(engine, 'concurrent off');
+    assert.equal(off.kind, 'success');
+    assert.match(off.text, /removed/);
+
+    const cleared = await run(engine, 'concurrent off');
+    assert.match(cleared.text, /no concurrency preference was set/);
+  });
+
+  it('rejects a preference the project could never reach', async () => {
+    const { engine } = await harness();
+    await run(engine, 'init');
+    const tooMany = await run(engine, 'concurrent 500');
+    assert.equal(tooMany.kind, 'error');
+    assert.match(tooMany.text, /daily thread quota|preference/i);
+  });
+});
+
 describe('/project goal', () => {
   it('sets, reads, and clears the goal', async () => {
     const { engine } = await harness();
