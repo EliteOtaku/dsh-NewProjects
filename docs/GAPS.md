@@ -72,7 +72,7 @@
 | **P0** | 违背规格或官方原文 | ~~`GAP-01`~~ ✅ 已关闭 2026-10-27 |
 | **P1** | 会静默产出错误结果 | ~~`GAP-23`~~ ✅ ~~`GAP-24`~~ ✅（`GAP-22` / `GAP-22a` 已关闭）—— **P1 已清空** |
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | ~~`GAP-03`~~ ✅ ~~`GAP-04`~~ ✅ ~~`GAP-05`~~ ✅（2026-10-29 关闭） |
-| **P3** | 官方有、我们无，独立功能 | `GAP-06` `GAP-09` `GAP-13` `GAP-29`（`GAP-10` / `GAP-11` / `GAP-12` 已于 2026-10-29 关闭） |
+| **P3** | 官方有、我们无，独立功能 | `GAP-13`（`GAP-06` / `GAP-09` / `GAP-10` / `GAP-11` / `GAP-12` / `GAP-29` 已于 2026-10-29 关闭） |
 | **P4** | 项目管理类，缺了不能「管起来」 | `GAP-15` `GAP-17` `GAP-28`（`GAP-14`/`GAP-18`/`GAP-25` 已于 2026-10-29 关闭） |
 | **P5** | 磁盘、性能与健壮性，不出错 | `GAP-20` `GAP-27`（`GAP-19` 已于 2026-10-29 关闭） |
 | **ARCH** | 架构性差异，记录不排期 | `GAP-A1` ~ `GAP-A4` |
@@ -313,7 +313,7 @@
 
 ## P3 — 官方有、我们无（独立功能）
 
-### GAP-06 项目没有持久化的 goal
+### GAP-06 项目没有持久化的 goal —— ✅ 已做
 
 - **依据**：`OFFICIAL`「**Goal** (optional): one line of what you're trying to get done… Without a goal, Claude works from the tasks you send, and you can add a goal later in **Project settings > General**」，且「Claude in the conversation **works toward it**」。
 - **现状**：`goal` 只是 `coordinate` 的入参字符串（`src/core/engine.ts:402`），**不落盘**。`grep -c goal src/types.ts` = **0**。
@@ -324,7 +324,15 @@
   2. charter 含 goal，goal 不变时 charter 字节不变（不破坏 prefix cache）；
   3. 无 goal 时不渲染空段落。
 
-### GAP-09 不读仓库里的 CLAUDE.md / .claude/rules/
+**实际做法（2026-10-29 落地）**：
+
+1. `ProjectManifest` 新增 `goal?: string`（`src/types.ts`）；`init()` 接受 `goal`，`setGoal()` 负责改与清，`normaliseGoal()` 折成一行并截到 `MAX_GOAL_CHARS = 280`。
+2. goal 进共享 charter（`renderGoalSection`，位于标题之下、记忆之上）。**它是前缀的一部分**，所以 `setGoal` 变更时 `prefixVersion += 1`——假装它不影响前缀会让面板报出一个过期的 fingerprint。
+3. `/project goal` 读、`/project goal <text>` 写、`/project goal clear` 清；`project_overview` 的 JSON 与 markdown 面板都带 `goal`。
+4. 没有 goal 时**整段不渲染**（不是空标题），`describeGoal` 也返回 `undefined`。
+
+**验收（全部有测试）**：`persists a goal given at init and reads it back from another engine`（换 engine 读回）、`renders the goal into the charter and leaves it out when unset`、`keeps the charter byte-identical when only recent messages change`、`prints the goal exactly once in the markdown panel`（防重复行回归）、`test/unit/coordState.test.ts` 的 `normaliseGoal` / `renderGoalSection` 组。
+### GAP-09 不读仓库里的 CLAUDE.md / .claude/rules/ —— ✅ 已做
 
 - **依据**：`OFFICIAL`「`CLAUDE.md`, `.claude/CLAUDE.md`, and `.claude/rules/` at the **repository root** — Loaded from every repository when the thread starts」，且「Permission rules in `.claude/settings.json` | **Not applied**」。
 - **现状**：charter 只读自己的 `.dsh-project/PROJECT_INSTRUCTIONS.md`（路径在 `src/core/engine.ts:218`，读取在 `:362`）。
@@ -336,6 +344,15 @@
   3. 文件不存在时静默跳过，不产生空段落；
   4. **子目录的 `CLAUDE.md` 不被读取**（有测试断言）。
 
+**实际做法（2026-10-29 落地）**：
+
+1. 新模块 `src/core/conventions.ts`：`collectConventions(rootDir)` 按 `CLAUDE.md` → `.claude/CLAUDE.md` → `.claude/rules/*.md`（按文件名排序）收集，**只读仓库根**。
+2. `conventionsStamp(rootDir)` 用「大小 + mtime」拼一个戳，`engine.conventions()` 用它做缓存：仓库没变时零读盘，`CLAUDE.md` 改了下一个 render 就能看到——不需要文件监听。
+3. 渲染成 `## Repository conventions`，每个文件一个 `### <相对路径>` 小节，紧邻 project instructions（两者都是用户写的作业方式，不是作业内容）。
+4. 总预算 `MAX_CONVENTIONS_CHARS = 16_000`，超出**截断并记 warning**（不静默丢尾部）。读不到的文件静默跳过；权限错误进 warning 但不影响 charter 生成。
+5. **不读**子目录 `CLAUDE.md`、path-specific rules、`.claude/settings.json` 的权限规则（官方明确 "Not applied"）。多读会让前缀随检出膨胀，直接冲掉前缀缓存。
+
+**验收（全部有测试）**：`test/unit/conventions.test.ts` 14 项（顺序、排序、忽略子目录、BOM 剥离、截断与警告、预算耗尽不再读、stamp 变化/稳定）；`test/engine.test.ts` 的 `repository conventions` 组 5 项（进 charter、忽略子目录、改文件下一轮生效、rules 排序、未变时字节稳定）。
 ### GAP-10 没有 Library（线程产出文件）—— ✅ 已做
 
 - **依据**：`OFFICIAL`「**Library**: the files **and folders** you added and the files threads produced」；非代码项目「threads deliver each write-up **as a file** on the project's Library tab」。
@@ -468,7 +485,7 @@
 7. ✅ 面板能看到待启动建议（`test/unit/overview.test.ts`、`test/commands.test.ts`）。
 
 
-### GAP-29 协调状态跨会话不可恢复（原「项目绑定会话」重定义）
+### GAP-29 协调状态跨会话不可恢复（原「项目绑定会话」重定义）—— ✅ 已做
 
 - **依据**：`OFFICIAL`「You don't manage context windows in a project. Threads compact automatically, and **the conversation works from recent messages, recent threads, and project memory rather than its full history**, so it keeps going for as long as the project runs.」还有 **`Restart Claude`**（"Restarts the project conversation"，且 "threads aren't affected"）—— 协调会话是**可重启、可丢的**。
 - **原判断的错误**：原 `GAP-07` 写「项目与协调会话之间没有绑定」，被理解成「需要让项目绑定一段长期会话」。**这是错的**：官方协调者自己就不靠完整历史，还提供重启按钮。真正缺的不是「绑定」，是**协调状态能跨会话恢复**。
@@ -487,6 +504,14 @@
 
 ---
 
+**实际做法（2026-10-29 落地）**：
+
+1. 新模块 `src/core/coordState.ts`（纯逻辑）：`appendRecent` 环形缓冲（`RECENT_MESSAGE_LIMIT = 20`，单条 `MAX_RECENT_MESSAGE_CHARS = 400`）、`newestFirst`、`renderRecentMessages`。
+2. `ProjectManifest` 新增 `recentMessages?: RecentMessage[]`；`engine.recordRecent()` 在 `coordinate` / `setMemory` / `removeMemory` / `setGoal` / `healSweep` 的写入路径追加，**尽力而为**（失败不影响主操作）。
+3. **不进 charter**：charter 是所有线程共享的前缀，消息每轮都变，放进去等于每轮废掉一次前缀缓存。协调者通过 `/project goal`、`project_overview` 读它。
+4. 三件套齐了：线程摘要（`manifest.threads`）、共享记忆（`manifest.memories`）、近期消息（`manifest.recentMessages`）。任何新会话打开同一项目都能从 manifest 恢复「在做什么、刚决定了什么、还有什么在飞」。
+
+**验收（全部有测试）**：`test/unit/coordState.test.ts` 13 项（环形上限、单条截断、空消息不入环、返回新数组、newest-first、渲染尾部）；`test/engine.test.ts` 的 `goal and recent messages` 组（`records what the coordinator did, bounded`、`surfaces the goal and the recent messages through the overview payload`、`keeps the charter byte-identical when only recent messages change`）。
 ## P4 — 项目管理类
 
 ### GAP-14 没有 Pause — ✅ 已做
@@ -760,7 +785,7 @@
 | **第二批 让拆解可信** | `GAP-26` 模型优先拆解 + Suggested threads ✅ | 无（可与一批并行） | 后者是前者的保险，必须同批。2026-10-29 关闭 —— **第二批完成** |
 | **第三批 让报回可用** | `GAP-03` 投影 ✅ + `GAP-04` 六分组 ✅ + `GAP-05` 终态 ✅ + `GAP-10` Library ✅ + `GAP-11` PR 聚合 ✅ | 03 与 04 **可同批**（原判断的串行约束不成立） | 2026-10-29 全部关闭 —— **第三批完成** |
 | **第四批 让裁定可用** ✅ | ~~`GAP-12` 卡片动作~~ ✅ + ~~`GAP-25` 禁令~~ ✅ + ~~`GAP-19` worktree 回收~~ ✅ + ~~`GAP-18` 审批~~ ✅ + ~~`GAP-14` Pause~~ ✅ | 19 依赖 10（先有清单再删目录）| **整批已于 2026-10-29 完成**。不可逆动作（19）与它的防护（18/25）同批，没有推到最后一刻 |
-| **第五批 减少重复交代** | `GAP-06` goal + `GAP-09` 仓库约定 + `GAP-29` 三件套 | 无 | |
+| **第五批 减少重复交代** ✅ | ~~`GAP-06` goal~~ ✅ + ~~`GAP-09` 仓库约定~~ ✅ + ~~`GAP-29` 三件套~~ ✅ | 无 | **整批已于 2026-10-29 完成**：goal 进共享前缀、约定按官方三处只读根、近期消息环只给协调者不进线程前缀 |
 | **第六批 卫生** | `GAP-13` Usage + `GAP-15` Archive + `GAP-17` 超时 + `GAP-20` purge + `GAP-27` 锁重试 | 无 | |
 | **按需** | `GAP-28` 并发偏好 | 无 | ~~`GAP-23`~~ ✅ 已于 2026-10-29 提前做完 |
 

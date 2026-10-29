@@ -58,6 +58,9 @@ cmd /c mklink /J "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-newp
 ```
 /project                      # 总览：状态桶 + 当日配额
 /project init [name]          # 为当前工作区建项目记录
+/project goal                 # 项目目标 + 最近几条协调者消息
+/project goal ship the beta   # 设置目标（进共享前缀，新线程开局就知道）
+/project goal clear           # 清除目标
 /project memory               # 列出共享决策
 /project memory stack = TypeScript on Node   # 写一条决策并广播
 /project memory rm stack      # 删一条
@@ -78,6 +81,8 @@ cmd /c mklink /J "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-newp
 /project library              # 线程产出的文件清单
 /project library read <path>  # 读其中一个（按需，从产出它的 worktree）
 ```
+
+仓库根的 `CLAUDE.md`、`.claude/CLAUDE.md`、`.claude/rules/*.md` 会在每次渲染时读入共享前缀（按官方范围只读根，**不读**子目录与 `.claude/settings.json` 的权限规则）。
 
 模型侧对应七个工具：`project_coordinate`、`project_memory_sync`、
 `project_thread_manage`、`project_overview`、`project_knowledge_search`、
@@ -145,7 +150,7 @@ docs/              GAPS.md（差距登记簿）· REVIEW-REQUEST.md ·
                    REVIEW-RESPONSE.md / REVIEW-RESPONSE-2.md（外部复核，两轮）
 ```
 
-共 **406 项测试**（`node:test`）。除集成测试外全部跑在内存 fake 上，不需要 git 或真实子会话。
+共 **449 项测试**（`node:test`）。除集成测试外全部跑在内存 fake 上，不需要 git 或真实子会话。
 
 `src/core/` **不 import 任何 `@deepseek-ai/dsh-*`**：外部插件解析不到 Host 内部包。
 Git 与 `gh` 一律经 `CommandRunner` 端口调用，因此 SSH / 容器部署时命令在正确机器上执行。
@@ -175,7 +180,7 @@ npm test           # 只跑测试
 
 ## 已知未实现部分
 
-相对官方 Claude Code Projects 还有若干未实现的能力（goal 持久化、Pause/Archive、审批改译、Usage 统计等）与若干有意为之的边界（重启后后台自愈停摆、云端 sandbox 差异等）。worktree 回收与「唤醒前重建」已实现（`GAP-19`）。
+相对官方 Claude Code Projects 还剩若干未实现的能力（Archive、线程超时、Usage 统计、worktree purge 等）与若干有意为之的边界（重启后后台自愈停摆、云端 sandbox 差异等）。goal 持久化、仓库 `CLAUDE.md` 约定、协调状态三件套、worktree 回收与「唤醒前重建」均已实现（`GAP-06` / `GAP-09` / `GAP-29` / `GAP-19`）。
 
 完整清单、代码证据、依据来源与验收标准见 **[docs/GAPS.md](./docs/GAPS.md)**，按批次推进。那份文档是判断「某个能力到底有没有」的唯一依据——不要凭本文件的段落推断。
 

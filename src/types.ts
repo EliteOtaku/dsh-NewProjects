@@ -271,6 +271,29 @@ export interface ProjectManifest {
    * a plan written against code that has since moved is worse than no plan.
    */
   plan?: ProjectPlan;
+  /**
+   * One line of what the project is trying to get done.
+   *
+   * Not decoration: it is rendered into the shared charter and shown to the coordinator, so a
+   * new session can pick up the direction without the user repeating it. Absent means "no goal
+   * set", which is a normal state — the coordinator then works from the tasks it is given.
+   */
+  goal?: string;
+  /**
+   * The last few coordinator messages, newest last.
+   *
+   * Threads and memory already persist; this is the third piece of coordination state that
+   * makes a project recoverable from any session. A ring buffer (see `RECENT_MESSAGE_LIMIT`),
+   * never a log.
+   */
+  recentMessages?: RecentMessage[];
+}
+
+/** One coordinator message retained for cross-session recovery. */
+export interface RecentMessage {
+  at: number;
+  role: 'coordinator' | 'user' | 'thread';
+  text: string;
 }
 
 /** On-disk envelope, so the file format can evolve independently of the record. */
@@ -357,6 +380,16 @@ export interface ProjectOverview {
   projectId: string;
   name: string;
   rootDir: string;
+  /** One line of what the project is trying to get done, when one is set. */
+  goal?: string;
+  /**
+   * The last few coordinator messages, oldest first.
+   *
+   * Present so a brand-new session can answer "what were we just doing" without the user
+   * repeating it. Absent while the ring is empty. Deliberately kept out of the shared charter:
+   * it changes every turn and would invalidate the prompt cache threads rely on.
+   */
+  recentMessages?: RecentMessage[];
   revision: number;
   quota: ProjectQuotaState;
   buckets: Record<OverviewBucket, ProjectThreadDescriptor[]>;

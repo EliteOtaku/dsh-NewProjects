@@ -10,6 +10,7 @@ import { aggregateLibrary } from './library.js';
 import { memoryPrefixFingerprint } from './memory.js';
 import { PLAN_TTL_MS } from './planner.js';
 import { quotaState } from './quota.js';
+import { renderRecentMessages } from './coordState.js';
 import type {
   ApprovalAction,
   OverviewBucket,
@@ -25,6 +26,14 @@ import type {
  * The display order of buckets on the panel, matching the official Threads tab:
  * Ready for review / Waiting on you / Working / Landing / Idle / Resolved.
  */
+/**
+ * How many coordinator messages the panel shows.
+ *
+ * The ring stores more; the panel is a glance, and a wall of text would push the thread buckets
+ * (the actual reason to open it) below the fold.
+ */
+export const RECENT_MESSAGES_IN_PANEL = 5;
+
 export const BUCKET_ORDER: readonly OverviewBucket[] = [
   'ready_for_review',
   'waiting_on_you',
@@ -208,6 +217,10 @@ export function buildOverview(
     projectId: manifest.projectId,
     name: manifest.name,
     rootDir: manifest.rootDir,
+    ...(manifest.goal === undefined || manifest.goal.length === 0 ? {} : { goal: manifest.goal }),
+    ...(manifest.recentMessages === undefined || manifest.recentMessages.length === 0
+      ? {}
+      : { recentMessages: [...manifest.recentMessages] }),
     revision: manifest.revision,
     quota: quotaState(manifest, nowMs),
     buckets,
@@ -289,6 +302,11 @@ export function renderOverviewMarkdown(overview: ProjectOverview): string {
   if (overview.quota.global !== undefined) {
     lines.push(`- quota (enforced, all projects): ${overview.quota.global.created}/${overview.quota.global.max}`);
   }
+  if (overview.goal !== undefined) {
+    // Directly under the identity lines: every routing decision is measured against it, so it
+    // has to be readable before the thread list, not in a settings tab nobody opens.
+    lines.push(`- goal: ${overview.goal}`);
+  }
   lines.push(`- memory: ${overview.memories.length} decisions, prefix \`${overview.prefixFingerprint}\``);
   lines.push(
     `- threads: ${overview.totals.threads} shown, ${overview.totals.active} active, ` +
@@ -340,6 +358,11 @@ export function renderOverviewMarkdown(overview: ProjectOverview): string {
     lines.push('');
   }
   if (empty) lines.push('_No threads yet. Use `project_coordinate` to start parallel work._', '');
+  const recent = renderRecentMessages(overview.recentMessages, RECENT_MESSAGES_IN_PANEL);
+  if (recent.length > 0) {
+    lines.push('');
+    lines.push(recent);
+  }
   return lines.join('\n');
 }
 

@@ -41,6 +41,7 @@ import {
   type KnowledgeState,
 } from './knowledge.js';
 import { collectKnowledge, readIndexFile, writeIndexFile } from './knowledgeSource.js';
+import { collectConventions, conventionsStamp, type ConventionDocument } from './conventions.js';
 import { ManifestStore, INSTRUCTIONS_FILE, projectPaths, type ProjectPaths } from './manifest.js';
 import {
   COORDINATOR_AUTHOR,
@@ -51,6 +52,7 @@ import {
   sortedMemories,
   upsertMemory,
 } from './memory.js';
+import { appendRecent, normaliseGoal } from './coordState.js';
 import { buildOverview, dueForResolve } from './overview.js';
 import { buildProjectState, type ProjectStateSnapshot } from './projectState.js';
 import { branchNameFor, normaliseTasks, planTasks, PLAN_TTL_MS } from './planner.js';
@@ -79,6 +81,7 @@ import type {
   ProjectOutputFile,
   ProjectReviewSnapshot,
   ProjectThreadDescriptor,
+  RecentMessage,
   SuggestStartResult,
   ThreadStatus,
 } from '../types.js';
@@ -142,6 +145,8 @@ export interface EngineDeps {
 /** Options accepted by {@link ProjectEngine.init}. */
 export interface InitOptions {
   name?: string;
+  /** One line of what the project is trying to get done. */
+  goal?: string;
   instructionsPath?: string;
   knowledgePaths?: string[];
   dailyThreadQuotaMax?: number;
@@ -248,6 +253,14 @@ export class ProjectEngine {
    * index file on every render. Invalidated by every knowledge mutation.
    */
   private knowledgeCache: { index: KnowledgeIndex; state: KnowledgeState } | undefined;
+  /**
+   * Root-level repository conventions, keyed by a size+mtime stamp.
+   *
+   * The charter re-renders on every prompt assembly, so re-reading `CLAUDE.md` each time would
+   * hammer the disk for text that almost never changes. The stamp makes an unchanged repository
+   * free and an edited one visible on the next render, without a watcher.
+   */
+  private conventionsCache: { stamp: string; documents: ConventionDocument[] } | undefined;
   /** The user-wide daily thread ledger; the enforced cap lives here, not in the manifest. */
   private readonly ledger: QuotaLedger;
   /**
@@ -397,6 +410,7 @@ export class ProjectEngine {
       updatedAt: now,
       ciPollIntervalMs: normalisePollInterval(options.ciPollIntervalMs),
       prefixVersion: 0,
+      ...(normaliseGoal(options.goal) === undefined ? {} : { goal: normaliseGoal(options.goal) as string }),
     };
     return this.store.create(manifest);
   }
@@ -444,6 +458,7 @@ export class ProjectEngine {
     });
     await this.refreshMemoryMirror();
     const broadcast = parent === undefined ? emptyBroadcast() : await this.broadcastMemory(parent);
+    await this.recordRecent('coordinator', `memory ${entry.key}: ${entry.decision}`);
     return { entry, broadcast };
   }
 
@@ -456,6 +471,7 @@ export class ProjectEngine {
     if (removed) {
       await this.refreshMemoryMirror();
       const broadcast = parent === undefined ? emptyBroadcast() : await this.broadcastMemory(parent);
+      await this.recordRecent('coordinator', `memory ${key}: removed`);
       return { removed: true, broadcast };
     }
     return { removed: false, broadcast: emptyBroadcast() };
@@ -464,6 +480,63 @@ export class ProjectEngine {
   /** All decisions, canonically ordered. */
   async listMemory(): Promise<ProjectMemoryEntry[]> {
     return sortedMemories(await this.requireManifest());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Project goal and recent coordination messages
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Set or clear the project goal.
+   *
+   * The goal is part of the shared charter, so it bumps `prefixVersion`: a goal change *is* a
+   * prefix change, and pretending otherwise would let the panel report a stale fingerprint.
+   * Clearing accepts `undefined`/blank so `/project goal` with no text means "forget it".
+   */
+  async setGoal(raw: string | undefined): Promise<{ goal?: string; changed: boolean }> {
+    const goal = normaliseGoal(raw);
+    const result = await this.store.update((draft) => {
+      const previous = draft.goal;
+      if (previous === goal) return { manifest: draft, result: { changed: false, goal } };
+      if (goal === undefined) delete draft.goal;
+      else draft.goal = goal;
+      // The goal sits in the shared prefix, so it participates in the same counter as memory.
+      draft.prefixVersion += 1;
+      return { manifest: draft, result: { changed: true, goal } };
+    });
+    if (result.changed) {
+      await this.recordRecent('user', goal === undefined ? 'cleared the project goal' : `set the project goal: ${goal}`);
+      await this.renderCharter().catch(() => undefined);
+    }
+    return result;
+  }
+
+  /** The goal as stored, or `undefined` when the project has none. */
+  async goal(): Promise<string | undefined> {
+    return (await this.requireManifest()).goal;
+  }
+
+  /** Retained coordinator messages, newest last. */
+  async recentMessages(): Promise<RecentMessage[]> {
+    return [...((await this.requireManifest()).recentMessages ?? [])];
+  }
+
+  /**
+   * Append one line to the recent-message ring.
+   *
+   * Best-effort by design: this is bookkeeping on top of the real work, so a failure here must
+   * never fail the operation that triggered it. The caller's own error (if any) is the one the
+   * user needs to see.
+   */
+  private async recordRecent(role: RecentMessage['role'], text: string): Promise<void> {
+    try {
+      await this.store.update((draft) => {
+        draft.recentMessages = appendRecent(draft.recentMessages, { at: this.clock.now(), role, text });
+        return { manifest: draft, result: undefined };
+      });
+    } catch {
+      // Nothing to do: the ring is a convenience, not a source of truth.
+    }
   }
 
   /**
@@ -535,11 +608,13 @@ export class ProjectEngine {
     // Knowledge is part of the prefix, so its mode (full vs retrieval notice) has to be
     // decided here, at render time, from the size on disk.
     const knowledge = await this.knowledgeState().catch(() => undefined);
+    const conventions = await this.conventions(manifest.rootDir);
     const text = renderProjectCharter({
       manifest,
       ...(instructions === undefined ? {} : { instructions }),
       knowledgePaths: manifest.knowledgePaths,
       ...(knowledge === undefined ? {} : { knowledge }),
+      ...(conventions.length === 0 ? {} : { conventions }),
     });
     this.charterCache = text;
     return { text, fingerprintSource: text };
@@ -556,6 +631,31 @@ export class ProjectEngine {
    */
   cachedCharter(): string {
     return this.charterCache;
+  }
+
+  /**
+   * Root-level repository conventions, re-read only when a file's size or mtime changed.
+   *
+   * Failure is soft: a repository whose conventions cannot be read still renders a charter, just
+   * without them. That is the same trade the knowledge layer makes — the alternative is that a
+   * permission problem on `CLAUDE.md` takes the whole project offline.
+   */
+  async conventions(rootDir: string): Promise<ConventionDocument[]> {
+    const stamp = await conventionsStamp(rootDir).catch(() => undefined);
+    if (stamp === undefined) return this.conventionsCache?.documents ?? [];
+    if (this.conventionsCache !== undefined && this.conventionsCache.stamp === stamp) {
+      return this.conventionsCache.documents;
+    }
+    const collected = await collectConventions(rootDir).catch(() => undefined);
+    const documents = collected?.documents ?? [];
+    // A failed read keeps the previous documents: dropping them on a transient error would
+    // change the prefix and re-cost the cache for no reason.
+    if (collected === undefined && this.conventionsCache !== undefined) {
+      this.conventionsCache = { stamp, documents: this.conventionsCache.documents };
+      return this.conventionsCache.documents;
+    }
+    this.conventionsCache = { stamp, documents };
+    return documents;
   }
 
   // ---------------------------------------------------------------------------
@@ -592,6 +692,7 @@ export class ProjectEngine {
         draft.plan = { plannedAt: now, origin: plan.origin, ...(planNote === undefined ? {} : { note: planNote }), tasks: planned };
         return { manifest: draft, result: undefined };
       });
+      await this.recordRecent('coordinator', `proposed ${planned.length} thread(s): ${planned.map((task) => task.title).join('; ')}`);
       const finalManifest = await this.requireManifest();
       const global = await this.ledger.snapshot(finalManifest.projectId, this.clock.now());
       return {
@@ -677,6 +778,14 @@ export class ProjectEngine {
 
     const finalManifest = await this.requireManifest();
     const global = await this.ledger.snapshot(finalManifest.projectId, this.clock.now());
+    // One line per round, not one per thread: the ring answers "what just happened" and N
+    // near-identical lines would evict everything else.
+    if (started.length > 0) {
+      await this.recordRecent(
+        'coordinator',
+        `started ${started.length}/${tasks.length} thread(s): ${started.map((thread) => thread.title).join('; ')}`,
+      );
+    }
     return {
       projectId: finalManifest.projectId,
       planned: tasks,
@@ -1319,6 +1428,15 @@ export class ProjectEngine {
         result.errors.push({ threadId: thread.threadId, message: describeError(error) });
       }
     }
+    // Only record when the sweep did something: a quiet poll writes nothing, so the ring keeps
+    // describing decisions instead of filling up with "nothing happened" lines.
+    const touched = result.healed.length + result.escalated.length + result.settled.length;
+    if (touched > 0) {
+      await this.recordRecent(
+        'coordinator',
+        `sweep: healed ${result.healed.length}, escalated ${result.escalated.length}, settled ${result.settled.length}`,
+      );
+    }
     return result;
   }
 
@@ -1777,6 +1895,10 @@ export class ProjectEngine {
     return {
       projectId: overview.projectId,
       name: overview.name,
+      // The goal is part of the coordinator triad (goal, threads, memory): it is what a fresh
+      // session needs to answer "what is this project for" without reading a transcript.
+      goal: overview.goal,
+      recentMessages: overview.recentMessages,
       rootDir: overview.rootDir,
       revision: overview.revision,
       quota: overview.quota,

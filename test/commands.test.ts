@@ -312,6 +312,46 @@ describe('/project pause', () => {
   });
 });
 
+describe('/project goal', () => {
+  it('sets, reads, and clears the goal', async () => {
+    const { engine } = await harness();
+    await run(engine, 'init');
+
+    const empty = await run(engine, 'goal');
+    assert.match(empty.text, /no goal set/);
+
+    const set = await run(engine, 'goal ship the beta');
+    assert.equal(set.kind, 'success');
+    assert.match(set.text, /goal set: ship the beta/);
+
+    const read = await run(engine, 'goal');
+    assert.match(read.text, /goal: ship the beta/);
+
+    const unchanged = await run(engine, 'goal ship the beta');
+    assert.match(unchanged.text, /goal unchanged/);
+
+    const cleared = await run(engine, 'goal clear');
+    assert.match(cleared.text, /goal cleared/);
+    assert.equal(await engine.goal(), undefined);
+  });
+
+  it('lists recent coordinator messages after the goal', async () => {
+    const { engine } = await harness();
+    await run(engine, 'init');
+    await run(engine, 'memory db = postgres');
+    const read = await run(engine, 'goal');
+    assert.match(read.text, /recent coordinator messages/);
+    assert.match(read.text, /memory db: postgres/);
+  });
+
+  it('requires a project record', async () => {
+    const { engine } = await harness();
+    const result = await run(engine, 'goal ship it');
+    assert.equal(result.kind, 'error');
+    assert.match(result.text, /\/project init/);
+  });
+});
+
 describe('/project heal', () => {
   it('summarises a sweep with nothing to do', async () => {
     const { engine } = await harness();

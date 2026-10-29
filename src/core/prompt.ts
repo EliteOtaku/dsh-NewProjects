@@ -14,6 +14,8 @@
  * thread ids. Those belong in the task block.
  */
 
+import { renderGoalSection } from './coordState.js';
+import { renderConventions, type ConventionDocument } from './conventions.js';
 import { renderMemoryPrefix } from './memory.js';
 import {
   emptyIndex,
@@ -56,6 +58,12 @@ export interface CharterInput {
    * are still listed so a thread can read them by hand.
    */
   knowledge?: { index: KnowledgeIndex; state: KnowledgeState };
+  /**
+   * Root-level repository conventions (`CLAUDE.md`, `.claude/CLAUDE.md`, `.claude/rules/*.md`).
+   *
+   * Already read from disk. Absent means the repository has none, which renders nothing.
+   */
+  conventions?: readonly ConventionDocument[];
 }
 
 /**
@@ -72,9 +80,23 @@ export function renderProjectCharter(input: CharterInput): string {
   blocks.push('You are working inside a coordinated project. Several threads may be working in parallel on different branches of the same repository, so your changes must stay inside your assigned scope and must not revert work you did not make.');
   blocks.push('');
 
+  const goal = renderGoalSection(manifest.goal);
+  if (goal.length > 0) {
+    blocks.push(goal);
+    blocks.push('');
+  }
+
   const memory = renderMemoryPrefix(manifest);
   if (memory.length > 0) {
     blocks.push(memory);
+    blocks.push('');
+  }
+
+  // Conventions sit next to instructions on purpose: both are standing text the user wrote, and
+  // both describe how to work here rather than what to work on.
+  const conventions = renderConventions(input.conventions ?? []);
+  if (conventions.length > 0) {
+    blocks.push(conventions);
     blocks.push('');
   }
 

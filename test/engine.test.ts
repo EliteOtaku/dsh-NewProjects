@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 
@@ -18,6 +18,7 @@ const test = it;
 import type { ApprovalAction } from '../src/types.js';
 import { ProjectEngine } from '../src/core/engine.js';
 import { isProjectError } from '../src/core/errors.js';
+import { RECENT_MESSAGE_LIMIT } from '../src/core/coordState.js';
 import { renderOverviewMarkdown } from '../src/core/overview.js';
 import { PROJECT_DIR } from '../src/core/manifest.js';
 import { dayKey } from '../src/core/util.js';
@@ -685,6 +686,154 @@ describe('overview / charter', () => {
     const { engine } = await harness();
     await engine.init();
     assert.equal(engine.cachedCharter(), '');
+  });
+});
+
+describe('repository conventions', () => {
+  it('puts a root CLAUDE.md into the shared charter', async () => {
+    // Official: the three root locations are "loaded from every repository when the thread
+    // starts". The charter is where a thread reads standing instructions before its task.
+    const { engine, root } = await harness();
+    await engine.init({ name: 'demo' });
+    await writeFile(join(root, 'CLAUDE.md'), 'Always run the type checker before committing.', 'utf8');
+    await engine.renderCharter();
+    assert.match(engine.cachedCharter(), /## Repository conventions/);
+    assert.match(engine.cachedCharter(), /Always run the type checker before committing\./);
+  });
+
+  it('ignores a nested CLAUDE.md', async () => {
+    const { engine, root } = await harness();
+    await engine.init({ name: 'demo' });
+    await mkdir(join(root, 'packages', 'api'), { recursive: true });
+    await writeFile(join(root, 'packages', 'api', 'CLAUDE.md'), 'nested only', 'utf8');
+    await engine.renderCharter();
+    assert.doesNotMatch(engine.cachedCharter(), /nested only/);
+  });
+
+  it('picks up an edited convention file on the next render', async () => {
+    // No watcher: the stamp is size+mtime, so an edit is visible one render later and an
+    // unchanged repository costs nothing.
+    const { engine, root } = await harness();
+    await engine.init({ name: 'demo' });
+    await writeFile(join(root, 'CLAUDE.md'), 'use tabs', 'utf8');
+    await engine.renderCharter();
+    assert.match(engine.cachedCharter(), /use tabs/);
+    await writeFile(join(root, 'CLAUDE.md'), 'use two spaces', 'utf8');
+    await engine.renderCharter();
+    assert.match(engine.cachedCharter(), /use two spaces/);
+    assert.doesNotMatch(engine.cachedCharter(), /use tabs/);
+  });
+
+  it('reads rules files and sorts them', async () => {
+    const { engine, root } = await harness();
+    await engine.init({ name: 'demo' });
+    await mkdir(join(root, '.claude', 'rules'), { recursive: true });
+    await writeFile(join(root, '.claude', 'rules', 'b.md'), 'rule B', 'utf8');
+    await writeFile(join(root, '.claude', 'rules', 'a.md'), 'rule A', 'utf8');
+    await engine.renderCharter();
+    const text = engine.cachedCharter();
+    assert.ok(text.indexOf('rule A') < text.indexOf('rule B'));
+  });
+
+  it('keeps the charter stable when conventions did not change', async () => {
+    const { engine, root } = await harness();
+    await engine.init({ name: 'demo' });
+    await writeFile(join(root, 'CLAUDE.md'), 'stable text', 'utf8');
+    await engine.renderCharter();
+    const first = engine.cachedCharter();
+    await engine.renderCharter();
+    assert.equal(engine.cachedCharter(), first);
+  });
+});
+
+describe('goal and recent messages', () => {
+  it('persists a goal given at init and reads it back from another engine', async () => {
+    // Acceptance for GAP-06: the goal must survive the session, because a fresh coordinator
+    // has no transcript to recover it from.
+    const { engine, root, runner, threads, clock } = await harness();
+    await engine.init({ name: 'demo', goal: 'ship the beta' });
+    const reopened = new ProjectEngine(root, {
+      runner,
+      threads,
+      clock,
+      ids: sequentialIds(),
+      quotaLedgerPath: join(root, 'quota-ledger.json'),
+    });
+    assert.equal(await reopened.goal(), 'ship the beta');
+  });
+
+  it('normalises the goal to one line', async () => {
+    const { engine } = await harness();
+    await engine.init({ name: 'demo' });
+    const result = await engine.setGoal('  ship   the\n  beta ');
+    assert.equal(result.goal, 'ship the beta');
+    assert.equal(result.changed, true);
+  });
+
+  it('reports no change when the goal is set to the same value', async () => {
+    const { engine } = await harness();
+    await engine.init({ name: 'demo', goal: 'ship it' });
+    const result = await engine.setGoal('ship it');
+    assert.equal(result.changed, false);
+  });
+
+  it('renders the goal into the charter and leaves it out when unset', async () => {
+    const { engine } = await harness();
+    await engine.init({ name: 'demo' });
+    await engine.renderCharter();
+    assert.doesNotMatch(engine.cachedCharter(), /## Project goal/);
+    await engine.setGoal('ship the beta');
+    assert.match(engine.cachedCharter(), /ship the beta/);
+  });
+
+  it('keeps the charter byte-identical when only recent messages change', async () => {
+    // The charter is the prefix every thread shares; if a coordinator message moved into it,
+    // every turn would re-cost the provider's cache for all sessions.
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo', goal: 'ship it' });
+    repoReady(runner);
+    await engine.renderCharter();
+    const before = engine.cachedCharter();
+    await engine.setMemory(undefined, { key: 'db', decision: 'postgres' });
+    await engine.renderCharter();
+    const afterMemory = engine.cachedCharter();
+    assert.notEqual(afterMemory, before);
+    // A message-only change must not touch the prefix.
+    const messagesBefore = await engine.recentMessages();
+    assert.ok(messagesBefore.length > 0);
+    await engine.renderCharter();
+    assert.equal(engine.cachedCharter(), afterMemory);
+  });
+
+  it('records what the coordinator did, bounded', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    await engine.coordinate(PARENT, '- one\n- two', { planOnly: false });
+    await engine.setMemory(undefined, { key: 'db', decision: 'sqlite' });
+    const recent = await engine.recentMessages();
+    assert.ok(recent.length >= 2);
+    assert.ok(recent.some((message) => message.text.includes('started 2/2 thread')));
+    assert.ok(recent.some((message) => message.text.includes('memory db')));
+    assert.ok(recent.length <= RECENT_MESSAGE_LIMIT);
+  });
+
+  it('surfaces the goal and the recent messages through the overview payload', async () => {
+    const { engine } = await harness();
+    await engine.init({ name: 'demo', goal: 'ship it' });
+    await engine.setMemory(undefined, { key: 'db', decision: 'sqlite' });
+    const payload = await engine.overviewJson();
+    assert.equal(payload['goal'], 'ship it');
+    assert.ok(Array.isArray(payload['recentMessages']));
+    assert.ok((payload['recentMessages'] as unknown[]).length > 0);
+  });
+
+  it('prints the goal exactly once in the markdown panel', async () => {
+    // A duplicated line got in through a scripted edit; asserting the count keeps it out.
+    const { engine } = await harness();
+    await engine.init({ name: 'demo', goal: 'ship it' });
+    const markdown = renderOverviewMarkdown(await engine.overview());
+    assert.equal(markdown.match(/- goal:/g)?.length, 1);
   });
 });
 
