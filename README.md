@@ -68,6 +68,8 @@ cmd /c mklink /J "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-newp
 /project coordinate <goal>    # 提议拆解（命令路径没有模型，必然是兜底拆解，故只提议不启动）
 /project start [1 3]          # 启动全部或指定序号的建议线程
 /project drop                 # 丢弃建议列表
+/project pause <原因>          # 停下一切：不起新线程、不巡检、不交付，活跃线程被中断
+/project resume               # 撤销暂停，被中断的线程仍可继续
 /project knowledge            # 知识层状态：文档数、字符数、绑定路径
 /project knowledge add <path> [path...]   # 绑定文件或目录
 /project knowledge rm <path>  # 解绑

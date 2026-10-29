@@ -186,6 +186,8 @@ export interface HealSweepResult {
   settled: ProjectThreadDescriptor[];
   waiting: ProjectThreadDescriptor[];
   errors: Array<{ threadId: string; message: string }>;
+  /** Set when the sweep declined to act because the project is paused. */
+  paused?: string;
 }
 
 /** Thread-management verbs exposed to the model and the `/project` command. */
@@ -551,6 +553,7 @@ export class ProjectEngine {
     signal: AbortSignal = AbortSignal.timeout(120_000),
   ): Promise<CoordinateResult> {
     this.noteCaller(parent);
+    await this.refuseWhilePaused('start threads');
     const opening = await this.requireManifest();
     const plan = this.resolvePlan(goal, options);
     const planned = plan.tasks;
@@ -722,6 +725,7 @@ export class ProjectEngine {
     signal: AbortSignal = AbortSignal.timeout(120_000),
   ): Promise<SuggestStartResult> {
     this.noteCaller(parent);
+    await this.refuseWhilePaused('start threads');
     const manifest = await this.requireManifest();
     const plan = manifest.plan;
     if (plan === undefined) {
@@ -1056,6 +1060,7 @@ export class ProjectEngine {
         if (payload === undefined || payload.trim().length === 0) {
           throw new ProjectError('INVALID_INPUT', 'steer requires a message');
         }
+        await this.refuseWhilePaused('steer a thread');
         await this.threads.steer(parent, thread.childSessionId, payload.trim(), signal);
         const updated = await this.updateThread(threadId, (draft) => {
           if (draft.status === 'needs_feedback') draft.status = 'running';
@@ -1068,6 +1073,7 @@ export class ProjectEngine {
         if (payload === undefined || payload.trim().length === 0) {
           throw new ProjectError('INVALID_INPUT', 'respond requires an answer');
         }
+        await this.refuseWhilePaused('answer a thread');
         const text = renderFeedbackAnswer(thread, payload);
         await this.checkoutFor(thread);
         await this.threads.resume(parent, thread.childSessionId, text, signal);
@@ -1088,6 +1094,7 @@ export class ProjectEngine {
         return { thread: updated, message: `interrupted ${threadId}` };
       }
       case 'retry': {
+        await this.refuseWhilePaused('retry a thread');
         const manifest = await this.requireManifest();
         await this.checkoutFor(thread);
         await this.threads.resume(
@@ -1139,6 +1146,7 @@ export class ProjectEngine {
         if (prUrl === undefined) {
           throw new ProjectError('INVALID_INPUT', `${threadId} has no pull request to merge`, { threadId });
         }
+        await this.refuseWhilePaused('merge a pull request');
         await this.checkoutFor(thread);
         await this.threads.resume(parent, thread.childSessionId, renderMergeRequest(thread, { prUrl }), signal);
         this.live.set(thread.childSessionId, threadId);
@@ -1154,6 +1162,7 @@ export class ProjectEngine {
         if (prUrl === undefined) {
           throw new ProjectError('INVALID_INPUT', `${threadId} has no pull request to resolve conflicts against`, { threadId });
         }
+        await this.refuseWhilePaused('wake a thread for conflicts');
         const cwd = await this.checkoutFor(thread);
         const base = (await this.conflictBase(cwd, prUrl)) ?? 'main';
         const files = await this.conflictCandidates(thread, cwd, base);
@@ -1219,6 +1228,21 @@ export class ProjectEngine {
   async healSweep(parent: object, signal: AbortSignal = AbortSignal.timeout(120_000)): Promise<HealSweepResult> {
     this.noteCaller(parent);
     const manifest = await this.requireManifest();
+    if (manifest.pausedAt !== undefined) {
+      // Reported rather than thrown: the background watcher calls this on a timer, and a
+      // throwing sweep would fill the log with one stack per poll while the project sits
+      // paused by design.
+      return {
+        observed: 0,
+        resolved: 0,
+        healed: [],
+        escalated: [],
+        settled: [],
+        waiting: [],
+        errors: [],
+        paused: manifest.pauseReason ?? 'project is paused',
+      };
+    }
     const result: HealSweepResult = {
     observed: 0,
     resolved: 0,
@@ -1591,6 +1615,84 @@ export class ProjectEngine {
     return { ...overview, quota: { ...overview.quota, global: { created: global.created, max: global.max } } };
   }
 
+  /**
+   * Stop the project: no new threads, no sweeps, no delivery, live threads interrupted.
+   *
+   * The local equivalent of the official Pause. It exists because this plugin runs on the
+   * user's own machine: "I need the CPU and the network for something else" is a request that
+   * comes up far more often than archiving, and until now the only way to honour it was to
+   * disable the plugin.
+   */
+  async pause(parent: object, reason?: string): Promise<{ interrupted: string[] }> {
+    this.noteCaller(parent);
+    const manifest = await this.requireManifest();
+    const active = Object.values(manifest.threads).filter(
+      (thread) => thread.status === 'running' || thread.status === 'ci_fixing' || thread.status === 'queued',
+    );
+    const now = this.clock.now();
+    await this.store.update((draft) => {
+      draft.pausedAt = now;
+      if (reason === undefined) delete draft.pauseReason;
+      else draft.pauseReason = reason;
+      for (const thread of active) {
+        const live = draft.threads[thread.threadId];
+        if (live !== undefined && live.status === 'running') live.note = 'interrupted by pause';
+      }
+      return { manifest: draft, result: undefined };
+    });
+    // Interrupt after the record says paused: a thread that observes its own abort and tries
+    // to heal would otherwise be able to start one more round.
+    const interrupted: string[] = [];
+    for (const thread of active) {
+      if (!this.threads.isLive(thread.childSessionId)) continue;
+      await this.threads.interrupt(thread.childSessionId).catch(() => undefined);
+      interrupted.push(thread.threadId);
+    }
+    await this.publishState();
+    return { interrupted };
+  }
+
+  /** The pause record, if the project is paused. */
+  async paused(): Promise<{ since: number; reason?: string } | undefined> {
+    const snapshot = await this.store.tryRead();
+    if (snapshot?.manifest.pausedAt === undefined) return undefined;
+    return {
+      since: snapshot.manifest.pausedAt,
+      ...(snapshot.manifest.pauseReason === undefined ? {} : { reason: snapshot.manifest.pauseReason }),
+    };
+  }
+
+  /** Resume a paused project. Threads interrupted by the pause stay resumable. */
+  async resume(parent?: object): Promise<{ wasPaused: boolean }> {
+    if (parent !== undefined) this.noteCaller(parent);
+    const manifest = await this.requireManifest();
+    if (manifest.pausedAt === undefined) return { wasPaused: false };
+    await this.store.update((draft) => {
+      delete draft.pausedAt;
+      delete draft.pauseReason;
+      return { manifest: draft, result: undefined };
+    });
+    await this.publishState();
+    return { wasPaused: true };
+  }
+
+  /**
+   * Refuse to advance work while paused.
+   *
+   * Read-only actions stay available: a user who paused the project to answer a question or
+   * close a thread should not have to resume first.
+   */
+  private async refuseWhilePaused(action: string): Promise<void> {
+    const manifest = await this.requireManifest();
+    if (manifest.pausedAt === undefined) return;
+    const reason = manifest.pauseReason === undefined ? '' : `: ${manifest.pauseReason}`;
+    throw new ProjectError(
+      'PROJECT_PAUSED',
+      `project is paused${reason}; \`/project resume\` before you ${action}`,
+      { pausedAt: manifest.pausedAt, action },
+    );
+  }
+
   /** Buckets plus thread descriptors as a plain JSON value (tool output). */
   async overviewJson(options: { includeResolved?: boolean } = {}): Promise<Record<string, unknown>> {
     const overview = await this.overview([], options);
@@ -1606,6 +1708,7 @@ export class ProjectEngine {
       prefixFingerprint: overview.prefixFingerprint,
       warnings: overview.warnings,
       memories: overview.memories,
+      ...(overview.paused === undefined ? {} : { paused: overview.paused }),
       knowledge: knowledge === undefined ? undefined : {
         docs: knowledge.state.docs,
         chunks: knowledge.state.chunks,
@@ -1704,6 +1807,7 @@ export class ProjectEngine {
     threadId: string,
     options: { message?: string; title?: string; body?: string; draft?: boolean } = {},
   ): Promise<{ thread: ProjectThreadDescriptor; prRef?: string; message: string }> {
+    await this.refuseWhilePaused('deliver a thread');
     const thread = await this.requireThread(threadId);
     const cwd = await this.checkoutFor(thread);
     const commit = await commitAll(this.runner, {

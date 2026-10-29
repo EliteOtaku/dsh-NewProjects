@@ -73,7 +73,7 @@
 | **P1** | 会静默产出错误结果 | ~~`GAP-23`~~ ✅ ~~`GAP-24`~~ ✅（`GAP-22` / `GAP-22a` 已关闭）—— **P1 已清空** |
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | ~~`GAP-03`~~ ✅ ~~`GAP-04`~~ ✅ ~~`GAP-05`~~ ✅（2026-10-29 关闭） |
 | **P3** | 官方有、我们无，独立功能 | `GAP-06` `GAP-09` `GAP-13` `GAP-29`（`GAP-10` / `GAP-11` / `GAP-12` 已于 2026-10-29 关闭） |
-| **P4** | 项目管理类，缺了不能「管起来」 | `GAP-14` `GAP-15` `GAP-17` `GAP-18` `GAP-28`（`GAP-25` 已于 2026-10-29 关闭） |
+| **P4** | 项目管理类，缺了不能「管起来」 | `GAP-15` `GAP-17` `GAP-18` `GAP-28`（`GAP-14`/`GAP-25` 已于 2026-10-29 关闭） |
 | **P5** | 磁盘、性能与健壮性，不出错 | `GAP-20` `GAP-27`（`GAP-19` 已于 2026-10-29 关闭） |
 | **ARCH** | 架构性差异，记录不排期 | `GAP-A1` ~ `GAP-A4` |
 | **BOUND** | 有意为之的边界，非缺陷 | `BOUND-1` ~ `BOUND-4` |
@@ -489,12 +489,23 @@
 
 ## P4 — 项目管理类
 
-### GAP-14 没有 Pause
+### GAP-14 没有 Pause — ✅ 已做
 
 - **依据**：`OFFICIAL`「**Pause**: stops everything at once. Every running thread and the conversation are interrupted, no new threads start, scheduled tasks don't run, and the project doesn't accept messages until you resume it.」
 - **判断**：在本地平台上这就是「我要用这台机器干别的」的那个开关，**比归档常用得多**，应优先于 `GAP-15`。
 - **做法**：`ProjectManifest` 加 `pausedAt?: number`；`coordinate` / `healSweep` / `deliverThread` 开头检查并拒绝；`/project pause` 与 `/project resume`；暂停时 `interrupt` 所有活跃线程。
 - **验收标准**：暂停后 `coordinate` / `healSweep` 都不动作且给出明确原因；恢复后可继续；暂停状态跨进程持久。
+
+**实际做法（2026-10-29 落地）**：
+
+- `ProjectManifest` 新增 `pausedAt?` 与 `pauseReason?`：**记时间戳而不是布尔开关**，这样它天然跨重启、跨进程（两个 engine 读同一个记录），并且面板能说「从什么时候开始暂停的」。
+- `engine.pause(parent, reason?)` 先写记录、**再**中断活跃线程。顺序不能反：线程观察到自己的 abort 后如果还能跑一轮自愈，那就不叫暂停了。中断只发 `interrupt`，不改状态（`queued` 仍可 retry）。
+- 守卫点：`coordinate` / `startSuggested` / `deliverThread` 直接抛 `PROJECT_PAUSED`（新错误码，消息里带 `/project resume`）；`manageThread` 的 `steer` / `respond` / `retry` / `merge` / `conflicts` 同样拒绝。**只读与收尾动作仍然可用**（`inspect` / `close` / `reopen` / `review` / `watch` / `unwatch` / `interrupt`）——用户暂停机器之后仍需要能整理线程。
+- `healSweep` **不抛错而是返回** `{ observed: 0, paused: reason }`：后台 watcher 按定时器调它，抛错会每轮写一条堆栈，而项目是**按设计**停着的。
+- `/project pause [原因]` 与 `/project resume` 命令；`/project heal` 的输出会带 `paused: ...`。
+- 面板：`ProjectOverview.paused` → markdown 在 quota **之前**输出 `- PAUSED: <原因> (\`/project resume\`)`（埋在几十个线程下面的话，读者会以为面板坏了而不是项目停着），`overviewJson()` 与投影快照同样带 `paused`。
+
+**验收（全部有测试）**：✅ 暂停后 `coordinate`/`healSweep`/`deliverThread` 不动作且原因明确 —— `test/engine.test.ts` 的 `refuses to start work, sweep, or deliver while paused, and says so`；✅ 恢复后可继续 —— `interrupts live threads and keeps them resumable`；✅ 跨进程持久 —— `survives a restart, and resuming an unpaused project is a no-op`；✅ 只读动作仍可用 —— `still allows reading and closing while paused`；✅ 命令层 —— `test/commands.test.ts` 的 `stops the project, reports why, and lifts on resume`；✅ 面板 —— `test/unit/overview.test.ts` 的 `announces a paused project above the quota, with the way out`。
 
 ### GAP-15 没有 Archive
 
@@ -738,7 +749,7 @@
 | **第一批 让输出可信** | `GAP-01` 全局配额 ✅ + `GAP-22` 知识 paths-first ✅ | 无 | 2026-10-27 `9c7ef10`：`GAP-01` 关闭，`GAP-22` 的减法做完（确实净减）；2026-10-29：`GAP-22a`（路径锚定项目根）关闭 —— **第一批完成** |
 | **第二批 让拆解可信** | `GAP-26` 模型优先拆解 + Suggested threads ✅ | 无（可与一批并行） | 后者是前者的保险，必须同批。2026-10-29 关闭 —— **第二批完成** |
 | **第三批 让报回可用** | `GAP-03` 投影 ✅ + `GAP-04` 六分组 ✅ + `GAP-05` 终态 ✅ + `GAP-10` Library ✅ + `GAP-11` PR 聚合 ✅ | 03 与 04 **可同批**（原判断的串行约束不成立） | 2026-10-29 全部关闭 —— **第三批完成** |
-| **第四批 让裁定可用** | ~~`GAP-12` 卡片动作~~ ✅ + ~~`GAP-25` 禁令~~ ✅ + ~~`GAP-19` worktree 回收~~ ✅ + `GAP-18` 审批 + `GAP-14` Pause | 19 依赖 10（先有清单再删目录）| **不可逆动作（19）与它的防护同批**，不推到最后。`GAP-12`/`GAP-25`/`GAP-19` 已于 2026-10-29 完成 |
+| **第四批 让裁定可用** | ~~`GAP-12` 卡片动作~~ ✅ + ~~`GAP-25` 禁令~~ ✅ + ~~`GAP-19` worktree 回收~~ ✅ + `GAP-18` 审批 + ~~`GAP-14` Pause~~ ✅ | 19 依赖 10（先有清单再删目录）| **不可逆动作（19）与它的防护同批**，不推到最后。`GAP-12`/`GAP-25`/`GAP-19`/`GAP-14` 已于 2026-10-29 完成 |
 | **第五批 减少重复交代** | `GAP-06` goal + `GAP-09` 仓库约定 + `GAP-29` 三件套 | 无 | |
 | **第六批 卫生** | `GAP-13` Usage + `GAP-15` Archive + `GAP-17` 超时 + `GAP-20` purge + `GAP-27` 锁重试 | 无 | |
 | **按需** | `GAP-28` 并发偏好 | 无 | ~~`GAP-23`~~ ✅ 已于 2026-10-29 提前做完 |

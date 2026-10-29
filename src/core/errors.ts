@@ -16,7 +16,9 @@ export type ProjectErrorCode =
   /** A subagent backend refusal (provider missing, activation rejected). */
   | 'SPAWN_FAILED'
   /** Bad caller input that passed JSON-schema validation but is semantically wrong. */
-  | 'INVALID_INPUT';
+  | 'INVALID_INPUT'
+  /** The project is paused — resume it before starting or advancing any thread. */
+  | 'PROJECT_PAUSED';
 
 export class ProjectError extends Error {
   readonly code: ProjectErrorCode;

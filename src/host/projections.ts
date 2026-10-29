@@ -62,6 +62,7 @@ const snapshotSchema = z.object({
     globalMax: z.number().optional(),
   }),
   suggested: z.object({ count: z.number(), expired: z.boolean() }).optional(),
+  paused: z.object({ since: z.number(), reason: z.string().optional() }).optional(),
   knowledge: z.object({ docs: z.number(), summary: z.string() }).optional(),
   warnings: z.array(z.string()),
 });

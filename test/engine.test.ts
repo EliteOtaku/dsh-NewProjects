@@ -13,6 +13,8 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 
+const test = it;
+
 import { ProjectEngine } from '../src/core/engine.js';
 import { isProjectError } from '../src/core/errors.js';
 import { PROJECT_DIR } from '../src/core/manifest.js';
@@ -716,6 +718,99 @@ describe('manifest durability', () => {
     const snapshot = await engine.store.read();
     await engine.store.writeAtomic({ ...snapshot.manifest, name: 'renamed' }, snapshot.version);
     assert.equal((await engine.requireManifest()).name, 'renamed');
+  });
+});
+
+describe('pause', () => {
+  test('refuses to start work, sweep, or deliver while paused, and says so', async () => {
+    const { engine, runner, threads } = await harness();
+    repoReady(runner);
+    await engine.init({ name: 'demo' });
+    const paused = await engine.pause(PARENT, 'machine is busy');
+    assert.equal(paused.interrupted.length, 0);
+
+    await assert.rejects(
+      () => engine.coordinate(PARENT, '- one'),
+      (error: unknown) => isProjectError(error) && error.code === 'PROJECT_PAUSED',
+    );
+    // The message has to name the way out: "paused" alone leaves the reader stuck.
+    await assert.rejects(
+      () => engine.coordinate(PARENT, '- one'),
+/\/project resume/,
+
+    );
+    const swept = await engine.healSweep(PARENT);
+    assert.equal(swept.observed, 0);
+    assert.equal(swept.paused, 'machine is busy');
+    await assert.rejects(
+      () => engine.deliverThread('thr-1'),
+      (error: unknown) => isProjectError(error) && error.code === 'PROJECT_PAUSED',
+    );
+    assert.equal(threads.launches.length, 0);
+  });
+
+  test('interrupts live threads and keeps them resumable', async () => {
+    const { engine, runner, threads } = await harness();
+    repoReady(runner);
+    await engine.init({ name: 'demo' });
+    const plan = await engine.coordinate(PARENT, ['- one', '- two'].join('\n'), { planOnly: false });
+    assert.equal(threads.launches.length, 2);
+
+    const paused = await engine.pause(PARENT);
+    assert.deepEqual(paused.interrupted, plan.started.map((thread) => thread.threadId));
+    assert.deepEqual(threads.interrupts, plan.started.map((thread) => thread.childSessionId));
+
+    // Interrupting is not failing: the record keeps the thread and it can be retried.
+    const thread = await engine.requireThread(plan.started[0]?.threadId ?? '');
+    assert.ok(thread.status !== 'failed');
+    const retried = await engine.resume(PARENT);
+    assert.equal(retried.wasPaused, true);
+    await engine.manageThread(PARENT, thread.threadId, 'retry', undefined);
+    assert.equal(threads.resumes.length, 1);
+  });
+
+  test('survives a restart, and resuming an unpaused project is a no-op', async () => {
+    const root = await freshRoot();
+    const first = new ProjectEngine(root, {
+      runner: new FakeRunner(),
+      threads: new FakeThreads(),
+      clock: fixedClock(),
+      ids: sequentialIds(),
+      quotaLedgerPath: join(root, 'quota-ledger.json'),
+    });
+    await first.init({ name: 'demo' });
+    assert.equal((await first.resume()).wasPaused, false);
+    await first.pause(PARENT, 'overnight');
+
+    const second = new ProjectEngine(root, {
+      runner: new FakeRunner(),
+      threads: new FakeThreads(),
+      clock: fixedClock(),
+      ids: sequentialIds(),
+      quotaLedgerPath: join(root, 'quota-ledger.json'),
+    });
+    // The pause is a record, not a flag in memory: a restart must not quietly resume.
+    assert.deepEqual(await second.paused(), { since: fixedClock().now(), reason: 'overnight' });
+    await assert.rejects(
+      () => second.coordinate(PARENT, '- one'),
+      (error: unknown) => isProjectError(error) && error.code === 'PROJECT_PAUSED',
+    );
+  });
+
+  test('still allows reading and closing while paused', async () => {
+    const { engine, runner } = await harness();
+    repoReady(runner);
+    await engine.init({ name: 'demo' });
+    const plan = await engine.coordinate(PARENT, '- one', { planOnly: false });
+    const threadId = plan.started[0]?.threadId ?? '';
+    await engine.pause(PARENT);
+
+    const overview = await engine.overviewJson();
+    assert.deepEqual(overview['paused'], { since: fixedClock().now() });
+    await engine.manageThread(PARENT, threadId, 'inspect', undefined);
+    // A user pausing the machine should still be able to tidy up; closing is their call.
+    const closed = await engine.manageThread(PARENT, threadId, 'close', 'tidying up');
+    assert.equal(closed.thread.status, 'resolved');
   });
 });
 

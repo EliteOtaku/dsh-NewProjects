@@ -238,6 +238,16 @@ export interface ProjectManifest {
   /** Bumped on every prefix-affecting change (memory set/remove). */
   prefixVersion: number;
   /**
+   * When the project was paused, or absent while it runs.
+   *
+   * Pausing stops everything at once: no new threads, no self-healing sweeps, no delivery,
+   * and live threads are interrupted. It is the "I need this machine for something else"
+   * switch, so it must survive a restart — hence a stored timestamp rather than a flag.
+   */
+  pausedAt?: number;
+  /** Why it was paused, for the panel and for the agent that asks later. */
+  pauseReason?: string;
+  /**
    * A decomposition proposed but not yet started.
    *
    * Only one at a time, matching the official single **Suggested threads** list. Cleared when
@@ -348,6 +358,8 @@ export interface ProjectOverview {
     /** True when at least one thread is waiting on you — the panel's dot. */
     needsAttention: boolean;
   };
+  /** Present only while the project is paused; carries the reason given at pause time. */
+  paused?: { since: number; reason?: string };
   /**
    * Files threads produced, deduplicated by path.
    *

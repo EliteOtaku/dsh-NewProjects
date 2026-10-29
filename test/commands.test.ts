@@ -286,6 +286,32 @@ describe('/project threads and thread', () => {
   });
 });
 
+describe('/project pause', () => {
+  it('stops the project, reports why, and lifts on resume', async () => {
+    const { engine } = await harness();
+    await run(engine, 'init');
+
+    const paused = await run(engine, 'pause machine is busy');
+    assert.equal(paused.kind, 'success');
+    assert.match(paused.text, /paused: machine is busy/);
+    assert.match(paused.text, /\/project resume/);
+
+    const refused = await run(engine, 'coordinate - one');
+    assert.equal(refused.kind, 'error');
+    assert.match(refused.text, /paused/);
+
+    const swept = await run(engine, 'heal');
+    assert.match(swept.text, /paused: machine is busy/);
+
+    const resumed = await run(engine, 'resume');
+    assert.equal(resumed.kind, 'success');
+    assert.match(resumed.text, /resumed/);
+
+    const again = await run(engine, 'resume');
+    assert.match(again.text, /not paused/);
+  });
+});
+
 describe('/project heal', () => {
   it('summarises a sweep with nothing to do', async () => {
     const { engine } = await harness();

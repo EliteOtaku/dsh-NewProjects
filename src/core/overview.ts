@@ -212,6 +212,14 @@ export function buildOverview(
     buckets,
     memories: Object.values(manifest.memories).sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
     prefixFingerprint: memoryPrefixFingerprint(manifest),
+    ...(manifest.pausedAt === undefined
+      ? {}
+      : {
+          paused: {
+            since: manifest.pausedAt,
+            ...(manifest.pauseReason === undefined ? {} : { reason: manifest.pauseReason }),
+          },
+        }),
     // An expired plan is still reported: dropping it is a write, and the panel is a reader.
     // It is marked stale so the panel cannot offer threads that will refuse to start.
     ...(manifest.plan === undefined
@@ -259,6 +267,13 @@ export function renderOverviewMarkdown(overview: ProjectOverview): string {
   lines.push(`# ${overview.name}`, '');
   lines.push(`- project: \`${overview.projectId}\` (r${overview.revision})`);
   lines.push(`- root: \`${overview.rootDir}\``);
+  if (overview.paused !== undefined) {
+    // First thing after the identity lines: a paused project ignores every request, and a
+    // panel that buried that fact under a thread list would look broken rather than paused.
+    lines.push(
+      `- PAUSED${overview.paused.reason === undefined ? '' : `: ${overview.paused.reason}`} (\`/project resume\`)`,
+    );
+  }
   lines.push(`- quota: ${overview.quota.created}/${overview.quota.max} threads from this project on ${overview.quota.day}`);
   if (overview.quota.global !== undefined) {
     lines.push(`- quota (enforced, all projects): ${overview.quota.global.created}/${overview.quota.global.max}`);

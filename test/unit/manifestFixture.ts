@@ -15,6 +15,8 @@ export interface ManifestOverrides {
   dailyThreadQuotaMax?: number;
   dailyThreadsCreated?: number;
   quotaDay?: string;
+  pausedAt?: number;
+  pauseReason?: string;
 }
 
 /** Build a manifest with the given overrides. */
@@ -35,5 +37,7 @@ export function makeManifest(overrides: ManifestOverrides = {}): ProjectManifest
     updatedAt: Date.parse('2026-01-01T00:00:00Z'),
     ciPollIntervalMs: 60_000,
     prefixVersion: 0,
+    ...(overrides.pausedAt === undefined ? {} : { pausedAt: overrides.pausedAt }),
+    ...(overrides.pauseReason === undefined ? {} : { pauseReason: overrides.pauseReason }),
   };
 }

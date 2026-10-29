@@ -55,6 +55,8 @@ export interface ProjectStateSnapshot {
   truncated: number;
   quota: { day: string; used: number; max: number; globalUsed?: number; globalMax?: number };
   suggested?: { count: number; expired: boolean };
+  /** Present only while the project is paused. */
+  paused?: { since: number; reason?: string };
   knowledge?: { docs: number; summary: string };
   warnings: string[];
 }
@@ -125,6 +127,7 @@ export function buildProjectState(
   if (overview.suggested !== undefined) {
     snapshot.suggested = { count: overview.suggested.tasks.length, expired: overview.suggested.expired };
   }
+  if (overview.paused !== undefined) snapshot.paused = overview.paused;
   if (extra.knowledge !== undefined) snapshot.knowledge = extra.knowledge;
   return snapshot;
 }

@@ -18,10 +18,11 @@
  * never the problem.
  */
 
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
+import { renameWithRetry } from './atomicFile.js';
 import { ProjectError } from './errors.js';
 import { dayKey } from './util.js';
 
@@ -237,7 +238,7 @@ async function readIfPresent(path: string): Promise<string | undefined> {
 async function writeAtomic(path: string, body: string): Promise<void> {
   const tmp = `${path}.tmp`;
   await writeFile(tmp, body, 'utf8');
-  await rename(tmp, path);
+  await renameWithRetry(tmp, path);
 }
 
 function isExists(error: unknown): boolean {

@@ -334,4 +334,19 @@ describe('the Library and Pull requests tabs', () => {
     assert.deepEqual(Object.keys(overview.pullRequests ?? {}), ['open']);
     assert.equal(overview.pullRequests?.merged, undefined);
   });
+
+  describe('pause', () => {
+  it('announces a paused project above the quota, with the way out', () => {
+    const manifest = makeManifest({ pausedAt: Date.parse('2026-01-02T03:04:05Z'), pauseReason: 'machine is busy' });
+    const markdown = renderOverviewMarkdown(buildOverview(manifest, Date.parse('2026-01-02T03:04:05Z')));
+    assert.match(markdown, /- PAUSED: machine is busy \(`\/project resume`\)/);
+    // A reader must not have to scan the thread list to discover that nothing will move.
+    assert.ok(markdown.indexOf('- PAUSED') < markdown.indexOf('- quota:'));
+  });
+
+  it('omits the paused line while the project runs', () => {
+    const markdown = renderOverviewMarkdown(buildOverview(makeManifest(), Date.parse('2026-01-02T03:04:05Z')));
+    assert.doesNotMatch(markdown, /PAUSED/);
+  });
+  });
 });
