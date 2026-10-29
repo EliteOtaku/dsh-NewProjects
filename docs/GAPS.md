@@ -73,8 +73,8 @@
 | **P1** | 会静默产出错误结果 | ~~`GAP-23`~~ ✅ ~~`GAP-24`~~ ✅（`GAP-22` / `GAP-22a` 已关闭）—— **P1 已清空** |
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | ~~`GAP-03`~~ ✅ ~~`GAP-04`~~ ✅ ~~`GAP-05`~~ ✅（2026-10-29 关闭） |
 | **P3** | 官方有、我们无，独立功能 | 全部关闭（`GAP-06` / `GAP-09` / `GAP-10` / `GAP-11` / `GAP-12` / `GAP-13` / `GAP-29` 已于 2026-10-29 完成） |
-| **P4** | 项目管理类，缺了不能「管起来」 | `GAP-15` `GAP-17` `GAP-28`（`GAP-14`/`GAP-18`/`GAP-25` 已于 2026-10-29 关闭） |
-| **P5** | 磁盘、性能与健壮性，不出错 | `GAP-20` `GAP-27`（`GAP-19` 已于 2026-10-29 关闭） |
+| **P4** | 项目管理类，缺了不能「管起来」 | ~~`GAP-15`~~ ✅ ~~`GAP-17`~~ ✅（2026-10-29 关闭）+ `GAP-28` 按需 |
+| **P5** | 磁盘、性能与健壮性，不出错 | ~~`GAP-20`~~ ✅ ~~`GAP-27`~~ ✅（2026-10-29 关闭）—— **P5 已清空** |
 | **ARCH** | 架构性差异，记录不排期 | `GAP-A1` ~ `GAP-A4` |
 | **BOUND** | 有意为之的边界，非缺陷 | `BOUND-1` ~ `BOUND-4` |
 
@@ -574,18 +574,38 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
 
 **验收（全部有测试）**：✅ 暂停后 `coordinate`/`healSweep`/`deliverThread` 不动作且原因明确 —— `test/engine.test.ts` 的 `refuses to start work, sweep, or deliver while paused, and says so`；✅ 恢复后可继续 —— `interrupts live threads and keeps them resumable`；✅ 跨进程持久 —— `survives a restart, and resuming an unpaused project is a no-op`；✅ 只读动作仍可用 —— `still allows reading and closing while paused`；✅ 命令层 —— `test/commands.test.ts` 的 `stops the project, reports why, and lifts on resume`；✅ 面板 —— `test/unit/overview.test.ts` 的 `announces a paused project above the quota, with the way out`。
 
-### GAP-15 没有 Archive
+### GAP-15 没有 Archive — ✅ 已做（2026-10-29）
 
 - **依据**：`OFFICIAL`「**Archive**: hides the project from the sidebar and archives its threads, which stops any thread that was running or watching a pull request.」
-- **现状**：无归档概念。**（`GAP-05` 是线程级终态，本条是项目级，两者不同，不要合并实现。）**
-- **做法**：`archivedAt` 字段；归档时中断活跃线程、退订所有 PR 监视、置停 watcher；`/project archive` 与 `/project unarchive`。
-- **验收标准**：归档后无任何后台动作（watcher 不再碰它）；取消归档后线程可继续。
+- **（`GAP-05` 是线程级终态，本条是项目级，两者不同，不要合并实现。）**
 
-### GAP-17 无线程运行时长上限
+#### 实际做法（2026-10-29 落地）
 
-- **现状**：卡死的线程会一直占 `running`，只能人工 `interrupt`。`grep -rn "maxDuration\|deadline" src/core/engine.ts` 返回空。
-- **做法**：descriptor 加 `deadlineAt`；`healSweep` 检查超时并 `interrupt` + 置 `needs_feedback`（**不是 `failed`** —— 超时是「没跑完」，不是「跑失败」）。
-- **验收标准**：超时线程被中断且状态可解释；不误杀长任务（阈值可配，默认足够宽）。
+1. `ProjectManifest.archivedAt?: number`（**时间戳不是布尔开关**，理由同 `pausedAt`）；`ProjectOverview.archived?: { since, reason? }`。
+2. `archive(parent, reason?)`：**先写记录再中断**（反了的话线程观察到 abort 后还可能跑完一轮自愈），只中断 `running` / `ci_fixing` / `queued` 且 `threads.isLive()` 的；PR 监视靠状态离开 `healSweep` 候选集自然退订。
+3. `unarchive()` 只清时间戳，**不自动恢复线程**——被中断的线程停在 `queued`，等人 `retry`。
+4. 守卫 `PROJECT_ARCHIVED`：`coordinate` / `startSuggested` / `deliverThread` / `manageThread` 的 `steer`/`respond`/`retry`/`merge`/`conflicts`；只读与收尾动作（`inspect`/`close`/`reopen`/`review`/`watch`/`unwatch`/`interrupt`）仍可用。
+5. `healSweep` 归档时不抛错，返回 `{ observed: 0, …, archived: reason }`（watcher 按定时器调它，抛错会每轮写一条堆栈）。
+6. `/project archive [原因]` / `/project unarchive`；markdown 在 root 之后、quota 之前输出 `- ARCHIVED[: 原因]`。
+
+#### 验收（全部有测试）
+
+`test/engine.test.ts` `describe('archive')`（拒绝启动/巡检/交付且消息含 `/project unarchive`；中断活跃线程且可 `retry`；跨重启持久、未归档时 `unarchive()` 返回 `false`；归档下 `inspect`/`close` 仍可用）· `test/commands.test.ts` · `test/unit/overview.test.ts`（`ARCHIVED` 行位于 quota 之前，未归档不出现）。
+
+### GAP-17 无线程运行时长上限 — ✅ 已做（2026-10-29）
+
+- **现状（做之前）**：卡死的线程一直占 `running`，只能人工 `interrupt`。
+
+#### 实际做法（2026-10-29 落地）
+
+1. `ProjectThreadDescriptor.deadlineAt?: number`，启动时按 `threadTimeoutMs`（默认 **45 分钟**，`DEFAULT_THREAD_TIMEOUT_MS`）算出并落盘——**跨重启仍有效**，不靠进程内定时器。
+2. 判定放在 `healSweep`（本来就是唯一的周期巡检）：超时 → `threads.interrupt` → 转 **`needs_feedback`**（**不是 `failed`**：超时是「没跑完」，不是「跑失败」），并用 `PROJECT_THREAD_TIMEOUT` 说明原因、给出 `retry` 的出口。
+3. 结果单独进 `HealSweepResult.timedOut`，与 `healed` / `settled` 分开——超时不是修复，混在一起会让 `/project heal` 的输出把「我掐了它」说成「我修好了」。
+4. `retry` 重新给一个 `deadlineAt`，否则重试的线程一转身又被判超时。
+
+#### 验收（全部有测试）
+
+`test/engine.test.ts`：超时线程被中断、状态可解释、重试后重新计时；`test/unit/healing.test.ts` 覆盖 `threadTimeoutMs` 边界（关闭 `0`、夹取下限）。
 
 ### GAP-18 未接入审批 — ✅ 已做
 
@@ -672,31 +692,36 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
   4. ✅ 删除后 Library 清单仍可读 —— 用例 1 断言 `outputs[0].path === 'src/a.ts'`，回收用例另断言读盘返回 `reclaimed after delivery`
   5. ✅ 唤醒前恢复 checkout —— `puts the checkout back before waking a delivered thread`（断言第二次 `git worktree add` 发生、目录重新存在、descriptor 写回路径）
 
-### GAP-20 `deinit` 只删 manifest，其余全留磁盘
+### GAP-20 `deinit` 只删 manifest，其余全留磁盘 — ✅ 已做（2026-10-29）
 
-- **现状**：`ManifestStore.destroy()`（`src/core/manifest.ts:192`）只删 `manifest.json` 与 `.tmp`。`.dsh-project/` 目录、所有 worktree、`KNOWLEDGE_INDEX.json`、`SHARED_MEMORY.md` 全留在磁盘。
-- **做法**：`destroy` 增加可选 `{ purge: boolean }`，默认 `false`（保守）。`/project deinit --purge` 显式清理整个 `.dsh-project/`。**先确认 `.dsh-project` 下没有用户手写文件**（`PROJECT_INSTRUCTIONS.md` 是**用户写的**，不能默认删）。
-- **验收标准**：
-  1. 默认 `deinit` 行为不变；
-  2. `--purge` 删除 `.dsh-project/` 但保留仓库其他内容；
-  3. `--purge` 时对 `PROJECT_INSTRUCTIONS.md` 给出明确警告或先备份。
+- **现状（做之前）**：`ManifestStore.destroy()` 只删 `manifest.json` 与 `.tmp`，`.dsh-project/` 目录、worktree、`KNOWLEDGE_INDEX.json`、`SHARED_MEMORY.md` 全留在磁盘。
 
-### GAP-27 git 锁冲突被当成失败
+#### 实际做法（2026-10-29 落地）
+
+1. `destroy({ purge })`，默认 `false`（保守）。`/project deinit --purge` 是唯一的整体清理入口。
+2. **`PROJECT_INSTRUCTIONS.md` 是用户写的，不能默认删**：purge 时先把它复制到项目根的 `PROJECT_INSTRUCTIONS.md.saved`，并在输出里说明备份位置；备份失败则中止 purge（宁可留垃圾，不可丢用户内容）。
+3. purge 先删 manifest（断了「这个项目还在」的证据）再删目录，避免删到一半失败后留下一个「项目仍在但内容不全」的状态。
+4. 备份文件必须写在 `.dsh-project/` **之外**——写进去会被自己的 purge 一起删掉（这是实现时真踩到的 bug，测试 `keeps the instructions file when purging` 覆盖）。
+
+#### 验收（全部有测试）
+
+`test/engine.test.ts` `describe('deinit --purge')`：默认 `deinit` 行为不变（目录仍在）；`--purge` 删除 `.dsh-project/` 但保留仓库其他内容；`PROJECT_INSTRUCTIONS.md` 被备份到项目根且内容一致。
+
+### GAP-27 git 锁冲突被当成失败 — ✅ 已做（2026-10-29）
 
 - **依据**：无官方明文（云端每线程自己的 clone，不会有这个问题）。这是**本地架构特有**的问题：所有 worktree **共享同一个 `.git`**（object database、`packed-refs`、`.git/config`、`worktrees/` 元数据）。
-- **现状**：`CommandError` 会把 `cannot lock ref` / `index.lock` / `cannot lock ... File exists` 当作普通失败，进而让线程转 `failed` 或交付失败。
-- **为什么是 P5 而不是更高**：它不产生**错误答案**，产生的是**错误结论**（「这个线程失败了」），而失败是可见的、可 retry 的。但仍该修 —— 正常并发下不该有假失败。
-- **做法**：
-  1. `CommandError` 增加可重试判定：`cannot lock ref|index.lock|Unable to create '.*\.lock'|Lock file already exists` 视为**瞬时**，指数退避重试 2~3 次；
-  2. 重试耗尽仍失败才报错，且报错文案要说明是「仓库被另一个线程占用」而不是「你的代码有问题」。
-- **共享 `.git` 的其它护栏（一并记录，避免下轮重新分析）**：
-  - `git gc` / `worktree prune` **只由宿主串行执行**，且建议对共享仓库设 `gc.auto=0`（并发 gc 会 prune 掉另一个 worktree 刚写、尚未被 ref 指向的 object —— 这会真的丢数据）；
-  - **线程永不写 `.git/config`**（`user.email`、remote 等），需要时用 `git -c k=v` 单次传入；
-  - 凭证走每线程独立 env / `GIT_ASKPASS`，不落 config。
-- **验收标准**：
-  1. 模拟一次 `cannot lock ref` 后重试成功，线程不转 `failed`；
-  2. 连续失败仍如实报错，文案指出仓库占用；
-  3. 重试次数可配，不无限重试。
+- **为什么是 P5 而不是更高**：它不产生**错误答案**，产生的是**错误结论**（「这个线程失败了」），而失败是可见的、可 retry 的。
+
+#### 实际做法（2026-10-29 落地）
+
+1. `src/core/exec.ts` 新增 `withLockRetry(runner, spec)`：`LOCK_PATTERNS = /cannot lock ref|index\.lock|Unable to create '.*\.lock'|Lock file already exists|another git process/`，命中则指数退避重试（`LOCK_RETRIES = 3`，5/10/20ms）。
+2. 只有**命中锁特征**才重试；其余 `CommandError` 立即抛——无限重试会把真正的错误藏起来。
+3. 重试耗尽仍失败时，错误信息追加说明「共享仓库被另一个线程占用」，而不是让用户以为自己的代码有问题。
+4. 共享 `.git` 的其它护栏（记录在此，避免下轮重新分析）：`git gc` / `worktree prune` 只由宿主串行执行；线程永不写 `.git/config`（需要时 `git -c k=v` 单次传入）；凭证走每线程独立 env，不落 config。
+
+#### 验收（全部有测试）
+
+`test/unit/exec.test.ts`：模拟一次 `cannot lock ref` 后第二次成功且线程不失败；连续三次锁冲突仍如实抛错且文案指出仓库占用；非锁错误零重试。
 
 ---
 
