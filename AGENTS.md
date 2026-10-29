@@ -55,6 +55,7 @@ npm run build      # 只编译到 lib/
 - `FakeRunner` 无匹配路由会抛错——这是故意的，静默空结果会让坏测试看起来通过。
 - 改路由表时注意 `gh pr view` 有**两种调用形态**：按分支（`argv[3]` 是分支名）与按编号（`argv[3]` 是数字，用于查 state/isDraft）。fake 必须按 `/^\d+$/` 分流。
 - 涉及 turn-end 的断言没有 promise 可 await（listener → 异步 store 落盘），用轮询式 `eventually()`，不要用一次 `setImmediate` 掩盖路由 bug。
+- **`dsh --patch <file>` 会把该 patch 写进 profile 的 `cordis.yml` 并落下**。实机探针用完必须手动清掉那几行（形如 `- id: probe51` / `name: file:///.../probe51.js`），否则下次启动会去加载已删除的探针文件，`--no-open` 下还看不到报错。清理前先 `cp cordis.yml /tmp/cordis.yml.bak`。
 
 ## 设计取舍（改代码前先读）
 
