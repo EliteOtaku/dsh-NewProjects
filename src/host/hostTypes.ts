@@ -188,8 +188,17 @@ export interface HostAgents {
 
 /** The subset of the `workingDirectory` service this plugin calls. */
 export interface HostWorkingDirectory {
+  /** Deployment fallback for Sessions with no recorded original directory. */
   readonly defaultDirectory: string;
   get(session: { readonly header: { readonly cwd?: string } }): string;
+  /**
+   * Effective directory for a live agent.
+   *
+   * This is the only per-session answer: `defaultDirectory` is documented as the fallback for
+   * Sessions with no recorded directory, and in the desktop app it is the profile directory.
+   * Optional because an older Host may not expose it; without it there is no safe default.
+   */
+  ensure?(agent: HostAgent, signal?: AbortSignal): Promise<string>;
 }
 
 /** Everything the plugin pulls off the Cordis context. */

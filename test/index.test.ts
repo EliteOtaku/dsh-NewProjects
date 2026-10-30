@@ -15,6 +15,7 @@ import { after, describe, it } from 'node:test';
 
 import { apply, MIN_CI_POLL_INTERVAL_MS } from '../src/index.js';
 import type {
+  HostAgent,
   HostCommandDefinition,
   HostContext,
   HostPromptSection,
@@ -307,6 +308,93 @@ describe('apply', () => {
     assert.equal(result['code'], 'PROJECT_NOT_INITIALIZED');
     assert.ok(String(result['message']).includes(join(process.cwd(), relative)), String(result['message']));
     assert.match(String(result['message']), /run `\/project init` first/);
+  });
+
+  it('resolves the root from the session directory, not the deployment fallback', async () => {
+    // `defaultDirectory` is the Host's deployment fallback -- in the desktop app that is the
+    // profile directory. Answering every session with it wrote project records under the app
+    // profile instead of the folder the session was working in.
+    const session = await fakeWorkspace();
+    const profile = await fakeWorkspace();
+    const tools: HostToolDefinition[] = [];
+    const ctx = new FakeContext({
+      subprocess: fakeSubprocess(),
+      tools: fakeTools(tools),
+      workingDirectory: {
+        defaultDirectory: profile,
+        get: () => profile,
+        ensure: async () => session,
+      },
+    });
+    apply(ctx.asContext());
+    const overview = tools.find((tool) => tool.name === 'project_overview');
+    assert.ok(overview !== undefined);
+    const result = (await overview.execute({}, {
+      callId: 'c1',
+      agent: { id: 'session-parent' },
+      signal: AbortSignal.timeout(5000),
+      deferContext: () => undefined,
+      concludeTurn: () => undefined,
+    })) as Record<string, unknown>;
+    assert.equal(result['code'], 'PROJECT_NOT_INITIALIZED');
+    assert.ok(String(result['message']).includes(session), String(result['message']));
+    assert.equal(String(result['message']).includes(profile), false);
+  });
+
+  it('gives each session its own project root', async () => {
+    // Two sessions in two folders are two projects; one shared root would merge them.
+    const first = await fakeWorkspace();
+    const second = await fakeWorkspace();
+    const sessionRoots = new Map([
+      ['session-a', first],
+      ['session-b', second],
+    ]);
+    const tools: HostToolDefinition[] = [];
+    const ctx = new FakeContext({
+      subprocess: fakeSubprocess(),
+      tools: fakeTools(tools),
+      workingDirectory: {
+        defaultDirectory: first,
+        get: () => first,
+        ensure: async (agent: HostAgent) => sessionRoots.get(agent.id) ?? first,
+      },
+    });
+    apply(ctx.asContext());
+    const overview = tools.find((tool) => tool.name === 'project_overview');
+    assert.ok(overview !== undefined);
+    const message = async (id: string): Promise<string> => {
+      const result = (await overview.execute({}, {
+        callId: 'c1',
+        agent: { id },
+        signal: AbortSignal.timeout(5000),
+        deferContext: () => undefined,
+        concludeTurn: () => undefined,
+      })) as Record<string, unknown>;
+      return String(result['message']);
+    };
+    assert.ok((await message('session-a')).includes(first));
+    assert.ok((await message('session-b')).includes(second));
+    assert.equal((await message('session-a')).includes(second), false);
+  });
+
+  it('refuses to guess a root when the Host has no working directory service', async () => {
+    // Falling back to `process.cwd()` would write project state into whatever directory the
+    // Host process started in; an error that names `rootDir` is the honest answer.
+    const tools: HostToolDefinition[] = [];
+    const ctx = new FakeContext({ subprocess: fakeSubprocess(), tools: fakeTools(tools) });
+    apply(ctx.asContext());
+    const overview = tools.find((tool) => tool.name === 'project_overview');
+    assert.ok(overview !== undefined);
+    const result = (await overview.execute({}, {
+      callId: 'c1',
+      agent: { id: 'session-parent' },
+      signal: AbortSignal.timeout(5000),
+      deferContext: () => undefined,
+      concludeTurn: () => undefined,
+    })) as Record<string, unknown>;
+    assert.equal(result['code'], 'INVALID_INPUT');
+    assert.match(String(result['message']), /rootDir/);
+    assert.equal(String(result['message']).includes(process.cwd()), false);
   });
 
   it('defers optional capabilities instead of sampling them once', async () => {

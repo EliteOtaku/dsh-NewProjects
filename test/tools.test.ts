@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 
 import { ProjectEngine } from '../src/core/engine.js';
-import { buildTools } from '../src/host/tools.js';
+import { buildTools, type ToolContextSource } from '../src/host/tools.js';
 import type { HostToolDefinition, HostToolRunContext } from '../src/host/hostTypes.js';
 import type { UsagePort } from '../src/core/usage.js';
 import type { ApprovalAction } from '../src/types.js';
@@ -229,8 +229,8 @@ describe('project_coordinate', () => {
     const first = await harness();
     const second = await harness();
     await second.engine.init({ name: 'second' });
-    const source = {
-      engineFor: (rootDir: string | undefined) => Promise.resolve(rootDir === second.root ? second.engine : first.engine),
+    const source: ToolContextSource = {
+      engineFor: (_agent, rootDir) => Promise.resolve(rootDir === second.root ? second.engine : first.engine),
       parentOf: () => PARENT,
     };
     const result = (await tool(source, 'project_overview').execute({ rootDir: second.root }, context())) as Record<string, unknown>;

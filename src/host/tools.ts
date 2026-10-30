@@ -15,12 +15,18 @@ import { describeThread } from '../core/engine.js';
 import { isProjectError, ProjectError, describeError } from '../core/errors.js';
 import { describeKnowledge, renderHits } from '../core/knowledge.js';
 import { renderOverviewMarkdown } from '../core/overview.js';
-import type { ContentBlock, HostToolDefinition, HostToolRunContext } from './hostTypes.js';
+import type { ContentBlock, HostAgent, HostToolDefinition, HostToolRunContext } from './hostTypes.js';
 
 /** Resolve a project engine and the parent agent a call runs under. */
 export interface ToolContextSource {
-  /** Engine for a root, or the primary engine when `rootDir` is omitted. */
-  engineFor(rootDir: string | undefined): Promise<ProjectEngine>;
+  /**
+   * Engine for a root, or the calling session's own directory when `rootDir` is omitted.
+   *
+   * The agent is part of the request because the Host resolves a session's directory per
+   * session (`workingDirectory.ensure`); a tool that never said which session it runs as
+   * could only fall back to the deployment directory, which is shared by every session.
+   */
+  engineFor(agent: HostAgent | undefined, rootDir: string | undefined): Promise<ProjectEngine>;
   /** The agent this call runs as, which owns any thread it starts. */
   parentOf(exec: HostToolRunContext): object;
 }
@@ -129,7 +135,7 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
       try {
         const goal = readString(args, 'goal');
         if (goal === undefined) return { ok: false, code: 'INVALID_INPUT', message: 'goal is required' };
-        const engine = await source.engineFor(readString(args, 'rootDir'));
+        const engine = await source.engineFor(exec.agent, readString(args, 'rootDir'));
         const limit = readInt(args, 'limit');
         const scopeOnly = readBool(args, 'scopeOnly');
         const branchNamespace = readString(args, 'branchNamespace');
@@ -206,7 +212,7 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
     output: OBJECT_OUTPUT,
     async execute(args: unknown, exec: HostToolRunContext): Promise<unknown> {
       try {
-        const engine = await source.engineFor(readString(args, 'rootDir'));
+        const engine = await source.engineFor(exec.agent, readString(args, 'rootDir'));
         const parent = source.parentOf(exec);
         const writes = readArray(args, 'set');
         const removals = readStringArray(args, 'remove');
@@ -303,7 +309,7 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
     output: OBJECT_OUTPUT,
     async execute(args: unknown, exec: HostToolRunContext): Promise<unknown> {
       try {
-        const engine = await source.engineFor(readString(args, 'rootDir'));
+        const engine = await source.engineFor(exec.agent, readString(args, 'rootDir'));
         const action = readString(args, 'action') ?? 'list';
         const threadId = readString(args, 'threadId');
         const message = readString(args, 'message');
@@ -425,7 +431,7 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
     async execute(args: unknown, exec: HostToolRunContext): Promise<unknown> {
       void exec;
       try {
-        const engine = await source.engineFor(readString(args, 'rootDir'));
+        const engine = await source.engineFor(exec.agent, readString(args, 'rootDir'));
         const includeResolved = readBool(args, 'includeResolved') === true;
         const includeUsage = readBool(args, 'usage') === true;
         const json = await engine.overviewJson({ includeResolved, includeUsage });
@@ -465,7 +471,7 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
     output: OBJECT_OUTPUT,
     async execute(args: unknown, exec: HostToolRunContext): Promise<unknown> {
       try {
-        const engine = await source.engineFor(readString(args, 'rootDir'));
+        const engine = await source.engineFor(exec.agent, readString(args, 'rootDir'));
         // A search does not mutate anything, but honouring the cancellation signal keeps a
         // cancelled turn from finishing a scan of a large index for no reader.
         if (exec.signal.aborted) return asToolResult(new Error('the turn was cancelled'));
@@ -522,7 +528,7 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
     output: OBJECT_OUTPUT,
     async execute(args: unknown, exec: HostToolRunContext): Promise<unknown> {
       try {
-        const engine = await source.engineFor(readString(args, 'rootDir'));
+        const engine = await source.engineFor(exec.agent, readString(args, 'rootDir'));
         await requireInit(engine);
         const action = readString(args, 'action') ?? 'list';
         const paths = readStringArray(args, 'paths');
@@ -633,7 +639,7 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
     output: OBJECT_OUTPUT,
     async execute(args: unknown, exec: HostToolRunContext): Promise<unknown> {
       try {
-        const engine = await source.engineFor(readString(args, 'rootDir'));
+        const engine = await source.engineFor(exec.agent, readString(args, 'rootDir'));
         await requireInit(engine);
         const action = readString(args, 'action') ?? 'list';
 

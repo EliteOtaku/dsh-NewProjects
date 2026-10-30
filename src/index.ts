@@ -27,6 +27,7 @@ import {
   normalisePollInterval,
 } from './core/engine.js';
 import { PROJECT_STATE_EVENT, type ProjectStateSnapshot } from './core/projectState.js';
+import { ProjectError } from './core/errors.js';
 import { SwappableThreadRuntime, UnavailableThreadRuntime, type ThreadRuntime } from './core/threads.js';
 import { createCommandRunner } from './host/commandRunner.js';
 import { createLazyUsagePort, createUsagePort } from './host/usage.js';
@@ -39,6 +40,7 @@ import type { ApprovalAction } from './types.js';
 import type {
   HostCommands,
   HostContext,
+  HostAgent,
   HostSubagents,
   HostSessionProjections,
   HostSessions,
@@ -101,8 +103,8 @@ const PROMPT_SECTION_NAME = 'project-beta-charter';
 
 /** Per-activation state shared by the tool, command, and watcher registrations. */
 interface Runtime {
-  /** Engine for one root, created on first use. */
-  engineFor(rootDir: string | undefined): ProjectEngine;
+  /** Engine for one root, created on first use; the session directory when `rootDir` is omitted. */
+  engineFor(agent: HostAgent | undefined, rootDir: string | undefined): Promise<ProjectEngine>;
   /** Every engine created so far, in creation order. */
   engines(): Iterable<ProjectEngine>;
   /** Install (or replace) the snapshot sink, including on engines already created. */
@@ -112,7 +114,8 @@ interface Runtime {
 }
 
 function createRuntime(options: {
-  root: () => string;
+  /** The directory the calling session is working in; the Host resolves it per session. */
+  root: (agent: HostAgent | undefined) => Promise<string>;
   runner: ReturnType<typeof createCommandRunner>;
   threads: ThreadRuntime;
   quotaLedgerPath?: string;
@@ -129,13 +132,13 @@ function createRuntime(options: {
   const detaches = new Map<string, () => void>();
   let publisher = options.publisher;
 
-  const resolveRoot = (rootDir: string | undefined): string => {
-    const chosen = rootDir ?? options.root();
+  const resolveRoot = async (agent: HostAgent | undefined, rootDir: string | undefined): Promise<string> => {
+    const chosen = rootDir ?? (await options.root(agent));
     return isAbsolute(chosen) ? chosen : resolve(chosen);
   };
 
-  const engineFor = (rootDir: string | undefined): ProjectEngine => {
-    const root = resolveRoot(rootDir);
+  const engineFor = async (agent: HostAgent | undefined, rootDir: string | undefined): Promise<ProjectEngine> => {
+    const root = await resolveRoot(agent, rootDir);
     const existing = engines.get(root);
     if (existing !== undefined) return existing;
     const engine = new ProjectEngine(root, {
@@ -203,10 +206,33 @@ export function apply(ctx: HostContext, config: ProjectBetaConfig = {}): void {
     threads.replace(new SubagentThreadRuntime(subagents, config.subagentProvider ?? 'spawn'));
   });
 
+  /**
+   * The directory the calling session is working in.
+   *
+   * `workingDirectory.defaultDirectory` is the Host's deployment fallback — in the desktop app
+   * that is the profile directory — so using it for every session wrote every project record
+   * under the app profile instead of the folder the session was working in. `ensure(agent)` is
+   * the per-session answer, so ask it first. `process.cwd()` is deliberately not a fallback:
+   * it would write project state into whatever directory the Host process started in, and a
+   * wrong root that looks plausible is worse than an error that names `rootDir`.
+   */
+  const resolveSessionRoot = async (agent: HostAgent | undefined): Promise<string> => {
+    const workingDirectory = ctx.get('workingDirectory') as HostWorkingDirectory | undefined;
+    if (workingDirectory === undefined) {
+      throw new ProjectError(
+        'INVALID_INPUT',
+        'the "workingDirectory" service is unavailable, so the project root cannot be resolved; pass `rootDir`',
+      );
+    }
+    if (agent !== undefined && workingDirectory.ensure !== undefined) {
+      // `ensure` also restores the original project when the directory disappeared.
+      return await workingDirectory.ensure(agent);
+    }
+    return workingDirectory.defaultDirectory;
+  };
+
   const runtime = createRuntime({
-    root: () =>
-      (ctx.get('workingDirectory') as HostWorkingDirectory | undefined)?.defaultDirectory ??
-      process.cwd(),
+    root: resolveSessionRoot,
     runner: createCommandRunner(subprocess),
     threads,
     // Resolved per measurement: `sessions` and `tokenMeter` arrive after activation, and a port
@@ -248,8 +274,8 @@ export function apply(ctx: HostContext, config: ProjectBetaConfig = {}): void {
     const tools = scoped.get('tools') as HostTools | undefined;
     if (tools === undefined) return;
     const source: ToolContextSource = {
-      async engineFor(rootDir) {
-        return runtime.engineFor(rootDir);
+      async engineFor(agent, rootDir) {
+        return runtime.engineFor(agent, rootDir);
       },
       parentOf(exec: HostToolRunContext): object {
         if (exec.agent === undefined) {
@@ -270,8 +296,8 @@ export function apply(ctx: HostContext, config: ProjectBetaConfig = {}): void {
     const commands = scoped.get('commands') as HostCommands | undefined;
     if (commands === undefined) return;
     const source: CommandContextSource = {
-      async engineFor(_agent, rootDir) {
-        return runtime.engineFor(rootDir);
+      async engineFor(agent, rootDir) {
+        return runtime.engineFor(agent, rootDir);
       },
     };
     scoped.effect(() => {
