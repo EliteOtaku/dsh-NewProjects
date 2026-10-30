@@ -10,7 +10,7 @@
 
 import type { ProjectEngine } from '../core/engine.js';
 import type { ApprovalAction } from '../types.js';
-import { describeThread } from '../core/engine.js';
+import { APPROVAL_ACTIONS, describeThread } from '../core/engine.js';
 import type { ThreadAction } from '../core/engine.js';
 import { describeError, isProjectError } from '../core/errors.js';
 import { describeKnowledge } from '../core/knowledge.js';
@@ -325,13 +325,22 @@ export function buildProjectCommand(source: CommandContextSource): CommandDef {
             const action = inner.verb === 'overview' || inner.verb.length === 0 ? 'inspect' : inner.verb;
             if (action === 'approve') {
               if (inner.rest.length === 0) {
-                return { kind: 'error', text: `usage: \`/project thread <id> approve <push|pr|merge|force-push>\`` };
+                return { kind: 'error', text: `usage: \`/project thread <id> approve <push|pr|merge|force-push> [...]\`` };
               }
-              const approved = await engine.approve(
-                threadId,
-                inner.rest.split(/\s+/)[0] as ApprovalAction,
-              );
-              return { kind: 'success', text: `approved ${inner.rest.trim()} for ${threadId}\n${describeThread(approved)}` };
+              // Every word is an action, and all are checked before any is recorded: the refusal
+              // that sends people here names every missing action in one line, and a reply that
+              // echoed words it never recorded would leave the next delivery refused again.
+              const actions = inner.rest.split(/\s+/);
+              const unknown = actions.filter((word) => !APPROVAL_ACTIONS.includes(word as ApprovalAction));
+              if (unknown.length > 0) {
+                return {
+                  kind: 'error',
+                  text: `unknown approval action \`${unknown.join(' ')}\`; expected any of ${APPROVAL_ACTIONS.join(', ')}`,
+                };
+              }
+              let approved = await engine.requireThread(threadId);
+              for (const approval of actions) approved = await engine.approve(threadId, approval as ApprovalAction);
+              return { kind: 'success', text: `approved ${actions.join(', ')} for ${threadId}\n${describeThread(approved)}` };
             }
             if (action === 'deliver') {
               const delivered = await engine.deliverThread(threadId, inner.rest.length === 0 ? {} : { body: inner.rest });

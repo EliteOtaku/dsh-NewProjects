@@ -17,6 +17,7 @@ import { ProjectEngine } from '../src/core/engine.js';
 import { buildTools } from '../src/host/tools.js';
 import type { HostToolDefinition, HostToolRunContext } from '../src/host/hostTypes.js';
 import type { UsagePort } from '../src/core/usage.js';
+import type { ApprovalAction } from '../src/types.js';
 import { FakeRunner, FakeThreads, fixedClock, sequentialIds } from './helpers.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -38,7 +39,7 @@ function context(): HostToolRunContext {
 }
 
 /** A project over a fresh temp root. */
-async function harness(extra: { usage?: UsagePort } = {}): Promise<{
+async function harness(extra: { usage?: UsagePort; requireApprovalFor?: ApprovalAction[] } = {}): Promise<{
   engine: ProjectEngine;
   runner: FakeRunner;
   threads: FakeThreads;
@@ -57,6 +58,7 @@ async function harness(extra: { usage?: UsagePort } = {}): Promise<{
     ids: sequentialIds(),
     quotaLedgerPath: join(root, 'quota-ledger.json'),
     ...(extra.usage === undefined ? {} : { usage: extra.usage }),
+    ...(extra.requireApprovalFor === undefined ? {} : { requireApprovalFor: extra.requireApprovalFor }),
   });
   return { engine, runner, threads, root };
 }
@@ -307,6 +309,79 @@ describe('project_thread_manage', () => {
     const manage = tool({ engineFor: () => Promise.resolve(engine), parentOf: () => PARENT }, 'project_thread_manage');
     const result = (await manage.execute({ action: 'inspect', threadId: 'thr-999' }, context())) as Record<string, unknown>;
     assert.equal(result['code'], 'THREAD_NOT_FOUND');
+  });
+});
+
+describe('project_thread_manage approval round trip', () => {
+  /**
+   * The gate moves the question from the thread to the root conversation, which is the
+   * direction the official docs say does not reach a thread. So the whole loop has to be
+   * proven through the surface the coordinator actually calls: refused, answered, delivered.
+   */
+  it('delivers after the root records the sign-off, even across a restart', async () => {
+    const { engine, runner, threads, root } = await harness({ requireApprovalFor: ['push', 'pr'] });
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const planned = await engine.coordinate(PARENT, '- one', { planOnly: false });
+    const threadId = planned.started[0]?.threadId ?? '';
+    runner.on('git status --porcelain', { stdout: ' M src/a.ts\n' });
+    runner.on('git add', { exitCode: 0 });
+    runner.on('git commit', { stdout: '[project/demo/1-one abc1234] one\n' });
+    runner.on('git push', { exitCode: 0 });
+    runner.on('gh pr create', { stdout: 'https://github.com/o/r/pull/7\n' });
+    runner.onCommand('gh pr view', (spec) => {
+      if (!runner.saw('gh pr create')) return { exitCode: 1, stderr: 'no pull requests found for branch' };
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 7,
+          url: 'https://github.com/o/r/pull/7',
+          state: 'OPEN',
+          isDraft: false,
+          headRefName: spec.argv[3] ?? '',
+          reviewDecision: '',
+          mergeable: 'MERGEABLE',
+        }),
+      };
+    });
+    const manageWith = (current: ProjectEngine): HostToolDefinition =>
+      tool({ engineFor: () => Promise.resolve(current), parentOf: () => PARENT }, 'project_thread_manage');
+
+    // Refused as a result, not a throw, and it names everything missing so the root asks once.
+    const refused = (await manageWith(engine).execute({ action: 'deliver', threadId }, context())) as Record<string, unknown>;
+    assert.equal(refused['ok'], false);
+    assert.equal(refused['code'], 'APPROVAL_REQUIRED');
+    assert.deepEqual((refused['details'] as Record<string, unknown>)['missing'], ['push', 'pr']);
+    assert.match(String(refused['message']), new RegExp(`/project thread ${threadId} approve push pr`));
+    assert.equal(runner.saw('git push'), false);
+
+    const first = (await manageWith(engine).execute({ action: 'approve', threadId, approval: 'push' }, context())) as Record<
+      string,
+      unknown
+    >;
+    assert.equal(first['ok'], true);
+
+    // A fresh engine over the same root stands in for a Host restart between the two answers:
+    // a grant that lived only in memory would be asked for again here.
+    const restarted = new ProjectEngine(root, {
+      runner,
+      threads,
+      clock: fixedClock(),
+      ids: sequentialIds(),
+      quotaLedgerPath: join(root, 'quota-ledger.json'),
+      requireApprovalFor: ['push', 'pr'],
+    });
+    const second = (await manageWith(restarted).execute({ action: 'approve', threadId, approval: 'pr' }, context())) as Record<
+      string,
+      unknown
+    >;
+    assert.equal(second['ok'], true);
+
+    const delivered = (await manageWith(restarted).execute({ action: 'deliver', threadId }, context())) as Record<string, unknown>;
+    assert.equal(delivered['ok'], true, String(delivered['message']));
+    assert.equal(delivered['prRef'], 'https://github.com/o/r/pull/7');
+    assert.equal(runner.saw('git push'), true);
+    assert.equal(runner.saw('gh pr create'), true);
   });
 });
 

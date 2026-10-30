@@ -15,6 +15,7 @@ import { after, describe, it } from 'node:test';
 import { ProjectEngine } from '../src/core/engine.js';
 import type { HostCommandDefinition } from '../src/host/hostTypes.js';
 import { PROJECT_USAGE, buildCommands } from '../src/host/commands.js';
+import type { ApprovalAction } from '../src/types.js';
 import { FakeRunner, FakeThreads, fixedClock, sequentialIds } from './helpers.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -41,7 +42,9 @@ async function run(engine: ProjectEngine, rawInput: string): Promise<{ kind: str
 }
 
 /** A project over a fresh temp root, not yet initialised. */
-async function harness(): Promise<{ engine: ProjectEngine; runner: FakeRunner; threads: FakeThreads }> {
+async function harness(
+  extra: { requireApprovalFor?: ApprovalAction[] } = {},
+): Promise<{ engine: ProjectEngine; runner: FakeRunner; threads: FakeThreads }> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-project-cmd-'));
   cleanups.push(async () => {
     await rm(root, { recursive: true, force: true });
@@ -54,6 +57,7 @@ async function harness(): Promise<{ engine: ProjectEngine; runner: FakeRunner; t
     clock: fixedClock(),
     ids: sequentialIds(),
     quotaLedgerPath: join(root, 'quota-ledger.json'),
+    ...(extra.requireApprovalFor === undefined ? {} : { requireApprovalFor: extra.requireApprovalFor }),
   });
   return { engine, runner, threads };
 }
@@ -283,6 +287,47 @@ describe('/project threads and thread', () => {
     const result = await run(engine, 'thread thr-999 inspect');
     assert.equal(result.kind, 'error');
     assert.match(result.text, /THREAD_NOT_FOUND/);
+  });
+});
+
+describe('/project thread <id> approve', () => {
+  it('records every action named on the line, as the refusal asks for them', async () => {
+    const { engine, runner } = await harness({ requireApprovalFor: ['push', 'pr'] });
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const planned = await engine.coordinate(PARENT, '- one', { planOnly: false });
+    const threadId = planned.started[0]?.threadId ?? '';
+    const result = await run(engine, `thread ${threadId} approve push pr`);
+    assert.equal(result.kind, 'success');
+    assert.match(result.text, /approved push, pr/);
+    const thread = await engine.requireThread(threadId);
+    // Both grants are on record, so the reply did not claim anything that was not saved.
+    assert.ok(thread.approvals?.push !== undefined);
+    assert.ok(thread.approvals?.pr !== undefined);
+  });
+
+  it('records nothing when one of the words is not an action', async () => {
+    const { engine, runner } = await harness({ requireApprovalFor: ['push', 'pr'] });
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const planned = await engine.coordinate(PARENT, '- one', { planOnly: false });
+    const threadId = planned.started[0]?.threadId ?? '';
+    const result = await run(engine, `thread ${threadId} approve push everything`);
+    assert.equal(result.kind, 'error');
+    assert.match(result.text, /unknown approval action `everything`/);
+    const thread = await engine.requireThread(threadId);
+    assert.equal(thread.approvals, undefined);
+  });
+
+  it('prints usage when no action is given', async () => {
+    const { engine, runner } = await harness();
+    await engine.init({ name: 'demo' });
+    repoReady(runner);
+    const planned = await engine.coordinate(PARENT, '- one', { planOnly: false });
+    const threadId = planned.started[0]?.threadId ?? '';
+    const result = await run(engine, `thread ${threadId} approve`);
+    assert.equal(result.kind, 'error');
+    assert.match(result.text, /usage: `\/project thread <id> approve/);
   });
 });
 

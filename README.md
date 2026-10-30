@@ -76,7 +76,7 @@ cmd /c mklink /J "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-newp
 /project concurrent off       # 清除偏好
 /project pause <原因>          # 停下一切：不起新线程、不巡检、不交付，活跃线程被中断
 /project resume               # 撤销暂停，被中断的线程仍可继续
-/project thread <id> approve push|pr|merge   # 放行被 requireApprovalFor 门住的动作
+/project thread <id> approve push [pr ...]   # 放行被 requireApprovalFor 门住的动作（可一次列多个）
 /project knowledge            # 知识层状态：文档数、字符数、绑定路径（只读，不重建索引）
 /project knowledge add <path> [path...]   # 绑定文件或目录
 /project knowledge rm <path>  # 解绑
