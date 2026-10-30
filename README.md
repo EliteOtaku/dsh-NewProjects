@@ -103,7 +103,7 @@ cmd /c mklink /J "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-newp
 因此本实现采用 **paths-first**。**已实现**：
 
 - **charter 渲染索引**：每份已索引文档一行「路径 — 字符数」，加一句「文件为准」。**正文永不进 prompt**。字符数是让模型能*选*的那个信息——读 2 KB 的决策记录和读 400 KB 的转录是两个不同的决定。
-- **没有上下文预算**。正文不进前缀，所以什么都不随模型窗口变。唯一有明文的常驻文本预算是 project instructions 的 **16 000 字符**，在 charter 装配处**报警而不截断**。
+- **没有上下文预算**。正文不进前缀，所以什么都不随模型窗口变。唯一有明文的常驻文本预算是 **16 000 字符**（project instructions）；共享记忆是同一类常驻前缀文本，所以用**同一把尺子**量，不另设一个解释不清的常量。两者都只**报警不截断**：超出量进 `warnings`，在面板与 `project_overview` 里看得到——静默截断决策记录会让线程漏掉必须遵守的规则。
 - **没有模式**。没有 `context`/`rag` 二分，就没有阈值抖动，也没有会被遗留的 flag。
 - **能自己找路**：`project_knowledge` 的 `tree` 列目录树（默认 2 层 / 200 条，上限 4 层 / 500 条，跳过 `node_modules` 之类与二进制文件），`read` 按行窗读任意一个文件（默认 200 行，上限 2 000）。两处截断都会在结果里**指名是哪个上限**——没说被截断的半棵树会被当成全貌。两者都只读项目根，`../` 之类越界直接报 `INVALID_INPUT`。
 - **索引自己保持新鲜**：每次 `project_knowledge_search` 先比对绑定路径的指纹（`路径:大小:mtime`），变了就重建再检索，所以改完文件不需要手工 rebuild。只读入口（`knowledgeState` / `/project knowledge` / 面板 overview）永不写盘；两个并发搜索共用一次重建。

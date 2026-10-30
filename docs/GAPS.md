@@ -825,12 +825,16 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
 
 `quotaWarning()` 新增 `label` 参数，`ProjectEngine.overview()` 改为调用它**两次**——一次给项目偏好、一次给用户全局账本。内联的 80% 判断已删除，两个计数器用同一把尺子，且各自说清是哪一本账。
 
-### BOUND-5 记忆仍整段渲进 charter，而官方记忆也是 paths-first
+### BOUND-5 记忆仍整段渲进 charter，而官方记忆也是 paths-first（记账已补齐，2026-10-30）
 
 - **一条取证错误**（第二轮复核，`docs/REVIEW-RESPONSE-2.md` §取证错误）：历来把「记忆放在 system prompt 固定槽位以命中缓存」当成已对上官方，引的是 `OFFICIAL` L22「**Set context once**: every new thread starts with the project's **instructions**」。引文逐字无误，**但它讲的是 instructions，不是 memory**。
 - **官方的 memory 是 paths-first**（L291）：「Notes Claude keeps about the project … **stored as files**. Every cloud thread reads the index file `MEMORY.md` when it starts and **opens the other files when it needs them**」。也就是说**官方对记忆和对知识用的是同一套机制**，而 `GAP-22` 只把知识改了，记忆还整段渲进 charter（`renderMemoryPrefix`）。
 - **为什么列为 BOUND 而不是 GAP**：⚠️ 这是判断而非依据——记忆是**决策**而不是**文档**，每条都短、每条都该被读到，lazy 读取反而会让线程漏掉约束；而 16,000 字符的预算对它绰绰有余。所以保留槽位是**我们的取舍**。
-- **要做的只有记账**：~~别再把它当「有据的基线」（`REVIEW-REQUEST` §1 那一行应改掉）~~ —— **这句待办已作废**：`8dad36c` 送审版确实有 `REVIEW-REQUEST.md:48` 那行「记忆放在 system prompt 固定槽位以命中缓存」，但它在 `bb71325` 重写时就没了，`9866952` 送审版 grep `槽位|固定位置|system prompt|缓存` 零命中。**剩下一半仍有效**：用 `MAX_INSTRUCTIONS_CHARS` 同一把尺子给记忆段也设一个报警阈值（`memoryOverBudget` 至今零命中）。若将来记忆长到会挤掉 instructions，再按官方形状改成文件 + 索引。
+- **记账已补齐（2026-10-30）**：~~别再把它当「有据的基线」（`REVIEW-REQUEST` §1 那一行应改掉）~~ —— 那半句已作废：`8dad36c` 送审版确实有 `REVIEW-REQUEST.md:48` 那行「记忆放在 system prompt 固定槽位以命中缓存」，但它在 `bb71325` 重写时就没了，`9866952` 送审版 grep `槽位|固定位置|system prompt|缓存` 零命中。**另一半现在落地为「同一把尺子 + 真有人读的报警」**：
+  1. `memoryOverBudget(manifest)`（`src/core/prompt.ts:62`）与 `instructionsOverBudget`（`:46`）共用 `MAX_INSTRUCTIONS_CHARS = 16 000`（`:38`），两者都只算超出量、**不截断**——静默截断决策记录会让线程漏掉必须遵守的规则。
+  2. 报警在 `ProjectEngine.overview()` 里 push 进 `warnings`（`src/core/engine.ts:1960` / `:1966`），面板与 `project_overview` 读得到。**只定义阈值而没人调用就是 `BOUND-3` 记过的死代码**，所以这次把此前零调用者的 `instructionsOverBudget` 也一并接上了。
+  3. 测试：`test/unit/prompt.test.ts`「measures shared memory with the same ruler, not a second number」（恰好 16 000 为 0、+5 得 5）与「measures instructions against the documented 16,000 characters」；引擎层 `test/engine.test.ts`「stays quiet while instructions and memory both fit」、「warns about oversized instructions without dropping their tail」（同时断言 charter 仍含全文）、「warns when shared memory outgrows the same ruler」。
+- **仍未改的只有机制**：记忆仍整段进 charter（上面那条取舍不变）。改成官方形状（文件 + `MEMORY.md` 索引）的触发条件仍是「记忆长到会挤掉 instructions」——届时这几条报警就是判断依据，而不是凭感觉估。
 
 ### BOUND-4 单进程内一个 root 恰好一个 turn-end 订阅
 

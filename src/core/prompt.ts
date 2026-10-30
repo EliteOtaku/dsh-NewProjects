@@ -37,10 +37,30 @@ import type { ApprovalAction, ProjectManifest, ProjectThreadDescriptor } from '.
  */
 export const MAX_INSTRUCTIONS_CHARS = 16_000;
 
+/** Characters past the standing-text budget; `0` when the text fits. */
+function overage(chars: number): number {
+  return Math.max(0, chars - MAX_INSTRUCTIONS_CHARS);
+}
+
 /** Whether `instructions` exceeds the documented budget, and by how much. */
 export function instructionsOverBudget(instructions: string | undefined): number {
   if (instructions === undefined) return 0;
-  return Math.max(0, instructions.trim().length - MAX_INSTRUCTIONS_CHARS);
+  return overage(instructions.trim().length);
+}
+
+/**
+ * Whether the shared-memory block exceeds the same budget, and by how much.
+ *
+ * Memory is standing prefix text exactly like instructions: it is rendered into every
+ * thread's charter, byte-identical, for as long as the entry exists. It is measured with
+ * the same ruler rather than a second number, because a threshold nobody can derive is the
+ * kind of constant that later drifts apart from the thing it was meant to bound.
+ *
+ * A warning, never a truncation. Dropping the tail of a decision record would hide a rule
+ * threads are required to honour — a worse failure than a crowded prefix.
+ */
+export function memoryOverBudget(manifest: ProjectManifest): number {
+  return overage(renderMemoryPrefix(manifest).length);
 }
 
 /** Read-only facts the charter needs about the project. */

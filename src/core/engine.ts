@@ -67,6 +67,9 @@ import { buildOverview, dueForResolve } from './overview.js';
 import { buildProjectState, type ProjectStateSnapshot } from './projectState.js';
 import { branchNameFor, normaliseTasks, planTasks, PLAN_TTL_MS } from './planner.js';
 import {
+  MAX_INSTRUCTIONS_CHARS,
+  instructionsOverBudget,
+  memoryOverBudget,
   renderConflictRequest,
   renderFeedbackAnswer,
   renderMergeRequest,
@@ -1947,6 +1950,24 @@ export class ProjectEngine {
         'daily thread quota across all projects',
       );
       if (globalWarning !== undefined) collected.push(globalWarning);
+    }
+    // Standing prompt text has exactly one documented budget, and instructions and shared
+    // memory both spend it. Measuring them here — not only defining the rulers — is the
+    // point: a threshold no caller reads is dead code, which is the mistake `BOUND-3`
+    // recorded. Lengths only; the charter still re-reads the instruction file at render
+    // time, and that is where freshness matters.
+    const instructions = await readFile(manifest.instructionsPath, 'utf8').catch(() => undefined);
+    const instructionsOver = instructionsOverBudget(instructions);
+    if (instructionsOver > 0) {
+      collected.push(
+        `project instructions exceed the ${MAX_INSTRUCTIONS_CHARS}-character budget by ${instructionsOver}; the whole file is still sent, so trim it before it crowds out memory and repository conventions`,
+      );
+    }
+    const memoryOver = memoryOverBudget(manifest);
+    if (memoryOver > 0) {
+      collected.push(
+        `shared project memory exceeds the ${MAX_INSTRUCTIONS_CHARS}-character budget by ${memoryOver}; every thread loads it verbatim, so fold or retire entries rather than letting it crowd out the instructions`,
+      );
     }
     const overview = buildOverview(manifest, this.clock.now(), collected, {
       ...options,

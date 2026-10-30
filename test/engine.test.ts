@@ -21,7 +21,7 @@ import type { RawThreadUsage, UsagePort } from '../src/core/usage.js';
 import { isProjectError } from '../src/core/errors.js';
 import { RECENT_MESSAGE_LIMIT } from '../src/core/coordState.js';
 import { renderOverviewMarkdown } from '../src/core/overview.js';
-import { PROJECT_DIR } from '../src/core/manifest.js';
+import { INSTRUCTIONS_FILE, PROJECT_DIR } from '../src/core/manifest.js';
 import { dayKey } from '../src/core/util.js';
 import type { ProjectManifest } from '../src/types.js';
 import { FakeRunner, FakeThreads, fixedClock, sequentialIds } from './helpers.js';
@@ -2193,6 +2193,45 @@ describe('concurrency preference', () => {
     assert.match(after, /preference, not a cap/);
     // The line belongs with the quota, not below the thread buckets.
     assert.ok(after.indexOf('- concurrency:') < after.indexOf('- memory:'));
+  });
+});
+
+describe('standing prompt budget', () => {
+  it('stays quiet while instructions and memory both fit', async () => {
+    const { engine, root } = await harness();
+    await engine.init({ name: 'demo' });
+    await writeFile(join(root, PROJECT_DIR, INSTRUCTIONS_FILE), 'use tabs', 'utf8');
+    await engine.setMemory(undefined, { key: 'db', decision: 'use postgres' });
+    assert.deepEqual((await engine.overview()).warnings, []);
+  });
+
+  it('warns about oversized instructions without dropping their tail', async () => {
+    const { engine, root } = await harness();
+    await engine.init({ name: 'demo' });
+    const brief = 'x'.repeat(16_001);
+    await writeFile(join(root, PROJECT_DIR, INSTRUCTIONS_FILE), brief, 'utf8');
+
+    const warnings = (await engine.overview()).warnings;
+    assert.ok(
+      warnings.some((warning) => warning.includes('instructions exceed the 16000-character budget by 1')),
+      warnings.join(' | '),
+    );
+    // The warning is not a truncation: the charter still carries every character of the brief.
+    const charter = await engine.renderCharter();
+    assert.ok(charter.text.includes(brief));
+  });
+
+  it('warns when shared memory outgrows the same ruler', async () => {
+    const { engine } = await harness();
+    await engine.init({ name: 'demo' });
+    // One entry alone can exceed the budget; the alarm has to survive a single long decision.
+    await engine.setMemory(undefined, { key: 'release-window', decision: 'x'.repeat(16_000) });
+
+    const warnings = (await engine.overview()).warnings;
+    assert.ok(
+      warnings.some((warning) => warning.includes('shared project memory exceeds the 16000-character budget')),
+      warnings.join(' | '),
+    );
   });
 });
 

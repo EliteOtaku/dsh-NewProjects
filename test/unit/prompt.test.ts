@@ -2,13 +2,34 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
+  MAX_INSTRUCTIONS_CHARS,
+  instructionsOverBudget,
+  memoryOverBudget,
   renderConflictRequest,
   renderMergeRequest,
   renderProjectCharter,
   renderThreadTask,
 } from '../../src/core/prompt.js';
-import type { ProjectThreadDescriptor } from '../../src/types.js';
+import { renderMemoryPrefix } from '../../src/core/memory.js';
+import type { ProjectManifest, ProjectThreadDescriptor } from '../../src/types.js';
 import { makeManifest } from './manifestFixture.js';
+
+/** One shared-memory entry whose decision text is exactly `decision` long. */
+function manifestWithMemory(decision: string): ProjectManifest {
+  return {
+    ...makeManifest(),
+    memories: {
+      'release-window': {
+        key: 'release-window',
+        decision,
+        rationale: '',
+        updatedAt: 0,
+        revision: 1,
+        authorThreadId: 'coordinator',
+      },
+    },
+  };
+}
 
 function makeThread(overrides: Partial<ProjectThreadDescriptor> = {}): ProjectThreadDescriptor {
   return {
@@ -98,5 +119,29 @@ describe('renderProjectCharter', () => {
     const text = renderProjectCharter({ manifest, knowledgePaths: [] });
     assert.equal(text.includes('thr-1'), false);
     assert.equal(text.includes('child-1'), false);
+  });
+});
+
+describe('standing-text budget', () => {
+  it('measures instructions against the documented 16,000 characters', () => {
+    assert.equal(MAX_INSTRUCTIONS_CHARS, 16_000);
+    assert.equal(instructionsOverBudget(undefined), 0);
+    assert.equal(instructionsOverBudget('   '), 0);
+    assert.equal(instructionsOverBudget('x'.repeat(MAX_INSTRUCTIONS_CHARS)), 0);
+    assert.equal(instructionsOverBudget('x'.repeat(MAX_INSTRUCTIONS_CHARS + 1)), 1);
+    // Trimming means the ruler counts content, not the newline the editor left behind.
+    assert.equal(instructionsOverBudget('x'.repeat(MAX_INSTRUCTIONS_CHARS) + String.fromCharCode(10)), 0);
+  });
+
+  it('measures shared memory with the same ruler, not a second number', () => {
+    assert.equal(memoryOverBudget(makeManifest()), 0);
+
+    // The renderer itself supplies the fixed header length, so this pins the *threshold*
+    // instead of a hand-counted header that would drift the first time the wording changes.
+    const header = renderMemoryPrefix(manifestWithMemory('')).length;
+    const decision = 'x'.repeat(MAX_INSTRUCTIONS_CHARS - header);
+    assert.equal(renderMemoryPrefix(manifestWithMemory(decision)).length, MAX_INSTRUCTIONS_CHARS);
+    assert.equal(memoryOverBudget(manifestWithMemory(decision)), 0);
+    assert.equal(memoryOverBudget(manifestWithMemory(decision + 'xxxxx')), 5);
   });
 });
