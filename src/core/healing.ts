@@ -135,6 +135,14 @@ export interface HealInput {
 }
 
 /** Render the healing prompt for one round from the observed failure evidence. */
+/**
+ * Every thread's worktree shares one `.git`, so `git config`, remotes and hooks written from
+ * any of them land in the user's own repository and in every sibling thread at once. A
+ * one-off `git -c` setting does the same job without leaving anything behind.
+ */
+export const SHARED_GIT_CONFIG_RULE =
+  'Do not change git configuration (`git config`, remotes, hooks): every thread shares this repository\'s `.git`, so a change here changes it for the user and for every other thread. Pass a one-off setting with `git -c key=value` instead.';
+
 export function buildHealPrompt(
   input: HealInput,
   failures: ProjectCheckState[],
@@ -175,6 +183,8 @@ export function buildHealPrompt(
   const gatedPush = approvals.includes('push');
   if (gatedPush) {
     // Same gate as the first turn: the fix is only worth having if a human agreed to publish it.
+    // The caller only passes `push` here while it is still ungranted for this thread; once it is
+    // granted the host will not ask again, so asking the thread to stop would only stall it.
     blocks.push(`4. Commit to your existing branch (${input.prRef} head), then **stop before pushing**. This project asks for sign-off, so end your turn stating the commit hash, what you changed, and one line: approve push for ${input.prRef}.`);
   } else {
     blocks.push(`4. Commit and push to your existing branch (${input.prRef} head). Do not open a second pull request: the review history on the same branch is what carries this change to merge.`);
@@ -188,6 +198,7 @@ export function buildHealPrompt(
   blocks.push('- Do not force-push. Reviewers may be reading this branch, and a rewrite erases the review history that carries the change to merge.');
   blocks.push('- Do not change CI configuration (workflow files, which checks run, or a check\'s threshold) to make a check pass. If a check itself is wrong, say so and stop.');
   blocks.push('- Do not merge the pull request yourself. Merging is the user\'s call.');
+  blocks.push(`- ${SHARED_GIT_CONFIG_RULE}`);
   return blocks.join('\n');
 }
 
