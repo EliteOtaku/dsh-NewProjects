@@ -2133,7 +2133,7 @@ export class ProjectEngine {
     if (missing.length === 0) return;
     throw new ProjectError(
       'APPROVAL_REQUIRED',
-      `${verb} needs sign-off for ${missing.join(' + ')}; ask the user, then run \`/project thread ${thread.threadId} approve ${missing[0] ?? ''}\``,
+      `${verb} needs sign-off for ${missing.join(' + ')}; ask the user, then run \`/project thread ${thread.threadId} approve ${missing.join(' ')}\``,
       { threadId: thread.threadId, missing },
     );
   }

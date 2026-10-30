@@ -654,6 +654,8 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
 4. 非法动作不被静默记录：`rejects an unknown approval action instead of recording it`。
 5. 线程被提前告知、面板口径可见：`tells a fresh thread to stop before publishing, and the panel says what is gated`。
 6. 不在子线程里调用 `userQuestions.ask`（有测试断言不会抛 `DELEGATED_CALLER`）：宿主侧**没有任何** `userQuestions` 调用，`grep -rn userQuestions src/` 为空——这条约束靠「根本不写」保证，而不是靠运行期捕获。
+7. **「根会话答完 → 线程真的继续」整条链路**（第二轮复核 `REVIEW-RESPONSE-2.md` 判断 K 的提醒，2026-10-30 补齐）：改译把收件人换成了根会话，正是官方说「doesn't reach it」的方向，所以必须在协调者真正调用的那一层证明它能走通。`test/tools.test.ts`「delivers after the root records the sign-off, even across a restart」经 `project_thread_manage` 走完 拒绝 → 放行 `push` →（换一个 engine 实例模拟宿主重启）→ 放行 `pr` → 交付成功；拒绝结果是 `ok: false` 而不是抛错，且 `details.missing` 一次列全。
+   - **顺带修掉的两处「人答了、线程没动」**：① 拒绝消息原先只点名第一个缺失动作（`approve push`），放行后下一次交付又被 `pr` 拒一次——现在一次列全（`approve push pr`）；② `/project thread <id> approve push pr` 原先只记录 `push`，回执却写「approved push pr」——现在逐个记录，且任一词不是合法动作时**一个都不记**（`test/commands.test.ts` 的 `/project thread <id> approve` 一组）。
 
 ### GAP-25 heal prompt 没禁止 force-push 与改 CI 配置 — ✅ 已做
 
