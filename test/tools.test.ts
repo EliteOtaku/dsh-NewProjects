@@ -86,6 +86,43 @@ function repoReady(runner: FakeRunner): void {
   runner.on('git diff', { stdout: '' });
 }
 
+/**
+ * Paths where a value would not survive the Host's lossless-JSON check.
+ *
+ * The Host validates every tool result before the model sees it: each own enumerable value
+ * must be `null`, a string, a boolean, a finite number other than `-0`, or a plain
+ * array/object of the same. `undefined` is not a JSON value, so a single such key fails the
+ * whole call — which no unit test noticed until a real Host rejected `project_overview` on a
+ * freshly initialised project.
+ */
+function jsonFailurePaths(value: unknown, path = '$', found: string[] = []): string[] {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return found;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || Object.is(value, -0)) found.push(`${path}=${String(value)}`);
+    return found;
+  }
+  if (typeof value !== 'object') {
+    found.push(`${path}: ${typeof value}`);
+    return found;
+  }
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) found.push(`${path}: not a plain array`);
+    value.forEach((item, index) => jsonFailurePaths(item, `${path}[${index}]`, found));
+    return found;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) found.push(`${path}: non-plain object`);
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+    if (typeof key !== 'string' || descriptor === undefined || descriptor.enumerable !== true || !('value' in descriptor)) {
+      found.push(`${path}.${String(key)}: not a plain own property`);
+      continue;
+    }
+    jsonFailurePaths(descriptor.value, `${path}.${key}`, found);
+  }
+  return found;
+}
+
 describe('tool registration', () => {
   it('exposes exactly the documented tools', () => {
     const source = { engineFor: () => Promise.reject(new Error('unused')), parentOf: () => PARENT };
@@ -423,6 +460,31 @@ describe('project_overview', () => {
       context(),
     )) as Record<string, unknown>;
     assert.equal(result['code'], 'PROJECT_NOT_INITIALIZED');
+  });
+
+  it('sends lossless JSON while the project has no goal yet', async () => {
+    // A freshly initialised project has neither a goal nor recorded messages. Those keys must
+    // be absent rather than present-and-undefined: the Host drops the whole result otherwise.
+    const { engine } = await harness();
+    await engine.init({ name: 'demo' });
+    const result = (await tool({ engineFor: () => Promise.resolve(engine), parentOf: () => PARENT }, 'project_overview').execute(
+      {},
+      context(),
+    )) as Record<string, unknown>;
+    assert.deepEqual(jsonFailurePaths(result), []);
+    assert.equal('goal' in result, false);
+    assert.equal('recentMessages' in result, false);
+  });
+
+  it('sends the goal once one is recorded', async () => {
+    const { engine } = await harness();
+    await engine.init({ name: 'demo', goal: 'ship the plugin' });
+    const result = (await tool({ engineFor: () => Promise.resolve(engine), parentOf: () => PARENT }, 'project_overview').execute(
+      {},
+      context(),
+    )) as Record<string, unknown>;
+    assert.equal(result['goal'], 'ship the plugin');
+    assert.deepEqual(jsonFailurePaths(result), []);
   });
 });
 
