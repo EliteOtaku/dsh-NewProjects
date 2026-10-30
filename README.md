@@ -183,7 +183,7 @@ npm test           # 只跑测试
 
 ## 已知未实现部分
 
-相对官方 Claude Code Projects，六批实现计划已全部完成：全局配额、知识挂载、模型优先拆解、六分组投影、Library 与 PR 聚合、卡片动作、审批门、Pause/Archive、线程超时、worktree 回收、Usage 统计均已落地。剩下的只有**有意为之的边界**（重启后后台自愈停摆、云端 sandbox 与 GitHub App 的载体差异、Team 协作持平）与两条按需项，见 `docs/GAPS.md` 的 `ARCH` / `BOUND` 小节。
+相对官方 Claude Code Projects，六批实现计划已全部完成：全局配额、知识挂载、模型优先拆解、六分组投影、Library 与 PR 聚合、卡片动作、审批门、Pause/Archive、线程超时、worktree 回收、Usage 统计均已落地。剩下的只有**有意为之的边界**（重启后后台自愈停摆、记忆仍整段进 charter、云端 sandbox 与 GitHub App 的载体差异、Team 协作持平）；唯一的按需项 `GAP-28` 并发偏好也已于 2026-10-30 完成。见 `docs/GAPS.md` 的 `ARCH` / `BOUND` 小节。
 
 完整清单、代码证据、依据来源与验收标准见 **[docs/GAPS.md](./docs/GAPS.md)**，按批次推进。那份文档是判断「某个能力到底有没有」的唯一依据——不要凭本文件的段落推断。
 
