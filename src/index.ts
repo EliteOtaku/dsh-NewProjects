@@ -45,6 +45,7 @@ import type {
   HostSessionProjections,
   HostSessions,
   HostTokenMeter,
+  HostSubagentEndInfo,
   HostSubprocess,
   HostSystemPrompt,
   HostTimer,
@@ -203,7 +204,18 @@ export function apply(ctx: HostContext, config: ProjectBetaConfig = {}): void {
   ctx.inject(['subagents'], (scoped) => {
     const subagents = scoped.get('subagents') as HostSubagents | undefined;
     if (subagents === undefined) return;
-    threads.replace(new SubagentThreadRuntime(subagents, config.subagentProvider ?? 'spawn'));
+    const subagentRuntime = new SubagentThreadRuntime(subagents, config.subagentProvider ?? 'spawn');
+    threads.replace(subagentRuntime);
+    // The Host reports every finished child turn on exactly one event, and this adapter is
+    // the only consumer of it. Without this subscription a thread stays `running` forever
+    // after its first turn: no settle means no review bucket, no CI poll, no panel update.
+    scoped.effect(() =>
+      scoped.on('subagent/end', (info) => {
+        if (typeof info !== 'object' || info === null) return;
+        const ended = info as HostSubagentEndInfo;
+        subagentRuntime.markEnded(String(ended.id), SubagentThreadRuntime.outcomeFromEnd(ended));
+      }),
+    );
   });
 
   /**

@@ -40,6 +40,23 @@ export interface HostSubagentActivation {
   dispose(): Promise<void>;
 }
 
+/**
+ * Payload of the Host's `subagent/end` event.
+ *
+ * Only `id` is guaranteed: it is the child Session id, which is how a finished turn is matched
+ * back to its thread. The rest vary with the Host version — `lastAssistantMessage` has been
+ * both a string and content blocks — so it is typed loosely and normalised by the adapter.
+ */
+export interface HostSubagentEndInfo {
+  readonly id: string;
+  readonly provider?: string;
+  readonly stopReason?: HostSubagentResult['stopReason'];
+  readonly lastAssistantMessage?: unknown;
+  readonly diagnostic?: string;
+  /** Present on the Host's own emission; local children are the ones this plugin starts. */
+  readonly local?: boolean;
+}
+
 /** The subset of the `subagents` service this plugin calls. */
 export interface HostSubagents {
   startActivation(spec: {

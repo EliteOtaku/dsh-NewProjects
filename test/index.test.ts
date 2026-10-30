@@ -42,12 +42,29 @@ class FakeContext {
     for (const [name, service] of Object.entries(services)) this.services.set(name, service);
   }
 
+  /** Event subscriptions by name; `emit` fires them the way the Host does. */
+  readonly events = new Map<string, Array<(...args: never[]) => unknown>>();
+
   get(name: string): unknown {
     return this.services.get(name);
   }
 
-  on(): () => void {
-    return () => undefined;
+  on(event: string, listener: (...args: never[]) => unknown): () => void {
+    const listeners = this.events.get(event) ?? [];
+    listeners.push(listener);
+    this.events.set(event, listeners);
+    return () => {
+      const current = this.events.get(event);
+      if (current === undefined) return;
+      const index = current.indexOf(listener);
+      if (index !== -1) current.splice(index, 1);
+    };
+  }
+
+  emit(event: string, ...args: unknown[]): void {
+    for (const listener of [...(this.events.get(event) ?? [])]) {
+      (listener as (...rest: unknown[]) => unknown)(...args);
+    }
   }
 
   /**
@@ -153,6 +170,18 @@ describe('apply', () => {
     // than a silent degradation.
     const ctx = new FakeContext({});
     assert.throws(() => apply(ctx.asContext()), /needs the "subprocess" service/);
+  });
+
+  it('subscribes to the Host subagent/end event', async () => {
+    // The adapter turns one Host event into one engine outcome. Without this subscription
+    // `markEnded` has no caller, so a thread stays `running` after its first turn: no review
+    // bucket, no CI poll, no panel update.
+    const ctx = new FakeContext({
+      subprocess: fakeSubprocess(),
+      subagents: { getProvider: () => undefined, list: () => [] },
+    });
+    apply(ctx.asContext());
+    assert.ok(ctx.events.has('subagent/end'), JSON.stringify([...ctx.events.keys()]));
   });
 
   it('registers every tool and the one command', async () => {
