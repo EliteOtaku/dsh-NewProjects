@@ -15,6 +15,7 @@
  */
 
 import { renderGoalSection } from './coordState.js';
+import { SHARED_GIT_CONFIG_RULE } from './healing.js';
 import { renderConventions, type ConventionDocument } from './conventions.js';
 import { renderMemoryPrefix } from './memory.js';
 import {
@@ -229,6 +230,7 @@ export function renderThreadTask(
   blocks.push('Do not force-push: reviewers may already be reading this branch.');
   blocks.push("Do not change CI configuration (workflow files, which checks run, or a check's threshold) to make a check pass.");
   blocks.push('Do not merge your own pull request. Stop and report if you are blocked on a decision only the user can make.');
+  blocks.push(SHARED_GIT_CONFIG_RULE);
   return blocks.join('\n');
 }
 

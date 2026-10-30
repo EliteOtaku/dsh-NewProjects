@@ -305,6 +305,12 @@ describe('buildHealPrompt', () => {
     assert.match(prompt, /do not (?:weaken|delete)/i);
   });
 
+  it('keeps a healing turn out of the shared git configuration', () => {
+    const prompt = buildHealPrompt(base, [check('build', 'fail')], []);
+    assert.match(prompt, /Do not change git configuration/);
+    assert.match(prompt, /git -c key=value/);
+  });
+
   it('includes the log excerpt it is given, verbatim', () => {
     // Trimming to a tail is `tailLines`' job (tested in vcs.test.ts); the prompt must not
     // second-guess the excerpt it was handed, or the two cut-offs disagree and the thread

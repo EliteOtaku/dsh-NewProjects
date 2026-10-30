@@ -1681,15 +1681,16 @@ describe('healSweep', () => {
  * path a real thread takes, so the PR reference, the branch and the status cannot drift
  * from what the polling loop will later read.
  */
-async function awaitingThread(): Promise<{
+async function awaitingThread(extra: { requireApprovalFor?: ApprovalAction[] } = {}): Promise<{
   engine: ProjectEngine;
   runner: FakeRunner;
   threads: FakeThreads;
+  root: string;
   threadId: string;
   branch: string;
   prNumber: number;
 }> {
-  const { engine, runner, threads } = await harness();
+  const { engine, runner, threads, root } = await harness(extra);
   await engine.init({ name: 'demo' });
   repoReady(runner);
   // A commit exists, otherwise `deliverThread` correctly answers "nothing to commit".
@@ -1721,9 +1722,14 @@ async function awaitingThread(): Promise<{
   runner.on(`gh api repos/{owner}/{repo}/pulls/${String(prNumber)}/reviews`, { stdout: '[]' });
   runner.on(`gh pr view ${String(prNumber)}`, { stdout: JSON.stringify({ state: 'OPEN', isDraft: false }) });
 
+  // A gated project only reaches an open pull request through a human sign-off, so grant
+  // what publishing needs the same way the user would.
+  for (const gate of extra.requireApprovalFor ?? []) {
+    if (gate === 'push' || gate === 'pr') await engine.approve(threadId, gate);
+  }
   const delivered = await engine.deliverThread(threadId, {});
   assert.ok(delivered.prRef !== undefined, 'delivery must record a pull request');
-  return { engine, runner, threads, threadId, branch, prNumber };
+  return { engine, runner, threads, root, threadId, branch, prNumber };
 }
 
 describe('healSweep: consecutive-failure budget', () => {
@@ -1992,6 +1998,41 @@ describe('approvals', () => {
     const overview = await engine.overviewJson();
     assert.deepEqual(overview.approvalsRequired, ['push', 'pr']);
     assert.match(renderOverviewMarkdown(await engine.overview()), /sign-off required before: push, pr/);
+  });
+});
+
+describe('approvals in a healing turn', () => {
+  it('lets a healing turn push once push is already granted', async () => {
+    // The grant is recorded per thread and the host never asks for it again, so a thread
+    // told to stop and ask would request a sign-off nobody is going to be asked for.
+    const { engine, runner, threads } = await awaitingThread({ requireApprovalFor: ['push', 'pr'] });
+    runner.on('gh pr checks', { stdout: JSON.stringify([{ name: 'build', state: 'FAILURE' }]) });
+    const sweep = await engine.healSweep(PARENT, AbortSignal.timeout(5000));
+    assert.equal(sweep.healed.length, 1);
+    const prompt = threads.resumes.at(-1)?.text ?? '';
+    assert.doesNotMatch(prompt, /stop before pushing/);
+    assert.match(prompt, /Commit and push to your existing branch/);
+  });
+
+  it('still stops a healing turn whose push was never granted', async () => {
+    // Gating switched on after the pull request was opened: nobody has signed off on a push
+    // for this thread yet, so the healing turn is the one that has to stop and ask.
+    const { runner, threads, root, threadId } = await awaitingThread();
+    const gated = new ProjectEngine(root, {
+      runner,
+      threads,
+      clock: fixedClock(),
+      ids: sequentialIds(),
+      quotaLedgerPath: join(root, 'quota-ledger.json'),
+      requireApprovalFor: ['push'],
+    });
+    assert.equal((await gated.requireThread(threadId)).approvals, undefined);
+    runner.on('gh pr checks', { stdout: JSON.stringify([{ name: 'build', state: 'FAILURE' }]) });
+    const sweep = await gated.healSweep(PARENT, AbortSignal.timeout(5000));
+    assert.equal(sweep.healed.length, 1);
+    const prompt = threads.resumes.at(-1)?.text ?? '';
+    assert.match(prompt, /stop before pushing/);
+    assert.match(prompt, /approve push for/);
   });
 });
 

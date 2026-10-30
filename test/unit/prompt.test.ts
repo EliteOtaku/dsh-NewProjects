@@ -58,6 +58,14 @@ describe('renderThreadTask', () => {
     assert.match(prompt, /Do not merge your own pull request/);
   });
 
+  it('keeps threads out of the shared git configuration', () => {
+    // Every worktree shares one `.git`: a `git config` written by one thread lands in the
+    // user's repository and in every sibling thread at once.
+    const prompt = renderThreadTask(makeThread(), {});
+    assert.match(prompt, /Do not change git configuration/);
+    assert.match(prompt, /git -c key=value/);
+  });
+
   it('names the branch and the push/open commands when there is a branch', () => {
     const prompt = renderThreadTask(makeThread(), {});
     assert.match(prompt, /project\/demo\/1-add-the-settings-page/);
