@@ -20,7 +20,7 @@ Issue 与规格都存在本仓库的 GitHub Issues（`EliteOtaku/dsh-NewProjects
 
 ```bash
 npm install
-npm run verify     # typecheck + build + test，共 564 项测试
+npm run verify     # typecheck + build + test，共 569 项测试
 npm test           # 只跑测试
 npm run build      # 只编译到 lib/
 ```

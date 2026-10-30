@@ -23,7 +23,7 @@ import type { CommandResult, CommandRunner, CommandSpec } from '../../src/core/e
 import {
   commitAll,
   createBranch,
-  ensureGitIdentity,
+  FALLBACK_GIT_IDENTITY,
   inspectRepo,
   isWorktreeHealthy,
   pushBranch,
@@ -244,14 +244,44 @@ describe('real git integration', () => {
     assert.match(refs.stdout, /project\/demo\/4-fourth/);
   });
 
-  it('leaves an existing identity alone', async (t) => {
+  it('commits under an existing identity and leaves it alone', async (t) => {
     if (!gitAvailable) return t.skip('git is not installed');
     const { root, runner } = await freshRepo();
-    await ensureGitIdentity(runner, root);
+    await writeFile(join(root, 'a.txt'), 'a\n', 'utf8');
+    await commitAll(runner, { cwd: root, message: 'add a' });
+    const author = await runner.run({ argv: ['git', 'log', '-1', '--format=%an <%ae>'], cwd: root });
+    // The configured identity must sign the commit and survive it: rewriting a user's
+    // identity would misattribute every later commit in the repository.
+    assert.equal(author.stdout.trim(), 'Test <test@example.com>');
     const email = await runner.run({ argv: ['git', 'config', 'user.email'], cwd: root });
-    // The configured address must survive: rewriting a user's identity would misattribute
-    // every later commit in the repository.
     assert.equal(email.stdout.trim(), 'test@example.com');
+  });
+
+  it('commits on a machine with no identity without writing one', async (t) => {
+    if (!gitAvailable) return t.skip('git is not installed');
+    const { root, runner } = await freshRepo();
+    await runner.run({ argv: ['git', 'config', '--unset', 'user.name'], cwd: root });
+    await runner.run({ argv: ['git', 'config', '--unset', 'user.email'], cwd: root });
+    // Refuse to guess from the hostname, so git fails the way a fresh machine does.
+    await runner.run({ argv: ['git', 'config', 'user.useConfigOnly', 'true'], cwd: root });
+    const saved = { global: process.env['GIT_CONFIG_GLOBAL'], nosystem: process.env['GIT_CONFIG_NOSYSTEM'] };
+    process.env['GIT_CONFIG_GLOBAL'] = join(root, 'no-global-config');
+    process.env['GIT_CONFIG_NOSYSTEM'] = '1';
+    try {
+      await writeFile(join(root, 'b.txt'), 'b\n', 'utf8');
+      const result = await commitAll(runner, { cwd: root, message: 'add b' });
+      assert.equal(result.committed, true);
+      const author = await runner.run({ argv: ['git', 'log', '-1', '--format=%an <%ae>'], cwd: root });
+      assert.equal(author.stdout.trim(), `${FALLBACK_GIT_IDENTITY.name} <${FALLBACK_GIT_IDENTITY.email}>`);
+      // The `.git` is shared by every thread and outlives the project: nothing may be left in it.
+      const name = await runner.run({ argv: ['git', 'config', '--local', 'user.name'], cwd: root });
+      assert.notEqual(name.exitCode, 0);
+    } finally {
+      if (saved.global === undefined) delete process.env['GIT_CONFIG_GLOBAL'];
+      else process.env['GIT_CONFIG_GLOBAL'] = saved.global;
+      if (saved.nosystem === undefined) delete process.env['GIT_CONFIG_NOSYSTEM'];
+      else process.env['GIT_CONFIG_NOSYSTEM'] = saved.nosystem;
+    }
   });
 
   it('runs every command in the requested directory, not the process one', async (t) => {

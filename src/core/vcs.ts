@@ -13,7 +13,7 @@
  */
 
 import { assertOk, runChecked, runProbe } from './exec.js';
-import type { CommandRunner } from './exec.js';
+import type { CommandRunner, CommandSpec } from './exec.js';
 import { parseNameStatus } from './library.js';
 import type { ProjectOutputFile } from '../types.js';
 
@@ -190,11 +190,18 @@ export async function commitAll(
     env['GIT_AUTHOR_EMAIL'] = options.authorEmail;
     env['GIT_COMMITTER_EMAIL'] = options.authorEmail;
   }
-  await runChecked(runner, {
+  const commit: CommandSpec = {
     argv: ['git', 'commit', '--no-verify', '-m', message],
     cwd,
     ...(Object.keys(env).length === 0 ? {} : { env }),
-  });
+  };
+  const result = await runner.run(commit);
+  if (result.exitCode !== 0 && Object.keys(env).length === 0 && isMissingGitIdentity(result.stderr)) {
+    // Only when git itself refuses: an identity it can find or derive is the user's and is kept.
+    assertOk(commit, await runner.run({ ...commit, env: fallbackIdentityEnv() }));
+  } else {
+    assertOk(commit, result);
+  }
   const head = await runChecked(runner, { argv: ['git', 'rev-parse', 'HEAD'], cwd });
   return { committed: true, commit: head.trim() };
 }
@@ -505,12 +512,27 @@ export async function readPrState(runner: CommandRunner, cwd: string, prNumber: 
   }
 }
 
-/** Ensure the git identity exists so commits never fail on a fresh machine. */
-export async function ensureGitIdentity(runner: CommandRunner, repoRoot: string): Promise<void> {
-  const name = await runProbe(runner, { argv: ['git', 'config', 'user.name'], cwd: repoRoot });
-  if (name.exitCode === 0 && name.stdout.trim().length > 0) return;
-  assertOk(
-    { argv: ['git', 'config', 'user.name', 'dsh-newprojects'], cwd: repoRoot },
-    await runner.run({ argv: ['git', 'config', 'user.name', 'dsh-newprojects'], cwd: repoRoot }),
-  );
+/** The identity a commit falls back to when git has none to sign it with. */
+export const FALLBACK_GIT_IDENTITY = { name: 'dsh-newprojects', email: 'dsh-newprojects@localhost' } as const;
+
+/** Whether git refused a commit because it has no author identity. */
+export function isMissingGitIdentity(stderr: string): boolean {
+  return /Please tell me who you are|empty ident name|unable to auto-detect email address|no email was given/i.test(stderr);
+}
+
+/**
+ * Keep commits working on a machine with no git identity, without writing one.
+ *
+ * This used to run `git config user.name` against the repository, which lands in the `.git`
+ * every thread's worktree shares and outlives the project, the very write the thread prompts
+ * forbid (`SHARED_GIT_CONFIG_RULE`). The environment carries the same identity for one
+ * commit and leaves the user's configuration as it was.
+ */
+function fallbackIdentityEnv(): Record<string, string> {
+  return {
+    GIT_AUTHOR_NAME: FALLBACK_GIT_IDENTITY.name,
+    GIT_COMMITTER_NAME: FALLBACK_GIT_IDENTITY.name,
+    GIT_AUTHOR_EMAIL: FALLBACK_GIT_IDENTITY.email,
+    GIT_COMMITTER_EMAIL: FALLBACK_GIT_IDENTITY.email,
+  };
 }
