@@ -74,9 +74,9 @@
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | ~~`GAP-03`~~ ✅ ~~`GAP-04`~~ ✅ ~~`GAP-05`~~ ✅（2026-10-29 关闭） |
 | **P3** | 官方有、我们无，独立功能 | 全部关闭（`GAP-06` / `GAP-09` / `GAP-10` / `GAP-11` / `GAP-12` / `GAP-13` / `GAP-29` 已于 2026-10-29 完成） |
 | **P4** | 项目管理类，缺了不能「管起来」 | ~~`GAP-15`~~ ✅ ~~`GAP-17`~~ ✅ ~~`GAP-28`~~ ✅（2026-10-30 关闭）—— **P4 已清空** |
-| **P5** | 磁盘、性能与健壮性，不出错 | ~~`GAP-20`~~ ✅ ~~`GAP-27`~~ ✅（2026-10-29 关闭）—— **P5 已清空** |
+| **P5** | 磁盘、性能与健壮性，不出错 | ~~`GAP-20`~~ ✅ ~~`GAP-27`~~ ✅（2026-10-29 关闭）；`GAP-30` ⬜（2026-10-30 登记，共享 `.git` 护栏只写在文档里） |
 | **ARCH** | 架构性差异，记录不排期 | `GAP-A1` ~ `GAP-A4` |
-| **BOUND** | 有意为之的边界，非缺陷 | `BOUND-1` ~ `BOUND-5`（`BOUND-3` 已解决） |
+| **BOUND** | 有意为之的边界，非缺陷 | `BOUND-1` ~ `BOUND-6`（`BOUND-3` 已解决；`BOUND-6` 待维护者裁定） |
 
 ---
 
@@ -761,11 +761,32 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
 1. `src/core/exec.ts` 新增 `withLockRetry(runner, spec)`：`LOCK_PATTERNS = /cannot lock ref|index\.lock|Unable to create '.*\.lock'|Lock file already exists|another git process/`，命中则指数退避重试（`LOCK_RETRIES = 3`，5/10/20ms）。
 2. 只有**命中锁特征**才重试；其余 `CommandError` 立即抛——无限重试会把真正的错误藏起来。
 3. 重试耗尽仍失败时，错误信息追加说明「共享仓库被另一个线程占用」，而不是让用户以为自己的代码有问题。
-4. 共享 `.git` 的其它护栏（记录在此，避免下轮重新分析）：`git gc` / `worktree prune` 只由宿主串行执行；线程永不写 `.git/config`（需要时 `git -c k=v` 单次传入）；凭证走每线程独立 env，不落 config。
+4. 共享 `.git` 的其它护栏（记录在此，避免下轮重新分析）：`git gc` / `worktree prune` 只由宿主串行执行；线程永不写 `.git/config`（需要时 `git -c k=v` 单次传入）；凭证走每线程独立 env，不落 config。⚠️ **2026-10-30 核对：其中 `gc` 与「不写 config」两条代码里没有，见 `GAP-30`**。
 
 #### 验收（全部有测试）
 
-`test/unit/exec.test.ts`：模拟一次 `cannot lock ref` 后第二次成功且线程不失败；连续三次锁冲突仍如实抛错且文案指出仓库占用；非锁错误零重试。
+`test/unit/lockRetry.test.ts`（原写 `exec.test.ts`，该文件不存在）：模拟一次 `cannot lock ref` 后第二次成功且线程不失败；连续三次锁冲突仍如实抛错且文案指出仓库占用；非锁错误零重试。
+
+### GAP-30 共享 `.git` 的两条护栏只写在文档里 — ⬜ 未做（2026-10-30 登记）
+
+- **依据**：`docs/REVIEW-RESPONSE.md` §2 Q1 的风险表（⚠️ 复核者自注「文档无，工程判断」，不是 `OFFICIAL`）。`REVIEW-REQUEST.md` §3 Q4 与本文件 `GAP-27` 第 4 条把它们写成了「已知的护栏」，读起来像已落地。
+- **现状**（逐条对代码）：
+
+  | 护栏 | 代码里有没有 |
+  | --- | --- |
+  | `git worktree prune` 只由宿主做 | ✅ `removeWorktree`（`src/core/vcs.ts`） |
+  | 锁冲突退避重试 | ✅ `GAP-27` |
+  | 共享仓库 `gc.auto=0`，`gc` 由宿主在无活动线程时串行做 | ❌ `grep -rn "gc.auto\|'gc'" src/` 零命中；宿主从不跑 `gc`。线程在自己的 worktree 里 `git commit`，每次都可能触发作用于共享 object database 的 `git gc --auto` |
+  | 线程永不写 `.git/config` | ❌ 线程 charter（`renderThreadTask` 的 `How to finish`）与 `buildHealPrompt` 的 Ground rules 只禁 force-push / 改 CI / 自己合并，没有这一条 |
+  | 凭证不落 config | — 不适用：走用户已有的 `gh` 鉴权，我方不配 helper |
+
+  另：`ensureGitIdentity`（`src/core/vcs.ts`）会往仓库 config 写 `user.name`，生产代码**零调用**，只有 `test/integration/git.test.ts` 用。
+- **严重度**（⚠️ 工程判断，未实测）：比 `REVIEW-REQUEST` 写的「会真丢数据」低。git 自带两层缓冲：`gc --auto` 取 `gc.pid` 锁，不会两个同时跑；prune 只删比 `gc.pruneExpire`（默认 2 周）更老的不可达对象，线程刚写、还没被 ref 指向的对象不在其内。所以排 P5 而不是 P1。
+- **做法候选**（需要维护者拍板）：
+  1. charter 与 heal prompt 加禁令「不要写 `.git/config`，需要时用 `git -c k=v`」—— 零成本，和 `GAP-25` 同形。**倾向做。**
+  2. `gc.auto=0`：要写就得在 `init` 时改用户仓库的共享 config —— 这本身就是宿主改 config，必须在 `init` 输出里明说、`deinit` 时还原。另一条路是不做、依赖上面两层缓冲，然后把这一行移进 `BOUND`。**倾向不做，但要写明理由。**
+  3. `ensureGitIdentity`：删掉，或接上并说明它写的是哪份 config。
+- **验收**：① 禁令在 charter 与 heal prompt 里且有测试；② `gc.auto` 有明确结论（做则有测试，不做则移入 `BOUND` 并写理由）；③ `REVIEW-REQUEST` Q4 与 `GAP-27` 第 4 条的护栏清单和代码一致。
 
 ---
 
@@ -840,6 +861,16 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
 
 - `createRuntime` 用 `detaches: Map<string, () => void>` 保证每个 root 只 `attach()` 一次。这是**正确设计**，不要为了「多实例」去动它。
 
+### BOUND-6 审批放行按线程记，不按每次推送记（⚠️ 待维护者裁定，2026-10-30 登记）
+
+来自 `REVIEW-REQUEST.md` §4 自疑第 3 条「审批改译会丢失线程现场的上下文」。那条的前提（线程结束、根会话代问）在 `GAP-18` 落地时已经变了，所以**原担心大半不成立**：线程按 charter 的 `Stop before publishing` 收尾时自己报上 commit hash 与跑过的验证，审批人还能用 `/project thread <id>` 与 `/project library` 看它改了什么。剩下的是两条**范围**问题，不是上下文问题：
+
+1. **一次放行覆盖之后所有推送。** `thread.approvals.push` 是时间戳，`assertApproved` 只看有没有（`src/core/engine.ts`）。自愈轮里 `buildHealPrompt`（`src/core/healing.ts`）让线程「stop before pushing … approve push for <PR>」，但之后宿主再 `deliver` 时 `push` 早已放行，不会再拦 —— **线程在请示，宿主却不再问人**。`GAP-18` 第 2 条选时间戳是为了「回答什么时候批的」，并没有决定「批一次管多久」。
+   - 若要收紧：线程每被自愈唤醒一轮就清掉 `approvals.push`（或记下放行时的 head commit，`deliver` 时比对）。代价是自愈多一次人工往返。
+   - 若不收紧：把 heal prompt 那句改成「commit and report」，别让线程请示一件宿主不会再问的事。
+   - **两条路都行，但现在的组合（线程请示 + 宿主不问）两头不靠，应二选一。**
+2. **门只拦宿主动手的 push / pr / merge。** 线程在 auto mode 下自己跑 `git push` 只受 prompt 约束，宿主拦不住 —— 这是「宿主执行」改译的边界，不是遗漏。同理，charter 第 5 步「If you are sent an approval message, then push」与 `approve` 的实际行为不一致：`approve` 只记录、不给线程发消息，真正推送的是随后那次 `deliver`。
+
 ---
 
 ## 编号变更记录
@@ -856,6 +887,7 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
 
 **新增编号**（第一轮加入）：`GAP-22` ~ `GAP-29`。
 **新增编号**（第二轮加入）：`GAP-22a`（从 `GAP-22` 第 2 条拆出，见该条）、`BOUND-5`（记忆仍在 charter 槽位里，取舍而非缺陷）。
+**新增编号**（2026-10-30 复核收尾）：`GAP-30`（共享 `.git` 护栏只写在文档里）、`BOUND-6`（审批放行的范围）。
 
 ## 已修正的错误判断
 
