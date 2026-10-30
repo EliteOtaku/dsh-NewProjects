@@ -41,7 +41,16 @@ import {
   type KnowledgeIndex,
   type KnowledgeState,
 } from './knowledge.js';
-import { collectKnowledge, readIndexFile, writeIndexFile } from './knowledgeSource.js';
+import {
+  collectKnowledge,
+  knowledgeStamp,
+  listKnowledgeTree,
+  readIndexFile,
+  readKnowledgeFile as readKnowledgeSlice,
+  writeIndexFile,
+  type KnowledgeFileSlice,
+  type KnowledgeTreeResult,
+} from './knowledgeSource.js';
 import { collectConventions, conventionsStamp, type ConventionDocument } from './conventions.js';
 import { ManifestStore, INSTRUCTIONS_FILE, projectPaths, type ProjectPaths } from './manifest.js';
 import {
@@ -291,6 +300,14 @@ export class ProjectEngine {
    * index file on every render. Invalidated by every knowledge mutation.
    */
   private knowledgeCache: { index: KnowledgeIndex; state: KnowledgeState } | undefined;
+  /**
+   * In-flight rebuild, shared by every caller that noticed the same staleness.
+   *
+   * Two searches fired at the same moment see the same stale stamp; without this they would
+   * both collect every bound file and both write the index. One promise, one rebuild, both
+   * callers await the same result.
+   */
+  private knowledgeBuildInFlight: Promise<KnowledgeState> | undefined;
   /**
    * Root-level repository conventions, keyed by a size+mtime stamp.
    *
@@ -1754,6 +1771,12 @@ export class ProjectEngine {
   async buildKnowledge(options: { signal?: AbortSignal } = {}): Promise<KnowledgeState> {
     const manifest = await this.requireManifest();
 
+    // Fingerprint before collecting, never after. An edit landing mid-collection then leaves a
+    // stamp older than the content, so the next search rebuilds once more — wasted work. Stamping
+    // afterwards would leave a stamp newer than the content just collected, and the stale answer
+    // that follows would never be rebuilt at all. Of the two failures, only one is silent.
+    const stamp = await knowledgeStamp(manifest.knowledgePaths, manifest.rootDir);
+
     const collected = await collectKnowledge(manifest.knowledgePaths, {
       rootDir: manifest.rootDir,
       maxChars: MAX_KNOWLEDGE_INDEX_CHARS,
@@ -1761,7 +1784,7 @@ export class ProjectEngine {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
 
-    const index = buildIndex(collected.documents, manifest.knowledgePaths, this.clock.now());
+    const index = buildIndex(collected.documents, manifest.knowledgePaths, this.clock.now(), stamp);
     const warnings = [...collected.warnings];
     if (index.docs.length === 0 && manifest.knowledgePaths.length > 0) {
       warnings.push(
@@ -1773,6 +1796,22 @@ export class ProjectEngine {
     // The charter lists the catalogue, so a rebuild changes the prefix.
     await this.renderCharter().catch(() => undefined);
     return this.knowledgeCache.state;
+  }
+
+  /**
+   * Rebuild at most once at a time, sharing the result with every caller that noticed the
+   * same staleness.
+   */
+  async rebuildKnowledgeOnce(options: { signal?: AbortSignal } = {}): Promise<KnowledgeState> {
+    const inFlight = this.knowledgeBuildInFlight;
+    if (inFlight !== undefined) return inFlight;
+    const build = this.buildKnowledge(options);
+    this.knowledgeBuildInFlight = build;
+    try {
+      return await build;
+    } finally {
+      if (this.knowledgeBuildInFlight === build) this.knowledgeBuildInFlight = undefined;
+    }
   }
 
   /** Read the built index from disk without collecting files. */
@@ -1807,7 +1846,16 @@ export class ProjectEngine {
       throw new ProjectError('INVALID_INPUT', 'query must not be empty');
     }
     const manifest = await this.requireManifest();
-    const { index, state } = await this.knowledgeState();
+    let cached = await this.knowledgeState();
+    // Staleness is decided by stat-ing the bound paths, not by a timer: an unchanged tree
+    // costs nothing, and an edited one is visible on the very next search. A time window on
+    // top would only add the case where the file was just edited and the answer is still old.
+    const stamp = await knowledgeStamp(manifest.knowledgePaths, manifest.rootDir);
+    if (cached.index.stamp !== stamp) {
+      await this.rebuildKnowledgeOnce();
+      cached = await this.knowledgeState();
+    }
+    const { index, state } = cached;
     const hits = searchKnowledge(index, trimmed, {
       ...(options.limit === undefined ? {} : { limit: options.limit }),
     });
@@ -1815,6 +1863,24 @@ export class ProjectEngine {
     // is usually a thread whose working directory is its own worktree — where that path means
     // something else, or nothing at all.
     return { hits, state, rootDir: manifest.rootDir };
+  }
+
+  /**
+   * List a directory tree of the project root.
+   *
+   * The project root, not the caller's checkout: bound paths are relative to the project, and
+   * a thread's worktree only holds what was committed when its branch was cut, so an
+   * uncommitted knowledge file exists here and nowhere else.
+   */
+  async knowledgeTree(options: { path?: string; depth?: number; limit?: number } = {}): Promise<KnowledgeTreeResult> {
+    const manifest = await this.requireManifest();
+    return listKnowledgeTree(manifest.rootDir, options);
+  }
+
+  /** Read one line window of a file under the project root. */
+  async knowledgeRead(options: { path: string; from?: number; lines?: number }): Promise<KnowledgeFileSlice> {
+    const manifest = await this.requireManifest();
+    return readKnowledgeSlice(manifest.rootDir, options);
   }
 
   /** Replace the bound knowledge paths and rebuild. */

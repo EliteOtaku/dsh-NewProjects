@@ -481,7 +481,7 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
           root: result.rootDir,
           hits: result.hits,
           text: renderHits(result.hits),
-          hint: `Cited paths are relative to the project root \`${result.rootDir}\`, not to your working directory — your checkout is a worktree that holds only what was committed when your branch was cut. Open the cited file under the project root for its current contents; the index is rebuilt on demand and may lag.`,
+          hint: `Cited paths are relative to the project root \`${result.rootDir}\`, not to your working directory — your checkout is a worktree that holds only what was committed when your branch was cut. Open the cited file under the project root for its current contents; the index is rebuilt automatically before each search, so a hit cites the file as it was for this query. To find a file without a keyword, call \`project_knowledge\` with action "tree", then action "read".`,
         };
       } catch (error) {
         return asToolResult(error);
@@ -489,24 +489,32 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
     },
   };
 
-  /** `project_knowledge` — bind, list, rebuild, or drop the knowledge base. */
+  /** `project_knowledge` — bind, browse, list, rebuild, or drop the knowledge base. */
   const knowledgeManage: HostToolDefinition = {
     name: 'project_knowledge',
     description:
-      'Manage the project knowledge base: list what is indexed, add or remove bound files/folders, or rebuild the search index after the files changed.',
+      'Work with the project knowledge base: `list` what is indexed, `tree` a directory and `read` a line window of any file under the project root, `add` or `remove` bound files/folders, or force a `rebuild` (rarely needed — searching rebuilds by itself once the bound files change). Bound knowledge is a folder on disk, so `tree` and `read` reach files that a search never pointed at; the file itself is authoritative.',
     parameters: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['list', 'add', 'remove', 'rebuild'],
-          description: 'list (default), add, remove, or rebuild the index.',
+          enum: ['list', 'add', 'remove', 'rebuild', 'tree', 'read'],
+          description: 'list (default), add, remove, rebuild, tree, or read.',
         },
         paths: {
           type: 'array',
           items: { type: 'string' },
           description: 'Files or folders to add/remove, relative to the project root or absolute.',
         },
+        path: {
+          type: 'string',
+          description: 'For tree and read: a file or folder relative to the project root. Defaults to the root for tree.',
+        },
+        depth: { type: 'integer', description: 'tree only: directory levels to expand (1-4, default 2).' },
+        limit: { type: 'integer', description: 'tree only: maximum entries to return (1-500, default 200).' },
+        from: { type: 'integer', description: 'read only: first line to return, 1-based (default 1).' },
+        lines: { type: 'integer', description: 'read only: how many lines to return (1-2000, default 200).' },
         rootDir: { type: 'string', description: 'Project root. Defaults to the current workspace.' },
       },
       additionalProperties: false,
@@ -546,6 +554,46 @@ export function buildTools(source: ToolContextSource): HostToolDefinition[] {
         if (action === 'rebuild') {
           const state = await engine.buildKnowledge({ signal: exec.signal });
           return { ok: true, state, summary: describeKnowledge(state) };
+        }
+        if (action === 'tree') {
+          const target = readString(args, 'path');
+          const depth = readInt(args, 'depth');
+          const limit = readInt(args, 'limit');
+          const tree = await engine.knowledgeTree({
+            ...(target === undefined ? {} : { path: target }),
+            ...(depth === undefined ? {} : { depth }),
+            ...(limit === undefined ? {} : { limit }),
+          });
+          const manifest = await engine.requireManifest();
+          return {
+            ok: true,
+            ...tree,
+            // A cut tree that does not say it was cut reads as the complete picture, and the
+            // model stops looking. State the limit in the result, not only in the docs.
+            hint: tree.truncated
+              ? `Incomplete: ${tree.note}. The entries above are real, but do not assume the tree is complete.`
+              : `Paths are relative to the project root \`${manifest.rootDir}\`; pass one to action "read" for its contents.`,
+          };
+        }
+        if (action === 'read') {
+          const target = readString(args, 'path');
+          if (target === undefined) {
+            return { ok: false, code: 'INVALID_INPUT', message: 'read needs a path' };
+          }
+          const from = readInt(args, 'from');
+          const lines = readInt(args, 'lines');
+          const slice = await engine.knowledgeRead({
+            path: target,
+            ...(from === undefined ? {} : { from }),
+            ...(lines === undefined ? {} : { lines }),
+          });
+          return {
+            ok: true,
+            ...slice,
+            hint: slice.truncated
+              ? `Lines ${slice.from}-${slice.to} of ${slice.totalLines}; call again with from: ${slice.to + 1} for the rest.`
+              : `All ${slice.totalLines} line(s) of \`${slice.path}\` are in this result.`,
+          };
         }
         return { ok: false, code: 'INVALID_INPUT', message: `unknown action "${action}"` };
       } catch (error) {

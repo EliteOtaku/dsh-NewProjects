@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -480,5 +480,103 @@ describe('project_overview usage', () => {
       usage?: { totals?: { inputTokens?: number } };
     };
     assert.equal(full.usage?.totals?.inputTokens, 5);
+  });
+});
+
+describe('project_knowledge browsing', () => {
+  const sourceFor = (engine: ProjectEngine) => ({
+    engineFor: () => Promise.resolve(engine),
+    parentOf: () => PARENT,
+  });
+
+  it('advertises tree and read in the action enum', () => {
+    const source = { engineFor: () => Promise.reject(new Error('unused')), parentOf: () => PARENT };
+    const definition = tool(source, 'project_knowledge');
+    const action = (definition.parameters['properties'] as Record<string, Record<string, unknown>>)['action'];
+    assert.deepEqual(action?.['enum'], ['list', 'add', 'remove', 'rebuild', 'tree', 'read']);
+    // The schema must document the window parameters, or the model cannot address a fragment.
+    const properties = definition.parameters['properties'] as Record<string, unknown>;
+    for (const key of ['path', 'depth', 'limit', 'from', 'lines']) {
+      assert.ok(key in properties, `missing \`${key}\` parameter`);
+    }
+  });
+
+  it('trees the project root and says the listings are complete', async () => {
+    const { engine, root } = await harness();
+    await engine.init({ name: 'demo' });
+    await mkdir(join(root, 'kb'), { recursive: true });
+    await writeFile(join(root, 'kb', 'deploy.md'), 'one\ntwo\n', 'utf8');
+
+    const result = (await tool(sourceFor(engine), 'project_knowledge').execute(
+      { action: 'tree', path: 'kb' },
+      context(),
+    )) as Record<string, unknown>;
+    assert.equal(result['ok'], true);
+    assert.deepEqual(result['entries'], [{ path: 'kb/deploy.md', kind: 'file', bytes: 8 }]);
+    assert.equal(result['truncated'], false);
+    assert.match(String(result['hint']), /project root/);
+  });
+
+  it('names the depth cap when the tree was cut', async () => {
+    const { engine, root } = await harness();
+    await engine.init({ name: 'demo' });
+    await mkdir(join(root, 'a', 'b'), { recursive: true });
+    await writeFile(join(root, 'a', 'b', 'deep.md'), 'x\n', 'utf8');
+
+    const result = (await tool(sourceFor(engine), 'project_knowledge').execute(
+      { action: 'tree', depth: 1 },
+      context(),
+    )) as Record<string, unknown>;
+    assert.equal(result['truncated'], true);
+    assert.match(String(result['note']), /depth 1/);
+    // The hint has to carry the warning too: a model reading only the first line of the
+    // result would otherwise take the partial listing as the whole project.
+    assert.match(String(result['hint']), /Incomplete:/);
+  });
+
+  it('reads a line window and points at the next one', async () => {
+    const { engine, root } = await harness();
+    await engine.init({ name: 'demo' });
+    await writeFile(join(root, 'note.md'), 'one\ntwo\nthree\n', 'utf8');
+
+    const result = (await tool(sourceFor(engine), 'project_knowledge').execute(
+      { action: 'read', path: 'note.md', from: 1, lines: 2 },
+      context(),
+    )) as Record<string, unknown>;
+    assert.equal(result['ok'], true);
+    assert.equal(result['from'], 1);
+    assert.equal(result['to'], 2);
+    assert.equal(result['totalLines'], 3);
+    assert.equal(result['truncated'], true);
+    assert.equal(result['text'], 'one\ntwo');
+    assert.match(String(result['hint']), /from: 3/);
+  });
+
+  it('reports an escape as an error result instead of throwing', async () => {
+    const { engine } = await harness();
+    await engine.init({ name: 'demo' });
+    const knowledge = tool(sourceFor(engine), 'project_knowledge');
+    for (const args of [
+      { action: 'tree', path: '../..' },
+      { action: 'read', path: '../../etc/passwd' },
+    ]) {
+      // A thrown error ends the turn; an out-of-bounds path is the model's mistake to correct.
+      const result = (await knowledge.execute(args, context())) as Record<string, unknown>;
+      assert.equal(result['ok'], false);
+      assert.equal(result['code'], 'INVALID_INPUT');
+      assert.match(String(result['message']), /outside the project root/);
+    }
+  });
+
+  it('requires a path for read', async () => {
+    const { engine } = await harness();
+    await engine.init({ name: 'demo' });
+    const result = (await tool(sourceFor(engine), 'project_knowledge').execute(
+      { action: 'read' },
+      context(),
+    )) as Record<string, unknown>;
+    assert.equal(result['ok'], false);
+    assert.equal(result['code'], 'INVALID_INPUT');
+    assert.match(String(result['message']), /needs a path/);
   });
 });

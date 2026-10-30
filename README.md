@@ -77,10 +77,10 @@ cmd /c mklink /J "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-newp
 /project pause <原因>          # 停下一切：不起新线程、不巡检、不交付，活跃线程被中断
 /project resume               # 撤销暂停，被中断的线程仍可继续
 /project thread <id> approve push|pr|merge   # 放行被 requireApprovalFor 门住的动作
-/project knowledge            # 知识层状态：文档数、字符数、绑定路径
+/project knowledge            # 知识层状态：文档数、字符数、绑定路径（只读，不重建索引）
 /project knowledge add <path> [path...]   # 绑定文件或目录
 /project knowledge rm <path>  # 解绑
-/project knowledge rebuild    # 重新扫描（改了被绑定的文件之后）
+/project knowledge rebuild    # 强制全量重建（搜索本来就会按需重建，这条只用于手工兜底）
 /project usage                # token 花费：按线程、按模型（拿不到就报不可用，不报 0）
 /project library              # 线程产出的文件清单
 /project library read <path>  # 读其中一个（按需，从产出它的 worktree）
@@ -102,17 +102,16 @@ cmd /c mklink /J "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-newp
 
 因此本实现采用 **paths-first**。**已实现**：
 
-- **charter 渲染索引**：每份已索引文档一行「路径 — 字符数」，加一句「文件为准、索引可能滞后」。**正文永不进 prompt**。字符数是让模型能*选*的那个信息——读 2 KB 的决策记录和读 400 KB 的转录是两个不同的决定。
+- **charter 渲染索引**：每份已索引文档一行「路径 — 字符数」，加一句「文件为准」。**正文永不进 prompt**。字符数是让模型能*选*的那个信息——读 2 KB 的决策记录和读 400 KB 的转录是两个不同的决定。
 - **没有上下文预算**。正文不进前缀，所以什么都不随模型窗口变。唯一有明文的常驻文本预算是 project instructions 的 **16 000 字符**，在 charter 装配处**报警而不截断**。
-- **没有陈旧问题**。线程读盘上当前内容，所以改了文件不重建索引也不会得到旧答案。索引本身可能滞后，但它只影响搜索排序：命中给出 `path:行号`，线程照样去读当前文件。
 - **没有模式**。没有 `context`/`rag` 二分，就没有阈值抖动，也没有会被遗留的 flag。
+- **能自己找路**：`project_knowledge` 的 `tree` 列目录树（默认 2 层 / 200 条，上限 4 层 / 500 条，跳过 `node_modules` 之类与二进制文件），`read` 按行窗读任意一个文件（默认 200 行，上限 2 000）。两处截断都会在结果里**指名是哪个上限**——没说被截断的半棵树会被当成全貌。两者都只读项目根，`../` 之类越界直接报 `INVALID_INPUT`。
+- **索引自己保持新鲜**：每次 `project_knowledge_search` 先比对绑定路径的指纹（`路径:大小:mtime`），变了就重建再检索，所以改完文件不需要手工 rebuild。只读入口（`knowledgeState` / `/project knowledge` / 面板 overview）永不写盘；两个并发搜索共用一次重建。
 - **收集上限与官方同形，是条目数而不是字符数**：最多 100 份文档（官方 folders 是「first 100 files」），单文件 2 MB（比官方的 30 MB 严，因为我们要把正文切块存进一个 JSON 索引），索引总量 2 000 万字符。触到任一上限就停下并记 warning，说明是**哪一个**上限。
-- **BM25 检索是便利工具**，不是一种「模式」。
+- **BM25 检索是便利工具**，不是一种「模式」，也不是唯一入口：检索没命中时用 `tree` / `read` 走文件系统。
 
 **尚未实现**（见 `docs/GAPS.md`）：
 
-- `project_knowledge` 的 `tree` / `read` 导航动作（`GAP-22` 第 3 条）。
-- 索引在查询时按需重建（`GAP-22` 第 4 条）；目前需要显式 `/project knowledge rebuild`。
 - `inlineKnowledgeMaxChars`（`GAP-22` 第 7 条）：注入路径整个删掉了，效果等于默认关闭，但没有这个旋钮。
 
 > 原本的实现（阈值常量 + 全文/检索二分 + 陈旧检测）建立在错误的产品前提上，已在 `docs/GAPS.md` 的 `GAP-22` 中撤销。两轮复核的证据见 `docs/REVIEW-RESPONSE.md` 与 `docs/REVIEW-RESPONSE-2.md`。

@@ -9,7 +9,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -343,5 +343,177 @@ describe('knowledge paths are anchored to the project root', () => {
     assert.ok(hit !== undefined);
     const resolved = await stat(join(result.rootDir, hit.path)).catch(() => undefined);
     assert.ok(resolved?.isFile() === true, 'a cited path must resolve under the returned root');
+  });
+});
+
+/**
+ * GAP-22 第 4 条 — the index keeps itself current.
+ *
+ * The manual rebuild existed because nothing compared the index with the files. A stamp does
+ * that in one stat pass, and the interesting cases are the two the timer-based designs get
+ * wrong: an edit must be visible on the very next search, and asking what is indexed must
+ * stay free of disk writes, because a panel render has no business rewriting a derived file.
+ */
+describe('the index rebuilds itself at query time', () => {
+  const indexOf = (root: string): string => join(root, '.dsh-project', 'KNOWLEDGE_INDEX.json');
+
+  it('returns edited content with no manual rebuild', async () => {
+    const root = await freshRoot();
+    const { engine } = harness(root);
+    await engine.init({ name: 'live-demo' });
+    await writeFile(join(root, 'deploy.md'), 'the release window is Friday afternoon', 'utf8');
+    await engine.setKnowledgePaths(['deploy.md']);
+    assert.ok((await engine.searchProjectKnowledge('friday')).hits.length > 0);
+
+    // The size changes too, so the size+mtime stamp cannot be fooled by a rewrite that lands
+    // inside the same millisecond as the build.
+    await writeFile(join(root, 'deploy.md'), 'the release window is Tuesday morning now', 'utf8');
+
+    const after = await engine.searchProjectKnowledge('tuesday');
+    assert.ok(after.hits.length > 0);
+    assert.doesNotMatch(after.hits.map((hit) => hit.text).join('\n'), /Friday/);
+  });
+
+  it('stores the stamp in the index and reports staleness-free content', async () => {
+    const root = await freshRoot();
+    const { engine } = harness(root);
+    await engine.init({ name: 'stamp-demo' });
+    await writeFile(join(root, 'note.md'), 'alpha', 'utf8');
+    await engine.setKnowledgePaths(['note.md']);
+
+    const stored = JSON.parse(await readFile(indexOf(root), 'utf8')) as Record<string, unknown>;
+    assert.equal(stored.schema, 1);
+    assert.equal(typeof stored.stamp, 'string');
+    assert.match(String(stored.stamp), /note\.md/);
+  });
+
+  it('rebuilds a legacy index that predates the stamp, once', async () => {
+    const root = await freshRoot();
+    const { engine } = harness(root);
+    await engine.init({ name: 'legacy-demo' });
+    await writeFile(join(root, 'note.md'), 'alpha deployment', 'utf8');
+    await engine.setKnowledgePaths(['note.md']);
+
+    // An index written before the stamp existed: "staleness unknown", which must be read as
+    // stale rather than as fresh.
+    const legacy = JSON.parse(await readFile(indexOf(root), 'utf8')) as Record<string, unknown>;
+    delete legacy.stamp;
+    await writeFile(indexOf(root), JSON.stringify(legacy), 'utf8');
+
+    const reloaded = harness(root).engine;
+    const result = await reloaded.searchProjectKnowledge('alpha');
+    assert.ok(result.hits.length > 0);
+    const stored = JSON.parse(await readFile(indexOf(root), 'utf8')) as Record<string, unknown>;
+    assert.equal(typeof stored.stamp, 'string');
+  });
+
+  it('never writes from read-only entry points, even when the files changed', async () => {
+    const root = await freshRoot();
+    const { engine } = harness(root);
+    await engine.init({ name: 'readonly-demo' });
+    await writeFile(join(root, 'note.md'), 'version one alpha', 'utf8');
+    await engine.setKnowledgePaths(['note.md']);
+    const before = await stat(indexOf(root));
+
+    // Stale on purpose: a search would rebuild here, so any write from the calls below shows up.
+    await writeFile(join(root, 'note.md'), 'version two beta with more words', 'utf8');
+    await engine.knowledgeState();
+    await engine.overviewJson();
+    await engine.loadKnowledge();
+
+    const after = await stat(indexOf(root));
+    assert.equal(after.mtimeMs, before.mtimeMs);
+    assert.equal(after.size, before.size);
+  });
+
+  it('rebuilds once when two searches race on the same staleness', async () => {
+    const root = await freshRoot();
+    const { engine } = harness(root);
+    await engine.init({ name: 'race-demo' });
+    await writeFile(join(root, 'note.md'), 'alpha', 'utf8');
+    await engine.setKnowledgePaths(['note.md']);
+
+    let builds = 0;
+    const original = engine.buildKnowledge.bind(engine);
+    engine.buildKnowledge = async (options = {}) => {
+      builds += 1;
+      return original(options);
+    };
+
+    await writeFile(join(root, 'note.md'), 'alpha bravo', 'utf8');
+    const [first, second] = await Promise.all([
+      engine.searchProjectKnowledge('alpha'),
+      engine.searchProjectKnowledge('bravo'),
+    ]);
+    assert.equal(builds, 1, 'two searches noticing the same staleness must share one rebuild');
+    assert.ok(first.hits.length > 0);
+    assert.ok(second.hits.length > 0);
+  });
+
+  it('does not rebuild when nothing changed', async () => {
+    const root = await freshRoot();
+    const { engine } = harness(root);
+    await engine.init({ name: 'steady-demo' });
+    await writeFile(join(root, 'note.md'), 'alpha', 'utf8');
+    await engine.setKnowledgePaths(['note.md']);
+
+    let builds = 0;
+    const original = engine.buildKnowledge.bind(engine);
+    engine.buildKnowledge = async (options = {}) => {
+      builds += 1;
+      return original(options);
+    };
+
+    await engine.searchProjectKnowledge('alpha');
+    await engine.searchProjectKnowledge('alpha');
+    assert.equal(builds, 0);
+  });
+});
+
+/**
+ * GAP-22 第 3 条 — `tree` and `read`.
+ *
+ * Threads see bound knowledge through tool calls, and a search miss used to be the end of the
+ * road. These two are the way back in, so what matters at the engine layer is that they read
+ * the project root (where the files are) rather than a checkout (where uncommitted ones are
+ * not) and that they refuse to climb out of it.
+ */
+describe('browsing knowledge from the engine', () => {
+  it('trees and reads the project root, not the caller checkout', async () => {
+    const root = await freshRoot();
+    const { engine } = harness(root);
+    await engine.init({ name: 'browse-demo' });
+    await mkdir(join(root, 'kb'), { recursive: true });
+    await writeFile(join(root, 'kb', 'deploy.md'), 'one\ntwo\nthree\n', 'utf8');
+
+    const tree = await engine.knowledgeTree({ path: 'kb' });
+    assert.deepEqual(
+      tree.entries.map((entry) => entry.path),
+      ['kb/deploy.md'],
+    );
+
+    const slice = await engine.knowledgeRead({ path: 'kb/deploy.md', from: 2, lines: 1 });
+    assert.equal(slice.from, 2);
+    assert.equal(slice.to, 2);
+    assert.equal(slice.totalLines, 3);
+    assert.equal(slice.truncated, true);
+    assert.equal(slice.text, 'two');
+  });
+
+  it('rejects a path outside the project root through both entry points', async () => {
+    const root = await freshRoot();
+    const { engine } = harness(root);
+    await engine.init({ name: 'browse-demo' });
+
+    for (const run of [
+      () => engine.knowledgeTree({ path: '../..' }),
+      () => engine.knowledgeRead({ path: '../secret.md' }),
+    ]) {
+      await assert.rejects(run, (error: unknown) => {
+        assert.equal((error as { code?: string }).code, 'INVALID_INPUT');
+        assert.match((error as { message: string }).message, /outside the project root/);
+        return true;
+      });
+    }
   });
 });

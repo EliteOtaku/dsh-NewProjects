@@ -98,6 +98,16 @@ export interface KnowledgeIndex {
   sources: string[];
   docs: IndexedDocument[];
   totalChars: number;
+  /**
+   * Fingerprint of the bound paths this index was built from, i.e. the file tree the index
+   * describes.
+   *
+   * `searchProjectKnowledge` compares it against a live fingerprint and rebuilds on a
+   * mismatch, which is what replaced the manual `rebuild` step. It is optional on purpose:
+   * indexes written before this field existed carry no `stamp`, which reads as "staleness
+   * unknown" and costs exactly one rebuild rather than a schema bump.
+   */
+  stamp?: string;
 }
 
 /** What the panel and the prompt need to describe the current knowledge state. */
@@ -197,6 +207,7 @@ export function buildIndex(
   documents: ReadonlyArray<{ path: string; text: string }>,
   sources: readonly string[],
   builtAt: number,
+  stamp?: string,
 ): KnowledgeIndex {
   const docs = documents.map((doc) => indexDocument(doc.path, doc.text));
   return {
@@ -205,6 +216,7 @@ export function buildIndex(
     sources: [...sources],
     docs,
     totalChars: docs.reduce((sum, doc) => sum + doc.chars, 0),
+    ...(stamp === undefined ? {} : { stamp }),
   };
 }
 
@@ -236,6 +248,9 @@ export function parseIndex(text: string): KnowledgeIndex | undefined {
       sources: Array.isArray(parsed.sources) ? parsed.sources.filter((s): s is string => typeof s === 'string') : [],
       docs,
       totalChars: docs.reduce((sum, doc) => sum + (typeof doc.chars === 'number' ? doc.chars : 0), 0),
+      // Absent on indexes written before the field existed; `undefined` is the honest
+      // reading ("staleness unknown"), so it is copied through as-is rather than defaulted.
+      ...(typeof parsed.stamp === 'string' ? { stamp: parsed.stamp } : {}),
     };
   } catch {
     return undefined;
@@ -495,7 +510,7 @@ export function renderKnowledgeIndexSection(
   }
   lines.push('');
   lines.push(
-    'When you do not know which file answers your question, call `project_knowledge_search`: it ranks passages across all of them and cites `path:line`. Then open the file it points at. The file on disk is authoritative; the search index was built earlier and may lag it. Run `/project knowledge rebuild` after adding or removing files.',
+    'When you do not know which file answers your question, call `project_knowledge_search`: it ranks passages across all of them and cites `path:line`. Then open the file it points at — or, when you would rather browse, call `project_knowledge` with `action: "tree"` and then `action: "read"` with `from` / `lines`. The file on disk is authoritative; searching rebuilds the index automatically once the bound files changed, so there is no manual rebuild step.',
   );
   return lines.join('\n');
 }

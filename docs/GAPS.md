@@ -101,14 +101,32 @@
 
 ---
 
-## P1 — 会静默出错（2 项；`GAP-22` / `GAP-22a` 已于 2026-10-29 关闭）
+## P1 — 会静默出错（2 项；`GAP-22` / `GAP-22a` 已关闭）
 
-### GAP-22 知识层应改为 paths-first（撤销 in-context / RAG 二分） — ✅ 已做（2026-10-27 `9c7ef10`，2026-10-29 `GAP-22a` 收尾）
+### GAP-22 知识层应改为 paths-first（撤销 in-context / RAG 二分） — ✅ 已做（2026-10-27 `9c7ef10`，2026-10-29 `GAP-22a` 收尾，2026-10-30 补齐第 3、4 条）
 
 > **本条取代 `GAP-21`（阈值写死）、`GAP-02`（陈旧检测）、`GAP-16`（自动重建时机）三条。** 它是一个减法项：做完之后那三个问题不再存在，而不是被修好。
 
-**已完成**：第 1、5、6、7 条（减法那一半），以及第 2 条（路径锚定项目根，见 `GAP-22a`）。`grep -rn "DEFAULT_CONTEXT_BUDGET_CHARS\|knowledgeMode\|RAG_CAPACITY" src/` 为空。
-**仍未完成**：第 3 条（`tree` / `read`）与第 4 条（查询时按需重建）—— 这是能力增强，已降为 P3。
+**已完成**：全部 7 条。第 1、5、6、7 条（减法那一半）与第 2 条（路径锚定项目根，见 `GAP-22a`）在 2026-10-27 / 10-29 落地；第 3 条（`tree` / `read` 导航）与第 4 条（查询时按需重建）在 2026-10-30 补齐。`grep -rn "DEFAULT_CONTEXT_BUDGET_CHARS\|knowledgeMode\|RAG_CAPACITY" src/` 为空。
+
+**实际做法（2026-10-30，第 3 条：`tree` / `read`）**：
+
+1. `src/core/knowledgeSource.ts:363` `listKnowledgeTree(rootDir, { path, depth, limit })`：广度遍历，深度默认 2 / 上限 4，条数默认 200 / 上限 500（常量在 `:276-283`）。`entries` 按 path 排序，所以两次调用的结果逐字节相同；文件行带 `bytes`（`stat` 的字节数，不是字符数——描述一个文件不该把它读进来，那正是 paths-first 要避免的成本），目录不带。
+2. **两处截断都指名是哪个上限**：`note` 里写 `stopped at the N-entry limit; raise \`limit\` (max 500)…` 或 `directories at depth D were not expanded; raise \`depth\` (max 4)`，工具层再补一句 `Incomplete: … do not assume the tree is complete`（`src/host/tools.ts:558`）。没被指名的半棵树会被当成全貌，这正是要防的失败。
+3. `IGNORED_DIRECTORIES` / `BINARY_EXTENSIONS` 对新动作同样生效：`isSkippedDirectory()`（`src/core/knowledgeSource.ts:124`）从 `collectPath` 里抽出来给两处共用，`node_modules` / `dist` / `.git` 与二进制文件不会出现在树里。
+4. `src/core/knowledgeSource.ts:436` `readKnowledgeFile(rootDir, { path, from, lines })`：1-based 行窗，默认 200 行 / 上限 2000，返回 `{ path, from, to, totalLines, truncated, text }`。`truncated` 让「只读了一段」永远可见；CRLF 归一、只去掉末尾一个换行、空文件是 0 行。
+5. **越界只有一处判定**：`resolveInsideRoot`（`src/core/knowledgeSource.ts:339`）。resolve → 用 `relative` 判 `isAbsolute(rel) || rel === '..' || rel.startsWith('..' + sep)`（顺带覆盖跨盘符，那种情况 `relative` 返回绝对路径）→ 再 `stat` 判存在与类型。`tree` 与 `read` 都只经过它，不存在第二份会漂移的守卫。
+6. 读的是**项目根**，不是线程的 worktree：`engine.knowledgeTree` / `engine.knowledgeRead`（`src/core/engine.ts:1875` / `:1881`）从 `manifest.rootDir` 出发。理由与 `GAP-22a` 同一条——worktree 只含 baseCommit 时已提交的文件。
+7. 超 2 MB 的文件只在**没有**要求行窗时报错，报文里指路 `pass \`from\` and/or \`lines\``；要了行窗就照读，`truncated` 说明看到的是片段。前 4096 字节含 NUL 按二进制拒绝，与 `collectKnowledge` 同一条规则。
+
+**实际做法（2026-10-30，第 4 条：查询时按需重建）**：
+
+1. `KnowledgeIndex.stamp?: string`（`src/core/knowledge.ts:110`）：`buildIndex(..., stamp?)` 写入，`parseIndex` 只在 `typeof === 'string'` 时回填，**不升 schema**——旧索引读成「陈旧度未知」，下一次搜索重建一次即对齐。
+2. `knowledgeStamp(roots, rootDir)`（`src/core/knowledgeSource.ts:486`）：递归取 `dir:路径:mtime` / `file:路径:size:mtime` / `missing:路径`，跳过 `IGNORED_DIRECTORIES` 与二进制，最后 `parts.sort()` 再 join。**排序是必须的**：枚举顺序一变指纹就变，每次搜索都会重建。
+3. `searchProjectKnowledge`（`src/core/engine.ts:1840`）先 stat 指纹，与 `index.stamp` 不等则重建后检索；`rebuildKnowledgeOnce`（`:1805`）用 `knowledgeBuildInFlight` 单飞，两个并发搜索只重建一次。
+4. **指纹在收集之前取**（`buildKnowledge` 内）。中途有编辑时存下的是比内容更旧的指纹，下一次搜索多重建一次（浪费）；反过来会出现「指纹比收集到的内容新」，之后永远不再重建——两个失败里只有后一个是静默的。
+5. 只读入口不写盘：`knowledgeState` / `loadKnowledge` / `overview` 只读文件，写盘只发生在 `search` / `rebuild` / `add` / `remove` 这些工具与命令路径。也没有时间窗口去抖：stamp 相等就是没变，窗口只会多出「刚改完却仍拿到旧内容」这一段。
+6. `buildKnowledge` 结尾的 `renderCharter()` 保留：知识变了，下一次 prefix 本来就该变。
 
 **第二轮复核对第 1 条的修正——渲染的是「索引」而不是「清单」。** `OFFICIAL` L291 逐字：「Notes Claude keeps about the project … **stored as files**. Every cloud thread reads **the index file `MEMORY.md`** when it starts and **opens the other files when it needs them**」。官方开局给的是**索引**，不是路径清单。所以 charter 里每份文档一行「路径 — 字符数」：字符数是让模型能**选**的那个信息——「读那份 2 KB 的决策记录」与「读那份 400 KB 的转录」是两个不同的决定，纯路径清单分不出来。这一句同时回答了 `REVIEW-REQUEST` §7 的第二个问题（paths-first 有没有 prompt 层引导）：**有，但引导被编码在读取协议里**（索引 eager / 正文 lazy），不是 charter 里加一句话——所以「自己加一句」那个偏离不存在。
 
@@ -137,17 +155,17 @@
   - 路径清单必须**顺序稳定、无时间戳**，否则每次 charter 字节都变，prefix cache 全废；
   - 目录展开要么在 charter 里只写目录名（让线程自己 `ls`），要么写完整清单但设上限；写一半又不说上限会让模型以为看全了；
   - 别顺手把知识路径下的所有文件都纳入索引 —— 大仓库的 `node_modules` 类目录已有 `IGNORED_DIRECTORIES`（`src/core/knowledgeSource.ts`），但要确认它对新加的 `tree` 动作同样生效。
-- **验收标准**：
-  1. 空知识项目：charter 里没有知识段，也没有空段落；
-  2. 绑定文件后：charter 出现路径清单，**不含文件正文**；二次渲染字节相同；
-  3. 线程能在 worktree 里读到**根检出已提交**的知识文件（用 charter 给出的定位形式）；
-  4. 改一个已绑定文件后，`project_knowledge_search` 返回新内容（按需重建生效），`knowledgeState` 不写盘；
-  5. `grep -rn "DEFAULT_CONTEXT_BUDGET_CHARS\|knowledgeMode\|RAG_CAPACITY" src/` 为空；
-  6. `tree` / `read` 两个动作有单测，含路径越界（`../`）拒绝。
+- **验收标准（每项都指向具体测试）**：
+  1. 空知识项目：charter 里没有知识段，也没有空段落 —— `test/knowledge.test.ts`「drops the section entirely once every path is unbound」。
+  2. 绑定文件后：charter 出现路径清单、**不含正文**，二次渲染字节相同 —— `test/knowledge.test.ts`「lists each document in the charter and never its body」+「keeps the charter the same size as the knowledge grows」；字节相同见 `test/unit/knowledge.test.ts`「stays byte-identical across renders with the same root」。
+  3. 线程能在 worktree 里读到**根检出已提交**的知识文件 —— `test/knowledge.test.ts`「lets a thread in a worktree reach every catalogued document」。
+  4. 改一个已绑定文件后，`project_knowledge_search` 返回新内容（按需重建生效），`knowledgeState` 不写盘 —— `test/knowledge.test.ts`「returns edited content with no manual rebuild」+「never writes from read-only entry points, even when the files changed」+「rebuilds once when two searches race on the same staleness」+「does not rebuild when nothing changed」。
+  5. `grep -rn "DEFAULT_CONTEXT_BUDGET_CHARS\|knowledgeMode\|RAG_CAPACITY" src/` 为空（上面那条命令，输出为空）。
+  6. `tree` / `read` 两个动作有单测，含路径越界（`../`）拒绝 —— `test/unit/knowledgeFiles.test.ts` 的三组 `knowledge tree` / `knowledge read` / `knowledge stamp`（含「refuses to escape the project root」「names the depth cap instead of pretending the tree ended」），工具层拒绝见 `test/tools.test.ts`「reports an escape as an error result instead of throwing」。
 
 ### GAP-22a 知识路径没有锚定项目根，线程在 worktree 里解析不到 — ✅ 已做（P1，从 `GAP-22` 第 2 条拆出）
 
-- **为什么单独拆出来**：`GAP-22` 的其余未完成项（`tree` / `read`、按需重建）是**能力增强**，这一条是**正确性**。混在一条里会让它跟着那两项一起被降级。
+- **为什么单独拆出来**：拆出时 `GAP-22` 的其余未完成项（`tree` / `read`、按需重建）是**能力增强**，这一条是**正确性**。混在一条里会让它跟着那两项一起被降级。（那两项已于 2026-10-30 补齐，见 `GAP-22`。）
 - **依据**：`OFFICIAL` L293 把两套路径并列写在同一行——「The **repositories every cloud thread clones**, the **folders and files it can read under `/mnt/project-files`**」。仓库是 clone，项目文件是**挂载**，而且挂载只有**一份共享的**，不是每线程一份副本。
   → 第二轮复核据此裁定：判断 I 的「让线程去读项目根的绝对路径」**更贴近官方**，**不要**往每个 worktree 复制或软链。复制会引入每线程一份副本（磁盘 × 线程数）与同步问题，而官方模型里这两个问题不存在。
 - **原来的缺陷（`9c7ef10` 没有改善这一点）**：charter 的索引渲染的是 `IndexedDocument.path`，即相对项目 root 的显示路径；而线程的 cwd 是它自己的 worktree（`.dsh-project/worktrees/<threadId>`），worktree 只含 baseCommit 里**已提交**的文件。于是：
@@ -884,7 +902,7 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
 
 > **`GAP-23` / `GAP-24` 为什么提前做了（2026-10-29）**：原计划把它们放在第四批与「按需」，理由是触发条件要等到真的跑起来。实际复核后发现 `GAP-24` 的触发条件比预想近得多 —— 只要一个 PR 合并后分支被删，下一轮 sweep 就会安静地失败，而这是**每个正常收尾的 PR 都会走的路**；`GAP-23` 与它共用 `observeOne` 的同一段代码，分开做要改两遍。两项一起做，`observeOne` 的判断只落一次。
 
-> **第一批已完成（2026-10-29）**：`GAP-22a` 曾是第一批唯一的正确性残留——线程**读不到** charter 指给它的知识文件，也就是「让输出可信」还差最后一步。该条已在方案 A 下关闭（charter 渲染 `Project root` + 相对路径 + worktree 说明，检索结果带 root），**不要再按旧状态把它当未完成项**。`GAP-22` 的其余未完成项（`tree` / `read`、查询时按需重建）是能力增强，留在 P3。
+> **第一批已完成（2026-10-29）**：`GAP-22a` 曾是第一批唯一的正确性残留——线程**读不到** charter 指给它的知识文件，也就是「让输出可信」还差最后一步。该条已在方案 A 下关闭（charter 渲染 `Project root` + 相对路径 + worktree 说明，检索结果带 root），**不要再按旧状态把它当未完成项**。`GAP-22` 的其余两项（`tree` / `read`、查询时按需重建）已于 2026-10-30 补齐，`GAP-22` 至此 7 条全部完成。
 
 **验证方式（每批都要走）**：
 

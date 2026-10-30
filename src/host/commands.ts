@@ -59,10 +59,10 @@ export const PROJECT_USAGE = [
   '- `/project memory rm <key>` — delete one decision',
   '- `/project threads [--all]` — every thread with its status (resolved are hidden by default)',
   '- `/project thread <id> [steer|respond|retry|interrupt|close|reopen|deliver|watch|unwatch|merge|conflicts|review] [text]` — act on one thread',
-  '- `/project knowledge` — what is indexed and whether it is in context or retrieval mode',
+  '- `/project knowledge` — what is indexed (read-only: listing never reindexes)',
   '- `/project knowledge add <path...>` — bind files or folders and reindex',
   '- `/project knowledge rm <path...>` — unbind paths and reindex',
-  '- `/project knowledge rebuild` — re-read every bound file and rebuild the index',
+  '- `/project knowledge rebuild` — force a full reindex (a search reindexes by itself once the bound files changed)',
   '- `/project usage` — token spend per thread and per model',
   '- `/project library` — files the threads produced',
   '- `/project library read <path>` — one produced file, read out of its worktree',
@@ -208,10 +208,10 @@ async function runKnowledge(engine: ProjectEngine, rest: string): Promise<Result
 /** Usage for the knowledge verb family. */
 const KNOWLEDGE_USAGE = [
   '`/project knowledge` verbs:',
-  '- `/project knowledge` — what is indexed and which mode it is in',
+  '- `/project knowledge` — what is indexed (read-only)',
   '- `/project knowledge add <path...>` — bind and index',
   '- `/project knowledge rm <path...>` — unbind and reindex',
-  '- `/project knowledge rebuild` — re-read every bound file',
+  '- `/project knowledge rebuild` — force a full reindex (searches reindex by themselves)',
 ].join('\n');
 
 /** Build the `/project` command. */
