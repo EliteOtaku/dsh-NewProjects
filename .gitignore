@@ -1,5 +1,8 @@
 # DSH 运行时产物（会话面板等本地数据，不入库）
 .dsh-ops/
+# 本仓库自身的项目记录：插件在这里被 dogfood，manifest 与生成的指令是这台机器的本地状态，
+# 不是源码。真正使用插件的仓库要不要提交 `.dsh-project/PROJECT_INSTRUCTIONS.md` 由它自己决定。
+.dsh-project/
 
 # 依赖
 node_modules/

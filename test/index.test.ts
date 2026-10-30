@@ -292,15 +292,20 @@ describe('apply', () => {
     apply(ctx.asContext());
     const overview = tools.find((tool) => tool.name === 'project_overview');
     assert.ok(overview !== undefined);
-    const result = (await overview.execute({ rootDir: '.' }, {
+    const relative = 'dsh-relative-root-probe';
+    const result = (await overview.execute({ rootDir: relative }, {
       callId: 'c1',
       agent: { id: 'session-parent' },
       signal: AbortSignal.timeout(5000),
       deferContext: () => undefined,
       concludeTurn: () => undefined,
     })) as Record<string, unknown>;
-    // No project record yet, but the call resolved a path and answered rather than throwing.
+    // A relative argument resolves against the process cwd, and the answer still names the
+    // absolute path it landed on. The directory is deliberately one no checkout can hold a
+    // project record at: `'.'` only worked while this repository was not itself a project,
+    // which stops being true the moment it is dogfooded.
     assert.equal(result['code'], 'PROJECT_NOT_INITIALIZED');
+    assert.ok(String(result['message']).includes(join(process.cwd(), relative)), String(result['message']));
     assert.match(String(result['message']), /run `\/project init` first/);
   });
 
