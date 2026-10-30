@@ -74,7 +74,7 @@
 | **P2** | 官方有、我们无，且多个其他能力依赖它 | ~~`GAP-03`~~ ✅ ~~`GAP-04`~~ ✅ ~~`GAP-05`~~ ✅（2026-10-29 关闭） |
 | **P3** | 官方有、我们无，独立功能 | 全部关闭（`GAP-06` / `GAP-09` / `GAP-10` / `GAP-11` / `GAP-12` / `GAP-13` / `GAP-29` 已于 2026-10-29 完成） |
 | **P4** | 项目管理类，缺了不能「管起来」 | ~~`GAP-15`~~ ✅ ~~`GAP-17`~~ ✅ ~~`GAP-28`~~ ✅（2026-10-30 关闭）—— **P4 已清空** |
-| **P5** | 磁盘、性能与健壮性，不出错 | ~~`GAP-20`~~ ✅ ~~`GAP-27`~~ ✅（2026-10-29 关闭）；`GAP-30` 🟡（2026-10-30 登记并裁定：禁令已加，`gc.auto` 不做，只剩 `ensureGitIdentity` 去留） |
+| **P5** | 磁盘、性能与健壮性，不出错 | ~~`GAP-20`~~ ✅ ~~`GAP-27`~~ ✅（2026-10-29 关闭）；~~`GAP-30`~~ ✅（2026-10-30 登记并关闭：禁令已加，`gc.auto` 不做，宿主也不再写 config）—— **P5 已清空** |
 | **ARCH** | 架构性差异，记录不排期 | `GAP-A1` ~ `GAP-A4` |
 | **BOUND** | 有意为之的边界，非缺陷 | `BOUND-1` ~ `BOUND-6`（`BOUND-3` 已解决；`BOUND-6` 2026-10-30 裁定为放宽） |
 
@@ -767,7 +767,7 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
 
 `test/unit/lockRetry.test.ts`（原写 `exec.test.ts`，该文件不存在）：模拟一次 `cannot lock ref` 后第二次成功且线程不失败；连续三次锁冲突仍如实抛错且文案指出仓库占用；非锁错误零重试。
 
-### GAP-30 共享 `.git` 的两条护栏只写在文档里 — 🟡 已裁定，剩第 3 条（2026-10-30）
+### GAP-30 共享 `.git` 的两条护栏只写在文档里 — ✅ 已关闭（2026-10-30）
 
 - **依据**：`docs/REVIEW-RESPONSE.md` §2 Q1 的风险表（⚠️ 复核者自注「文档无，工程判断」，不是 `OFFICIAL`）。`REVIEW-REQUEST.md` §3 Q4 与本文件 `GAP-27` 第 4 条把它们写成了「已知的护栏」，读起来像已落地。
 - **现状**（逐条对代码）：
@@ -780,13 +780,13 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
   | 线程永不写 `.git/config` | ❌ 线程 charter（`renderThreadTask` 的 `How to finish`）与 `buildHealPrompt` 的 Ground rules 只禁 force-push / 改 CI / 自己合并，没有这一条 |
   | 凭证不落 config | — 不适用：走用户已有的 `gh` 鉴权，我方不配 helper |
 
-  另：`ensureGitIdentity`（`src/core/vcs.ts`）会往仓库 config 写 `user.name`，生产代码**零调用**，只有 `test/integration/git.test.ts` 用。
+  另：`ensureGitIdentity`（`src/core/vcs.ts`）会往仓库 config 写 `user.name`，生产代码**零调用**，只有 `test/integration/git.test.ts` 用（已处理，见第 3 条）。
 - **严重度**（⚠️ 工程判断，未实测）：比 `REVIEW-REQUEST` 写的「会真丢数据」低。git 自带两层缓冲：`gc --auto` 取 `gc.pid` 锁，不会两个同时跑；prune 只删比 `gc.pruneExpire`（默认 2 周）更老的不可达对象，线程刚写、还没被 ref 指向的对象不在其内。所以排 P5 而不是 P1。
-- **裁定（2026-10-30，维护者）**：第 1 条做（#6），第 2 条不做，第 3 条未定。原候选：
+- **裁定（2026-10-30，维护者）**：第 1 条做，第 2 条不做，第 3 条接上（均在 #6）。原候选：
   1. charter 与 heal prompt 加禁令「不要写 `.git/config`，需要时用 `git -c k=v`」—— 零成本，和 `GAP-25` 同形。✅ **已做**：`SHARED_GIT_CONFIG_RULE`（`src/core/healing.ts`），charter 与 heal prompt 共用，`prompt.test` / `healing.test` 各一项断言。
   2. `gc.auto=0`：要写就得在 `init` 时改用户仓库的共享 config —— 这本身就是宿主改 config，必须在 `init` 输出里明说、`deinit` 时还原。另一条路是不做、依赖上面两层缓冲。❌ **不做**：为防一个已被 git 自身两层缓冲压到很低的风险，去改用户仓库的共享 config，正好违反第 1 条要线程遵守的同一条规矩。若将来实测到 `gc --auto` 吃掉线程对象，再按「`init` 明说 + `deinit` 还原」做。
-  3. `ensureGitIdentity`：删掉，或接上并说明它写的是哪份 config。
-- **验收**：① ✅ 禁令在 charter 与 heal prompt 里且有测试（#6）；② ✅ `gc.auto` 有明确结论（不做，理由见上）；③ `REVIEW-REQUEST` Q4 与 `GAP-27` 第 4 条的护栏清单和代码一致 —— ✅ 已在两处标注；④ ⬜ `ensureGitIdentity` 删掉或接上。
+  3. `ensureGitIdentity`：删掉，或接上并说明它写的是哪份 config。✅ **接上，但不写 config**：原样接上会往共享 `.git/config` 写 `user.name`，违反第 1 条。改为 `commitAll` 先照常提交，只有 git 因缺身份拒绝（`isMissingGitIdentity`）时才带 `GIT_AUTHOR_*` / `GIT_COMMITTER_*` 以 `FALLBACK_GIT_IDENTITY` 重试一次；git 能找到或推出的身份一律保留。`ensureGitIdentity` 本身删除。测试：`test/integration/git.test.ts` 两项（真 git，含「无身份时提交成功且 `.git/config` 无写入」）、`test/unit/gitIdentity.test.ts` 四项。
+- **验收**：① ✅ 禁令在 charter 与 heal prompt 里且有测试（#6）；② ✅ `gc.auto` 有明确结论（不做，理由见上）；③ `REVIEW-REQUEST` Q4 与 `GAP-27` 第 4 条的护栏清单和代码一致 —— ✅ 已在两处标注；④ ✅ 缺身份时一次性兜底，宿主不写 config（#6）。
 
 ---
 
