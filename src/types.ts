@@ -273,6 +273,22 @@ export interface ProjectManifest {
    */
   maxConcurrentThreads?: number;
   /**
+   * Model id every thread of this project starts on, or absent to inherit the session route.
+   *
+   * Threads are where the tokens go — the coordinator only routes — so the official
+   * guidance is that a thread may run on a cheaper model than the one that planned it.
+   * Handed to the Host as `agentOptions.model` at launch; the coordinator's own route is
+   * left alone because a plugin cannot change the session it runs in.
+   */
+  threadModel?: string;
+  /**
+   * Reasoning effort every thread starts with, or absent to inherit the session route.
+   *
+   * Opaque on purpose: effort ids belong to each model's route table, so the Host decides
+   * at launch whether the pair is valid. A hard-coded list here would drift.
+   */
+  threadEffort?: string;
+  /**
    * When the project was paused, or absent while it runs.
    *
    * Pausing stops everything at once: no new threads, no self-healing sweeps, no delivery,

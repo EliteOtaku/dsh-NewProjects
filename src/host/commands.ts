@@ -75,10 +75,15 @@ export const PROJECT_USAGE = [
   '- `/project archive` — stop everything and take the project out of the way',
   '- `/project unarchive` — bring it back; interrupted threads still need a retry or a steer',
   '- `/project concurrent [n|off]` — how many threads to run at once (a preference, not a cap); `off` clears it',
+  '- `/project model [<model> [<effort>]]` — the route new threads start on; `off` clears it, `inherit` leaves one half alone',
 ].join('\n');
 
 /** The two forms of `/project concurrent`, shown wherever it is relevant. */
 const CONCURRENT_USAGE = '`/project concurrent <n>` sets it; `/project concurrent off` clears it.';
+
+/** The forms of `/project model`, shown wherever it is relevant. */
+const MODEL_USAGE =
+  '`/project model <model> [effort]` pins new threads; `/project model inherit [effort]` or `/project model off` restores inheritance. Model ids and effort levels belong to the provider, so the Host rejects a pair it cannot run.';
 
 /** Split a raw argument line into verb and remainder. */
 function splitVerb(raw: string): { verb: string; rest: string } {
@@ -476,6 +481,43 @@ export function buildProjectCommand(source: CommandContextSource): CommandDef {
                 current === undefined
                   ? `no concurrency preference; a round starts as many threads as its tasks call for.\n${CONCURRENT_USAGE}`
                   : `concurrency preference: ${current} at a time (a preference, not a cap).\n${CONCURRENT_USAGE}`,
+            };
+          }
+          case 'model': {
+            const engine = await source.engineFor(invocation.agent, undefined);
+            await requireReady(engine);
+            const wanted = rest.trim();
+            if (wanted.length === 0) {
+              const route = await engine.threadRoute();
+              return {
+                kind: 'success',
+                text: `thread route: model ${route.model ?? 'inherit'}, effort ${route.effort ?? 'inherit'}.\nThreads start on this route; the coordinator keeps the session's own route, because a plugin cannot change it.\n${MODEL_USAGE}`,
+              };
+            }
+            if (/^(off|clear|none|inherit)$/i.test(wanted)) {
+              const cleared = await engine.setThreadAgentOptions({ model: null, effort: null });
+              return {
+                kind: 'success',
+                text: cleared.changed
+                  ? 'thread route cleared; new threads inherit the session route again.'
+                  : 'the thread route was already inheriting the session route.',
+              };
+            }
+            // `<model> [effort]`: `inherit` in the model slot clears the model only, so
+            // pinning just the effort stays expressible.
+            const [modelArg, effortArg] = wanted.split(/\s+/);
+            const model = modelArg === undefined || /^inherit$/i.test(modelArg) ? null : modelArg;
+            const effort = effortArg === undefined ? undefined : /^inherit$/i.test(effortArg) ? null : effortArg;
+            const result = await engine.setThreadAgentOptions({ model, effort });
+            if (!result.changed) {
+              return {
+                kind: 'success',
+                text: `thread route already model ${result.model ?? 'inherit'}, effort ${result.effort ?? 'inherit'}.`,
+              };
+            }
+            return {
+              kind: 'success',
+              text: `thread route set to model ${result.model ?? 'inherit'}, effort ${result.effort ?? 'inherit'}.\nNew threads start on it; threads already running keep the route they started with.\n${MODEL_USAGE}`,
             };
           }
           case 'usage': {

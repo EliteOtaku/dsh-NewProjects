@@ -74,6 +74,8 @@ cmd /c mklink /J "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-newp
 /project drop                 # 丢弃建议列表
 /project concurrent 3         # 并发偏好：一轮最多起 3 个线程（偏好不是硬闸，仍会至少起 1 个）
 /project concurrent off       # 清除偏好
+/project model <model> [effort]   # 新线程的默认路由（成本控制：线程可用更便宜的模型）；inherit 只改一半，off 清空
+/project model               # 查看新线程的默认路由（协调者始终用会话自己的路由）
 /project pause <原因>          # 停下一切：不起新线程、不巡检、不交付，活跃线程被中断
 /project resume               # 撤销暂停，被中断的线程仍可继续
 /project thread <id> approve push [pr ...]   # 放行被 requireApprovalFor 门住的动作（可一次列多个）
@@ -183,7 +185,7 @@ npm test           # 只跑测试
 
 ## 已知未实现部分
 
-相对官方 Claude Code Projects，六批实现计划已全部完成：全局配额、知识挂载、模型优先拆解、六分组概览（`project_overview`）、Library 与 PR 聚合、卡片动作、审批门、Pause/Archive、线程超时、worktree 回收、Usage 统计均已落地。剩下的只有**有意为之的边界**（重启后后台自愈停摆、记忆仍整段进 charter、云端 sandbox 与 GitHub App 的载体差异、Team 协作持平）；唯一的按需项 `GAP-28` 并发偏好也已于 2026-10-30 完成。见 `docs/GAPS.md` 的 `ARCH` / `BOUND` 小节。
+相对官方 Claude Code Projects，六批实现计划已全部完成：全局配额、知识挂载、模型优先拆解、六分组概览（`project_overview`）、Library 与 PR 聚合、卡片动作、审批门、Pause/Archive、线程超时、worktree 回收、Usage 统计、按项目的线程模型与 effort 均已落地。剩下的只有**有意为之的边界**（重启后后台自愈停摆、记忆仍整段进 charter、协调者模型由会话决定而插件改不了、云端 sandbox 与 GitHub App 的载体差异、Team 协作持平）；按需项 `GAP-28` 并发偏好已于 2026-10-30 完成，`GAP-31` 线程默认路由已于 2026-10-31 完成。见 `docs/GAPS.md` 的 `ARCH` / `BOUND` 小节。
 
 完整清单、代码证据、依据来源与验收标准见 **[docs/GAPS.md](./docs/GAPS.md)**，按批次推进。那份文档是判断「某个能力到底有没有」的唯一依据——不要凭本文件的段落推断。
 

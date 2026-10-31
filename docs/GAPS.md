@@ -717,6 +717,24 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
   8. ✅ 纯函数边界（0/负/分数/超上限/空轮/坏 limit）—— `test/unit/concurrency.test.ts` 全部 16 项
   9. ✅ 命令层读/写/清/非法值/不可达值 —— `test/commands.test.ts` 的 `describe('/project concurrent')` 两项
 
+### GAP-31 官方给了按项目的模型与 effort，我们没有地方表达 — ✅ 已做（2026-10-31）
+
+- **依据**：项目设置页（素材截图 10）逐字：`Coordinator model Default (Opus 5.5)` / `Coordinator effort Default (Low)` / `Thread model Default (Opus 5.5)` / `Thread effort Default (Medium)`；视频里的成本建议第一条是「协调者只做路由，effort 保持 Low」，第二条是「线程默认用更小的模型，需要时逐个换大」。
+- **现状（动工前）**：`grep threadModel|coordinatorModel|effort src/` 零命中，线程一律继承会话路由。宿主其实早就留了管子：`ThreadLaunch.agentOptions`（`src/core/threads.ts:25`）→ `HostSubagentStartRequest.agentOptions`（`src/host/hostTypes.ts:71`）→ `subagents.startActivation`（`src/host/subagents.ts:119`）；`startThread` 只传 `prompt`/`cwd`/`label`，那个字段从未被赋过值 —— **管道在位，阀门没开**。
+- **判断**：这是**成本控制**，不是模型路由 —— 回答的是「这个项目起的线程默认花多少钱」。另一半（协调者）插件改不了：插件不能改宿主会话的路由，硬做只能提示用户去设置页，那不如不做，写进文档当边界。
+- **做法**：
+  1. manifest 两个字段 `threadModel?: string`、`threadEffort?: string`（`src/types.ts`）。空串在 `parseSnapshot` 里清成「继承」—— 手改记录写 `""` 不该等于「把模型设成空字符串」。
+  2. `engine.threadRoute()` 读、`setThreadAgentOptions()` 写；改一半用 `undefined`（不动）、清零用 `null`。`startThread` 组装成 `{ model?, reasoningEffort? }` 塞进 `threads.launch`，**只发用户设过的那一半**。
+  3. effort **不硬编码成枚举**：各 provider 的 effort id 不同，写死等于「插件比宿主更懂模型」。留给 Host 在启动时判定 —— 跑不了会报错，报错比静默回退诚实。
+  4. 命令 `/project model [<model> [<effort>]]`，`inherit` 占位表示只改另一半，`off` 清空；回包明说「只影响新线程，已在跑的沿用启动时的路由」。
+  5. 面板与 `overview` **不渲染这两项**：它们是「新线程的默认值」，不是「现在在用什么」。混在一起会让「默认值」和「实况」两个问题互相污染。
+
+- **验收（全部有测试）**：
+  1. ✅ 默认不下发、设置后下发、可清一半、清空回到继承 —— `test/engine.test.ts` 的 `describe('thread route')` 之「hands the configured model and effort to every new thread, and nothing when unset」
+  2. ✅ 空白值视为继承、`changed === false` —— 同 describe 之「treats a blank route as inherit rather than as a model nobody can resolve」
+  3. ✅ 命令层读、设、重复、半清、清空 —— `test/commands.test.ts` 的 `describe('/project model')` 之「reads, sets, halves, and clears the thread route」
+  4. 📄 协调者侧保持会话路由 —— 插件无此权限，命令回包与 README 明示，未实现也不假装
+
 ---
 
 ## P5 — 磁盘、性能与健壮性
@@ -895,6 +913,7 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
 **新增编号**（第一轮加入）：`GAP-22` ~ `GAP-29`。
 **新增编号**（第二轮加入）：`GAP-22a`（从 `GAP-22` 第 2 条拆出，见该条）、`BOUND-5`（记忆仍在 charter 槽位里，取舍而非缺陷）。
 **新增编号**（2026-10-30 复核收尾）：`GAP-30`（共享 `.git` 护栏只写在文档里）、`BOUND-6`（审批放行的范围）。
+**新增编号**（2026-10-31）：`GAP-31`（按项目的 thread 模型与 effort）。
 
 ## 已修正的错误判断
 

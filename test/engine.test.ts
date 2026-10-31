@@ -2259,3 +2259,41 @@ describe('standing prompt budget', () => {
   });
 });
 
+describe('thread route', () => {
+  it('hands the configured model and effort to every new thread, and nothing when unset', async () => {
+    const { engine, threads } = await harness();
+    await engine.init({ name: 'demo' });
+
+    await engine.coordinate(PARENT, '- one', { planOnly: false });
+    assert.equal(threads.launches.length, 1);
+    // Unset means inherit: sending an empty agentOptions would pin the thread to
+    // whatever the Host believes the default is, which is not the session's route.
+    assert.equal(threads.launches[0]?.agentOptions, undefined);
+
+    await engine.setThreadAgentOptions({ model: 'deepseek-v4.1-flash', effort: 'low' });
+    await engine.coordinate(PARENT, '- two', { planOnly: false });
+    assert.deepEqual(threads.launches[1]?.agentOptions, {
+      model: 'deepseek-v4.1-flash',
+      reasoningEffort: 'low',
+    });
+
+    // Clearing one half leaves the other half pinned.
+    await engine.setThreadAgentOptions({ model: null });
+    await engine.coordinate(PARENT, '- three', { planOnly: false });
+    assert.deepEqual(threads.launches[2]?.agentOptions, { reasoningEffort: 'low' });
+
+    await engine.setThreadAgentOptions({ effort: null });
+    await engine.coordinate(PARENT, '- four', { planOnly: false });
+    assert.equal(threads.launches[3]?.agentOptions, undefined);
+  });
+
+  it('treats a blank route as inherit rather than as a model nobody can resolve', async () => {
+    const { engine } = await harness();
+    await engine.init({ name: 'demo' });
+
+    const blank = await engine.setThreadAgentOptions({ model: '   ', effort: '' });
+    assert.equal(blank.changed, false);
+    assert.deepEqual(await engine.threadRoute(), {});
+  });
+});
+

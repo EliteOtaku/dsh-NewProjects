@@ -401,6 +401,41 @@ describe('/project concurrent', () => {
   });
 });
 
+describe('/project model', () => {
+  it('reads, sets, halves, and clears the thread route', async () => {
+    const { engine } = await harness();
+    await run(engine, 'init');
+
+    const empty = await run(engine, 'model');
+    assert.equal(empty.kind, 'success');
+    assert.match(empty.text, /model inherit, effort inherit/);
+    // The split matters: a plugin cannot change the session it runs in, so the
+    // coordinator keeps its own route and the message has to say so.
+    assert.match(empty.text, /coordinator keeps the session/);
+
+    const set = await run(engine, 'model deepseek-v4.1-flash low');
+    assert.equal(set.kind, 'success');
+    assert.match(set.text, /model deepseek-v4\.1-flash, effort low/);
+    assert.match(set.text, /already running keep the route they started with/);
+
+    const read = await run(engine, 'model');
+    assert.match(read.text, /model deepseek-v4\.1-flash, effort low/);
+
+    const same = await run(engine, 'model deepseek-v4.1-flash low');
+    assert.match(same.text, /already model deepseek-v4\.1-flash, effort low/);
+
+    const half = await run(engine, 'model inherit low');
+    assert.match(half.text, /model inherit, effort low/);
+
+    const off = await run(engine, 'model off');
+    assert.equal(off.kind, 'success');
+    assert.match(off.text, /cleared/);
+
+    const cleared = await run(engine, 'model off');
+    assert.match(cleared.text, /already inheriting/);
+  });
+});
+
 describe('/project goal', () => {
   it('sets, reads, and clears the goal', async () => {
     const { engine } = await harness();

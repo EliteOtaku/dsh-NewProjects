@@ -581,6 +581,60 @@ export class ProjectEngine {
     return concurrencyPreference(await this.requireManifest());
   }
 
+  /** The route threads start on, with each half absent when it inherits the session. */
+  async threadRoute(): Promise<{ model?: string; effort?: string }> {
+    const manifest = await this.requireManifest();
+    return {
+      ...(manifest.threadModel === undefined ? {} : { model: manifest.threadModel }),
+      ...(manifest.threadEffort === undefined ? {} : { effort: manifest.threadEffort }),
+    };
+  }
+
+  /**
+   * Set or clear the route threads start on.
+   *
+   * `undefined` leaves a half untouched, `null` clears it. The values are stored, not
+   * applied here: {@link startThread} hands them to the Host as `agentOptions`, and only
+   * the halves that are set, so an unset half keeps inheriting the session route instead
+   * of being pinned to a default this plugin guessed.
+   */
+  async setThreadAgentOptions(changes: { model?: string | null; effort?: string | null }): Promise<{
+    changed: boolean;
+    model?: string;
+    effort?: string;
+  }> {
+    const model = changes.model === undefined ? undefined : changes.model === null ? null : changes.model.trim() || null;
+    const effort =
+      changes.effort === undefined ? undefined : changes.effort === null ? null : changes.effort.trim() || null;
+    const result = await this.store.update((draft) => {
+      const before = `${draft.threadModel ?? ''}\u0000${draft.threadEffort ?? ''}`;
+      if (model !== undefined) {
+        if (model === null) delete draft.threadModel;
+        else draft.threadModel = model;
+      }
+      if (effort !== undefined) {
+        if (effort === null) delete draft.threadEffort;
+        else draft.threadEffort = effort;
+      }
+      const changed = before !== `${draft.threadModel ?? ''}\u0000${draft.threadEffort ?? ''}`;
+      return {
+        manifest: draft,
+        result: {
+          changed,
+          ...(draft.threadModel === undefined ? {} : { model: draft.threadModel }),
+          ...(draft.threadEffort === undefined ? {} : { effort: draft.threadEffort }),
+        },
+      };
+    });
+    if (result.changed) {
+      await this.recordRecent(
+        'user',
+        `set the thread route to model ${result.model ?? 'inherit'}, effort ${result.effort ?? 'inherit'}`,
+      );
+    }
+    return result;
+  }
+
   /** Retained coordinator messages, newest last. */
   async recentMessages(): Promise<RecentMessage[]> {
     return [...((await this.requireManifest()).recentMessages ?? [])];
@@ -1109,6 +1163,18 @@ export class ProjectEngine {
       ...(this.requireApprovalFor.length === 0 ? {} : { approvals: this.requireApprovalFor }),
     });
 
+    // Threads are where the tokens go, so a project may pin them to a cheaper route than
+    // the one that planned the work. Only the halves the user set are sent; an unset half
+    // keeps inheriting the session route rather than being pinned to a guessed default.
+    // The Host rejects a route the provider cannot take, so this never silently degrades.
+    const threadRoute =
+      manifest.threadModel === undefined && manifest.threadEffort === undefined
+        ? undefined
+        : {
+            ...(manifest.threadModel === undefined ? {} : { model: manifest.threadModel }),
+            ...(manifest.threadEffort === undefined ? {} : { reasoningEffort: manifest.threadEffort }),
+          };
+
     let handle: ThreadHandle;
     try {
       handle = await this.threads.launch(
@@ -1117,6 +1183,7 @@ export class ProjectEngine {
           prompt: promptText,
           cwd: worktreePath ?? manifest.rootDir,
           label: task.title.slice(0, 60),
+          ...(threadRoute === undefined ? {} : { agentOptions: threadRoute }),
         },
         signal,
       );

@@ -265,6 +265,10 @@ export function parseSnapshot(text: string, path: string): ManifestSnapshot {
     throw new ProjectError('INVALID_INPUT', `project record at ${path} is missing its manifest`);
   }
   if (!Array.isArray(manifest.knowledgePaths)) manifest.knowledgePaths = [];
+  // Optional route fields: a hand-edited record may carry anything, and an empty string
+  // must read as "inherit" rather than as a model id nobody can resolve.
+  if (typeof manifest.threadModel !== 'string' || manifest.threadModel.trim().length === 0) delete manifest.threadModel;
+  if (typeof manifest.threadEffort !== 'string' || manifest.threadEffort.trim().length === 0) delete manifest.threadEffort;
   if (manifest.memories === undefined || typeof manifest.memories !== 'object') manifest.memories = {};
   if (manifest.threads === undefined || typeof manifest.threads !== 'object') manifest.threads = {};
   return { manifest, version: typeof manifest.revision === 'number' ? manifest.revision : 0 };
