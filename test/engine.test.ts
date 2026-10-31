@@ -624,24 +624,7 @@ describe('manageThread', () => {
   });
 });
 
-describe('state publishing', () => {
-  it('publishes a snapshot to the session that drove the project', async () => {
-    const { engine, runner } = await harness();
-    await engine.init({ name: 'demo' });
-    repoReady(runner);
-    const published: Array<{ sessionId: string; revision: number }> = [];
-    engine.setStatePublisher((sessionId, snapshot) => {
-      published.push({ sessionId, revision: snapshot.revision });
-    });
-    await engine.coordinate(PARENT, '- one', { planOnly: false });
-    // Publishing is fire-and-forget behind the write it describes, so wait for it rather
-    // than asserting synchronously: a synchronous assertion would test the timer, not the
-    // wiring.
-    await eventually(async () => (published.length > 0 ? published : undefined));
-    assert.equal(published[0]?.sessionId, (PARENT as { id: string }).id);
-    assert.ok((published[0]?.revision ?? 0) > 0);
-  });
-
+describe('coordinator tracking', () => {
   it('records the caller as a coordinator, and only once', async () => {
     const { engine, runner } = await harness();
     await engine.init({ name: 'demo' });
@@ -652,12 +635,12 @@ describe('state publishing', () => {
     assert.deepEqual([...engine.coordinatorSessions()], [(PARENT as { id: string }).id]);
   });
 
-  it('publishes nothing when no publisher is installed', async () => {
+  it('drives a project headlessly with no panel attached', async () => {
     const { engine, runner } = await harness();
     await engine.init({ name: 'demo' });
     repoReady(runner);
-    // The point is that the write path does not depend on a panel: a project driven by a
-    // headless session must behave identically.
+    // A project driven by a headless session must behave identically: nothing in the write
+    // path may wait on a panel, because this plugin deliberately has no way to publish to one.
     const result = await engine.coordinate(PARENT, '- one', { planOnly: false });
     assert.equal(result.started.length, 1);
   });

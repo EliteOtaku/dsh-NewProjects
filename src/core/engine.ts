@@ -64,7 +64,6 @@ import {
 } from './memory.js';
 import { appendRecent, normaliseGoal } from './coordState.js';
 import { buildOverview, dueForResolve } from './overview.js';
-import { buildProjectState, type ProjectStateSnapshot } from './projectState.js';
 import { branchNameFor, normaliseTasks, planTasks, PLAN_TTL_MS } from './planner.js';
 import {
   MAX_INSTRUCTIONS_CHARS,
@@ -332,9 +331,6 @@ export class ProjectEngine {
    * one session, and the ones that matter are exactly the ones that issued a command.
    */
   private readonly coordinators: string[] = [];
-  /** Sink for state snapshots; installed by the plugin so `core/` stays Host-free. */
-  private statePublisher: ((sessionId: string, snapshot: ProjectStateSnapshot) => void) | undefined;
-
   constructor(
     readonly rootDir: string,
     deps: EngineDeps,
@@ -368,37 +364,9 @@ export class ProjectEngine {
     this.coordinators.push(id);
   }
 
-  /** Install the snapshot sink. Called once by the plugin; absent in tests that do not care. */
-  setStatePublisher(publisher: (sessionId: string, snapshot: ProjectStateSnapshot) => void): void {
-    this.statePublisher = publisher;
-  }
-
   /** Sessions known to drive this project. */
   coordinatorSessions(): readonly string[] {
     return this.coordinators;
-  }
-
-  /**
-   * Publish the current state to every coordinator session.
-   *
-   * Fire-and-forget: a panel that fails to update must never fail the write that produced
-   * it. Called only after a mutation, never from a renderer, so an idle project pays nothing.
-   */
-  private async publishState(): Promise<void> {
-    const publisher = this.statePublisher;
-    if (publisher === undefined || this.coordinators.length === 0) return;
-    const manifest = await this.store.tryRead();
-    if (manifest === undefined) return;
-    const overview = buildOverview(manifest.manifest, this.clock.now());
-    const snapshot = buildProjectState(overview, this.clock.now());
-    for (const sessionId of this.coordinators) {
-      try {
-        publisher(sessionId, snapshot);
-      } catch {
-        // A closed or disposed session is not an error worth reporting: the next write
-        // republishes to whoever is still there.
-      }
-    }
   }
 
   /** Today's user-wide ledger reading for this project. */
@@ -2013,7 +1981,6 @@ export class ProjectEngine {
       await this.threads.interrupt(thread.childSessionId).catch(() => undefined);
       interrupted.push(thread.threadId);
     }
-    await this.publishState();
     return { interrupted };
   }
 
@@ -2037,7 +2004,6 @@ export class ProjectEngine {
       delete draft.pauseReason;
       return { manifest: draft, result: undefined };
     });
-    await this.publishState();
     return { wasPaused: true };
   }
 
@@ -2074,7 +2040,6 @@ export class ProjectEngine {
       interrupted.push(thread.threadId);
     }
     await this.recordRecent('coordinator', `archived the project; interrupted ${interrupted.length} thread(s)`);
-    await this.publishState();
     return { interrupted, wasArchived };
   }
 
@@ -2088,7 +2053,6 @@ export class ProjectEngine {
       return { manifest: draft, result: undefined };
     });
     await this.recordRecent('coordinator', 'unarchived the project');
-    await this.publishState();
     return { wasArchived: true };
   }
 
@@ -2329,9 +2293,6 @@ export class ProjectEngine {
       mutate(thread);
       return { manifest: draft, result: thread };
     });
-    // One funnel for every descriptor change, so the panel cannot miss a transition even if
-    // a future action forgets to publish explicitly.
-    void this.publishState();
     return updated;
   }
 

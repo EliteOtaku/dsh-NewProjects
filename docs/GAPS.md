@@ -71,7 +71,7 @@
 | --- | --- | --- |
 | **P0** | 违背规格或官方原文 | ~~`GAP-01`~~ ✅ 已关闭 2026-10-27 |
 | **P1** | 会静默产出错误结果 | ~~`GAP-23`~~ ✅ ~~`GAP-24`~~ ✅（`GAP-22` / `GAP-22a` 已关闭）—— **P1 已清空** |
-| **P2** | 官方有、我们无，且多个其他能力依赖它 | ~~`GAP-03`~~ ✅ ~~`GAP-04`~~ ✅ ~~`GAP-05`~~ ✅（2026-10-29 关闭） |
+| **P2** | 官方有、我们无，且多个其他能力依赖它 | ~~`GAP-03`~~ ⛔（2026-10-31 回滚，见文内） ~~`GAP-04`~~ ✅ ~~`GAP-05`~~ ✅（2026-10-29 关闭） |
 | **P3** | 官方有、我们无，独立功能 | 全部关闭（`GAP-06` / `GAP-09` / `GAP-10` / `GAP-11` / `GAP-12` / `GAP-13` / `GAP-29` 已于 2026-10-29 完成） |
 | **P4** | 项目管理类，缺了不能「管起来」 | ~~`GAP-15`~~ ✅ ~~`GAP-17`~~ ✅ ~~`GAP-28`~~ ✅（2026-10-30 关闭）—— **P4 已清空** |
 | **P5** | 磁盘、性能与健壮性，不出错 | ~~`GAP-20`~~ ✅ ~~`GAP-27`~~ ✅（2026-10-29 关闭）；~~`GAP-30`~~ ✅（2026-10-30 登记并关闭：禁令已加，`gc.auto` 不做，宿主也不再写 config）—— **P5 已清空** |
@@ -230,7 +230,7 @@
 
 ## P2 — 官方有且被多项依赖（3 项）
 
-### GAP-03 没有会话投影（sessionProjections）✅ 已做
+### GAP-03 没有会话投影（sessionProjections）⛔ 已回滚（2026-10-31）
 
 - **依据**：`SPEC` 模块 E「基于 DSH 的 `ctx.projection` 与 `/project` 命令平面」；`OFFICIAL` 的 Overview 面板与线程卡片要求随会话实时更新。
 - **现状**：`sessionProjections.register` **一行都没写**（`grep -rn projection src/index.ts src/host/*.ts` 返回空）。目前只有 `project_overview` 工具与 `/project` 命令这两种**主动拉取**的表面。
@@ -245,7 +245,9 @@
   3. 插件 dispose 后该 projection key 消失（无残留）；
   4. 单测覆盖 `apply` 的纯函数性质（同事件序列产出同状态）。
 
-- **实际做法（2026-10-29 落地）**：
+- **⚠️ 2026-10-31 回滚：这一项的落地方式被证伪。** `src/core/projectState.ts`、`src/host/projections.ts` 与对应测试已删除，插件也不再发出任何 `Session.append()`。原因：仓库外插件不能写自定义会话事件类型 —— 宿主 `validateStoredEvents` 只接受 `KNOWN_SESSION_EVENT_TYPES` 内的类型，或带 `ignorable: true` 的事件；`Session.append()` 无法设置该标记，注册投影也不会把类型加进白名单。后果是一条 `project-beta/state` 事件就让整个会话在下次启动时读不出来（本次真实发生：会话从侧栏消失，日志无痕迹）。以后真要做面板，快照必须落文件或 Host storage，不能走会话事件流。详见 `docs/INCIDENT-2026-10-31.md`。
+
+- **实际做法（2026-10-29 落地，已被回滚）**：
   1. 新事件类型 `PROJECT_STATE_EVENT = 'project-beta/state'`，载荷 `{ snapshot }`；一次写入一条完整快照（不做增量 diff —— 快照小，diff 会让 reducer 承担合并逻辑，而合并逻辑恰恰是要测的那部分）。
   2. `src/core/projectState.ts` 是纯逻辑：`buildProjectState(overview, at, extra?)` 是**唯一生产者**，`applyProjectState(state, event)` 是**纯全函数**——不是本事件类型就**返回同一个对象**（Host 给每个事件缓存 reducer 输出，每次 turn 事件都新分配会让面板缓存持续失效）。
   3. `src/host/projections.ts` 用 `zod` 写 schema 并返回 `ProjectionDefinition`；`src/index.ts` 在 `ctx.inject(['sessionProjections','sessions'])` 里注册，并把 `runtime.setPublisher` 接到 `sessions.get(id)?.append(...)`。卸载时**先注销投影、再清空 publisher**：向没有投影的会话追加事件会留下永远读不掉的会话事件。

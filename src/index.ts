@@ -26,7 +26,6 @@ import {
   ProjectEngine,
   normalisePollInterval,
 } from './core/engine.js';
-import type { ProjectStateSnapshot } from './core/projectState.js';
 import { ProjectError } from './core/errors.js';
 import { SwappableThreadRuntime, UnavailableThreadRuntime, type ThreadRuntime } from './core/threads.js';
 import { createCommandRunner } from './host/commandRunner.js';
@@ -106,8 +105,6 @@ interface Runtime {
   engineFor(agent: HostAgent | undefined, rootDir: string | undefined): Promise<ProjectEngine>;
   /** Every engine created so far, in creation order. */
   engines(): Iterable<ProjectEngine>;
-  /** Install (or replace) the snapshot sink, including on engines already created. */
-  setPublisher(publisher: (sessionId: string, snapshot: ProjectStateSnapshot) => void): void;
   /** Drop every cached engine and turn-end subscription. */
   dispose(): void;
 }
@@ -121,15 +118,9 @@ function createRuntime(options: {
   requireApprovalFor?: ApprovalAction[];
   /** Per-thread token accounting; absent until the Host exposes a session log. */
   usage?: UsagePort;
-  /**
-   * Where to send state snapshots. Supplied once `sessions` is available; absent until then
-   * and in tests, which is why publishing is a no-op rather than an error.
-   */
-  publisher?: (sessionId: string, snapshot: ProjectStateSnapshot) => void;
 }): Runtime {
   const engines = new Map<string, ProjectEngine>();
   const detaches = new Map<string, () => void>();
-  let publisher = options.publisher;
 
   const resolveRoot = async (agent: HostAgent | undefined, rootDir: string | undefined): Promise<string> => {
     const chosen = rootDir ?? (await options.root(agent));
@@ -147,7 +138,6 @@ function createRuntime(options: {
       ...(options.requireApprovalFor === undefined ? {} : { requireApprovalFor: options.requireApprovalFor }),
       ...(options.usage === undefined ? {} : { usage: options.usage }),
     });
-    if (publisher !== undefined) engine.setStatePublisher(publisher);
     engines.set(root, engine);
     // Attach once per root, here, so exactly one listener exists no matter how many tool
     // calls touch the same project.
@@ -158,10 +148,6 @@ function createRuntime(options: {
   return {
     engineFor,
     engines: () => engines.values(),
-    setPublisher(next) {
-      publisher = next;
-      for (const engine of engines.values()) engine.setStatePublisher(next);
-    },
     dispose: () => {
       for (const detach of detaches.values()) detach();
       detaches.clear();
@@ -258,15 +244,9 @@ export function apply(ctx: HostContext, config: ProjectBetaConfig = {}): void {
   });
   ctx.effect(() => runtime.dispose);
 
-  // No publisher, deliberately.
-  //
-  // A session event type declared outside this repository is absent from the Host's
-  // persisted event catalog, so appending one makes the session unreadable on the next
-  // load: "contains event type ... unknown to this harness and not marked ignorable".
-  // Registering a projection does not admit the type, and `Session.append()` cannot set
-  // the `ignorable` marker that the reader would accept, so there is no supported way to
-  // publish from here. The snapshot sink stays unset and `publishState` is a no-op.
-  // See docs/INCIDENT-2026-10-31.md.
+  // This plugin writes no session events. A session event type declared outside this
+  // repository is absent from the Host's persisted catalog, so appending one leaves the
+  // session unloadable on the next start. See docs/INCIDENT-2026-10-31.md.
 
   ctx.inject(['tools'], (scoped) => {
     const tools = scoped.get('tools') as HostTools | undefined;
