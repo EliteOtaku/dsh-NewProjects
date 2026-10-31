@@ -249,6 +249,8 @@
 
 - **重做方向（未排期）**：面板要真做，只能是「client bundle 渲染 + 状态来自文件或 Host storage」。本插件没有 client bundle，也没有可写的存储服务，所以这件事的工作量主要在宿主侧能力调研，不在 reducer。重开时另立条目，别再复用会话事件。
 
+- **数据通道已验证（2026-10-31，第一步）**：不碰会话事件、不写任何东西，走「宿主具名路由 + 同源 fetch」。`src/host/panelRoute.ts` 注册 `GET /newprojects/state?rootDir=…`，只读地序列化 `overviewJson()`；认证复用宿主的 `connection.requestRejection`——载体文档明确写它自己不管认证，所以这条路由必须自己问 Connection。实机探针（临时 profile，端口 19396）：**无 cookie → 401，带浏览器会话 cookie → 200**，返回真实项目概览。测试见 `test/unit/panelRoute.test.ts`（方法白名单、路径、缺参、错误映射；未识别的放行答案一律当拒绝）。下一步才是 client bundle（`sidebar.panellist` 入口 + `main` keyed 槽）。
+
 - **实际做法（2026-10-29 落地，已被回滚）**：
   1. 新事件类型 `PROJECT_STATE_EVENT = 'project-beta/state'`，载荷 `{ snapshot }`；一次写入一条完整快照（不做增量 diff —— 快照小，diff 会让 reducer 承担合并逻辑，而合并逻辑恰恰是要测的那部分）。
   2. `src/core/projectState.ts` 是纯逻辑：`buildProjectState(overview, at, extra?)` 是**唯一生产者**，`applyProjectState(state, event)` 是**纯全函数**——不是本事件类型就**返回同一个对象**（Host 给每个事件缓存 reducer 输出，每次 turn 事件都新分配会让面板缓存持续失效）。

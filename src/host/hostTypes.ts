@@ -271,3 +271,51 @@ export interface HostSessionEvent {
 export interface HostTokenMeter {
   measure(session: HostSession): { readonly totalTokens?: number };
 }
+
+/** One request as the Host's browser HTTP carrier hands it to a route handler. */
+export interface HostWebRequest {
+  readonly method?: string;
+  readonly url?: string;
+  readonly headers: Readonly<Record<string, string | string[] | undefined>>;
+}
+
+/** The response surface a route handler owns. */
+export interface HostWebResponse {
+  statusCode: number;
+  setHeader(name: string, value: string): void;
+  end(chunk?: string): void;
+}
+
+/**
+ * The subset of the `webServer` service this plugin calls.
+ *
+ * `register` composes one named route and returns its disposer; a duplicate `(kind, path)`
+ * throws, so the path is a composition-level contract. The carrier owns no authentication —
+ * `Connection` guards the Host API routes, not an arbitrary named route — so whatever this
+ * plugin registers is reachable by anything that can reach the bound interface. That is why
+ * the panel route only reads.
+ */
+export interface HostWebServer {
+  register(route: HostWebRoute): () => void;
+}
+
+/** One named route registration: an exact path, or a longest-prefix match. */
+export interface HostWebRoute {
+  readonly kind: 'exact' | 'prefix';
+  readonly path: string;
+  readonly handler: (request: HostWebRequest, response: HostWebResponse) => void | Promise<void>;
+}
+
+/**
+ * The one `connection` call this plugin makes.
+ *
+ * `requestRejection` applies Connection's Host/Origin checks and browser authentication to a
+ * route the caller owns, returning a rejection status or `undefined` when the route may
+ * accept the request. We must ask it explicitly: the HTTP carrier owns no authentication, so
+ * a named route is otherwise reachable by anything that can reach the bound interface.
+ */
+export interface HostConnection {
+  requestRejection(request: {
+    readonly headers: Readonly<Record<string, string | string[] | undefined>>;
+  }): unknown;
+}

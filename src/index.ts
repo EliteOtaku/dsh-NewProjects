@@ -30,6 +30,7 @@ import { ProjectError } from './core/errors.js';
 import { SwappableThreadRuntime, UnavailableThreadRuntime, type ThreadRuntime } from './core/threads.js';
 import { createCommandRunner } from './host/commandRunner.js';
 import { createLazyUsagePort, createUsagePort } from './host/usage.js';
+import { PANEL_STATE_PATH, panelStateResponse } from './host/panelRoute.js';
 import { buildCommands, type CommandContextSource } from './host/commands.js';
 import { SubagentThreadRuntime } from './host/subagents.js';
 import { buildTools, type ToolContextSource } from './host/tools.js';
@@ -39,6 +40,7 @@ import type {
   HostCommands,
   HostContext,
   HostAgent,
+  HostConnection,
   HostSubagents,
   HostSessions,
   HostTokenMeter,
@@ -49,6 +51,7 @@ import type {
   HostToolRunContext,
   HostTools,
   HostWorkingDirectory,
+  HostWebServer,
 } from './host/hostTypes.js';
 
 /**
@@ -247,6 +250,34 @@ export function apply(ctx: HostContext, config: ProjectBetaConfig = {}): void {
   // This plugin writes no session events. A session event type declared outside this
   // repository is absent from the Host's persisted catalog, so appending one leaves the
   // session unloadable on the next start. See docs/INCIDENT-2026-10-31.md.
+
+  // Panel data route. Skips TUI profiles (no browser carrier), and is read-only by
+  // construction: it resolves the engine and serialises the same overview the tool returns.
+  ctx.inject(['webServer'], (scoped) => {
+    const webServer = scoped.get('webServer') as HostWebServer | undefined;
+    if (webServer === undefined) return;
+    scoped.effect(() =>
+      webServer.register({
+        kind: 'exact',
+        path: PANEL_STATE_PATH,
+        handler: async (request, response) => {
+          // The carrier owns no authentication; Connection does. Ask it the same question it
+          // asks every Host API route. Resolved per request because the service may mount
+          // after this plugin activates, and refusing beats an unauthenticated read endpoint.
+          const admit = () => {
+            const connection = ctx.get('connection') as HostConnection | undefined;
+            return connection?.requestRejection({ headers: request.headers });
+          };
+          const result = await panelStateResponse(request, (rootDir) => runtime.engineFor(undefined, rootDir), {
+            admit,
+          });
+          response.statusCode = result.status;
+          for (const [name, value] of Object.entries(result.headers)) response.setHeader(name, value);
+          response.end(result.body);
+        },
+      }),
+    );
+  });
 
   ctx.inject(['tools'], (scoped) => {
     const tools = scoped.get('tools') as HostTools | undefined;
