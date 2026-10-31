@@ -1,0 +1,12 @@
+{
+  // The browser half must compile to a classic script: a trailing `export {}`
+  // would make the bundle a module, and the Host's client loader executes it as
+  // a plain script before the page boots. `moduleDetection: legacy` keeps the
+  // file script-shaped while the rest of the package stays ESM.
+  "extends": "./tsconfig.build.json",
+  "compilerOptions": {
+    "moduleDetection": "legacy"
+  },
+  "include": ["src/client.ts"],
+  "exclude": []
+}

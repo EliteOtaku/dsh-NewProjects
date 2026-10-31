@@ -251,6 +251,8 @@
 
 - **数据通道已验证（2026-10-31，第一步）**：不碰会话事件、不写任何东西，走「宿主具名路由 + 同源 fetch」。`src/host/panelRoute.ts` 注册 `GET /newprojects/state?rootDir=…`，只读地序列化 `overviewJson()`；认证复用宿主的 `connection.requestRejection`——载体文档明确写它自己不管认证，所以这条路由必须自己问 Connection。实机探针（临时 profile，端口 19396）：**无 cookie → 401，带浏览器会话 cookie → 200**，返回真实项目概览。测试见 `test/unit/panelRoute.test.ts`（方法白名单、路径、缺参、错误映射；未识别的放行答案一律当拒绝）。下一步才是 client bundle（`sidebar.panellist` 入口 + `main` keyed 槽）。
 
+- **客户端 bundle 已落地（2026-11-01，第二步）**：`src/client.ts` 走 lazy-CJS 形态——`window.__ModuleLoader__.load({ id: 'dsh-newprojects', factory })`，工厂导出 `{ apply }`。`apply` 注册两处槽：`sidebar.panellist`（`id: 'newprojects'`、`order: 6`、`label: 新项目协作`，图标 owner props 为 `{ size, active }`）与同 id 的 `main` keyed 槽（官方描述「Central panel selected by sidebar entry id」，即侧栏入口 id 就是 main 的 key）。数据只走第一步那条只读路由：同源 `fetch('/newprojects/state?rootDir=…', { credentials: 'same-origin' })`；401 时明确提示「先开一次带 token 的地址」，而不是留一张空白页。`package.json` 增加 `dsh.client`（`platform: 'web'`、`inject: []` 静态数组）与 `exports["./client"]`；`tsconfig.client.json` 用 `moduleDetection: 'legacy'` 单独编译，因为 NodeNext 会在 ESM 包里给每个文件补 `export {}`，而 loader 只把 `./client` 当 **classic script** 执行——多一行 `export {}` 就整块不注册。回归见 `test/unit/clientBundle.test.ts`（清单声明、脚本形态、两处槽与路由路径）。三区（Overview / Threads / Library）逐块铺开，先只渲染 `totals` 与 `warnings`。
+
 - **实际做法（2026-10-29 落地，已被回滚）**：
   1. 新事件类型 `PROJECT_STATE_EVENT = 'project-beta/state'`，载荷 `{ snapshot }`；一次写入一条完整快照（不做增量 diff —— 快照小，diff 会让 reducer 承担合并逻辑，而合并逻辑恰恰是要测的那部分）。
   2. `src/core/projectState.ts` 是纯逻辑：`buildProjectState(overview, at, extra?)` 是**唯一生产者**，`applyProjectState(state, event)` 是**纯全函数**——不是本事件类型就**返回同一个对象**（Host 给每个事件缓存 reducer 输出，每次 turn 事件都新分配会让面板缓存持续失效）。
