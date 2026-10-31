@@ -33,7 +33,7 @@
 | **跨线程共享记忆** | `project_memory_sync` 写入决策后广播到所有**正在运行**的线程；新线程启动前缀自动带上全量记忆。记忆渲染成字节稳定的 system prompt 段，命中 provider 端 prefix cache。 |
 | **项目知识（挂载式）** | 绑定文件或目录后，charter 渲染**索引**（每份文档一行：路径 + 字符数）并给出 **`Project root`**，线程按需从项目根读盘，正文永不进 prompt（对照官方的 `/mnt/project-files` 挂载 + 开局读 `MEMORY.md` 索引）。路径锚定项目根而非线程自己的 worktree，因为 worktree 只含分支切点前已提交的文件。BM25 检索是便利工具。**不是 RAG 模式切换**——那是 chat Projects 的机制，Code Projects 没有。 |
 | **自动执行与 CI/PR 自愈** | 线程自己跑测试、commit、push、开 PR。`/project heal` 与后台巡检读 `gh pr checks` / review comments，判定 `heal` / `wait` / `escalate` / `transition`。修复预算按**同一组检查连续失败**计（3 次后升级，出现进展即归零）；`gh` 失败分「终局」与「可重试」——终局（PR/分支已不存在）不记 error，改为重读 PR 终态并自动退订，可重试（网络/限流/认证）记 error 且不退订；`/project thread <id> unwatch\|watch` 可手动退订与恢复。 |
-| **Overview 面板** | 官方六分组（`Ready for review` / `Waiting on you` / `Working` / `Landing` / `Idle` / `Resolved`）+ 当日配额 + 知识状态；写入后自动把快照 append 进协调者会话，面板是**事件折叠**而非轮询。`project_overview` 工具与 `/project` 命令提供同样的数据。 |
+| **Overview 状态（工具 + 命令）** | 官方六分组（`Ready for review` / `Waiting on you` / `Working` / `Landing` / `Idle` / `Resolved`）+ 当日配额 + 知识状态，由 `project_overview` 工具与 `/project` 命令读取同一份数据。**没有常驻面板**：本插件不带 client bundle；2026-10-31 又证明仓库外插件不能通过会话事件给 UI 供数——一条自定义事件类型就会让整条会话在下次启动时读不出来（见 `docs/INCIDENT-2026-10-31.md`）。面板要真做，必须改成「client bundle 渲染 + 状态来自文件或 Host storage」。 |
 | **Usage 统计** | 花费取会话日志里 provider 原文的 `usage`（`assistant/message` 事件），按线程与 `provider/model` 拆分；`tokenMeter` 只用于「当前上下文占用」一列，**与花费分列，绝不相加**。拿不到数据时如实报「不可用」并把原因前置，因为一屏 0 加一条脚注会被读成「免费」。`/project usage` 直出，`project_overview` 的 `usage: true` 给结构化数据（默认关：要为每个线程读一遍会话日志）。 |
 | **Library 与 Pull requests** | `Library` 是**清单 + 按需读取**，不是存储层：`deliverThread` 记下 `git diff --name-status <base>..<branch>`（`--no-renames`，重命名显示为删除 + 新增），worktree 回收后清单仍在，`read` 现读现取；文件不在了就如实报不可读，绝不返回空内容。`Pull requests` 从各线程最后一次观察快照按状态分组（open / draft / merged / closed / unknown）并统计 checks 与未消费评论数——面板自己不查 GitHub，那是自愈巡检的活。两者都没有内容时**整个字段不出现**，不返回空数组。 |
 
@@ -103,10 +103,10 @@ cmd /c mklink /J "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-newp
 因此本实现采用 **paths-first**。**已实现**：
 
 - **charter 渲染索引**：每份已索引文档一行「路径 — 字符数」，加一句「文件为准」。**正文永不进 prompt**。字符数是让模型能*选*的那个信息——读 2 KB 的决策记录和读 400 KB 的转录是两个不同的决定。
-- **没有上下文预算**。正文不进前缀，所以什么都不随模型窗口变。唯一有明文的常驻文本预算是 **16 000 字符**（project instructions）；共享记忆是同一类常驻前缀文本，所以用**同一把尺子**量，不另设一个解释不清的常量。两者都只**报警不截断**：超出量进 `warnings`，在面板与 `project_overview` 里看得到——静默截断决策记录会让线程漏掉必须遵守的规则。
+- **没有上下文预算**。正文不进前缀，所以什么都不随模型窗口变。唯一有明文的常驻文本预算是 **16 000 字符**（project instructions）；共享记忆是同一类常驻前缀文本，所以用**同一把尺子**量，不另设一个解释不清的常量。两者都只**报警不截断**：超出量进 `warnings`，在 `project_overview` 的 `warnings` 里看得到——静默截断决策记录会让线程漏掉必须遵守的规则。
 - **没有模式**。没有 `context`/`rag` 二分，就没有阈值抖动，也没有会被遗留的 flag。
 - **能自己找路**：`project_knowledge` 的 `tree` 列目录树（默认 2 层 / 200 条，上限 4 层 / 500 条，跳过 `node_modules` 之类与二进制文件），`read` 按行窗读任意一个文件（默认 200 行，上限 2 000）。两处截断都会在结果里**指名是哪个上限**——没说被截断的半棵树会被当成全貌。两者都只读项目根，`../` 之类越界直接报 `INVALID_INPUT`。
-- **索引自己保持新鲜**：每次 `project_knowledge_search` 先比对绑定路径的指纹（`路径:大小:mtime`），变了就重建再检索，所以改完文件不需要手工 rebuild。只读入口（`knowledgeState` / `/project knowledge` / 面板 overview）永不写盘；两个并发搜索共用一次重建。
+- **索引自己保持新鲜**：每次 `project_knowledge_search` 先比对绑定路径的指纹（`路径:大小:mtime`），变了就重建再检索，所以改完文件不需要手工 rebuild。只读入口（`knowledgeState` / `/project knowledge` / `project_overview`）永不写盘；两个并发搜索共用一次重建。
 - **收集上限与官方同形，是条目数而不是字符数**：最多 100 份文档（官方 folders 是「first 100 files」），单文件 2 MB（比官方的 30 MB 严，因为我们要把正文切块存进一个 JSON 索引），索引总量 2 000 万字符。触到任一上限就停下并记 warning，说明是**哪一个**上限。
 - **BM25 检索是便利工具**，不是一种「模式」，也不是唯一入口：检索没命中时用 `tree` / `read` 走文件系统。
 
@@ -183,7 +183,7 @@ npm test           # 只跑测试
 
 ## 已知未实现部分
 
-相对官方 Claude Code Projects，六批实现计划已全部完成：全局配额、知识挂载、模型优先拆解、六分组投影、Library 与 PR 聚合、卡片动作、审批门、Pause/Archive、线程超时、worktree 回收、Usage 统计均已落地。剩下的只有**有意为之的边界**（重启后后台自愈停摆、记忆仍整段进 charter、云端 sandbox 与 GitHub App 的载体差异、Team 协作持平）；唯一的按需项 `GAP-28` 并发偏好也已于 2026-10-30 完成。见 `docs/GAPS.md` 的 `ARCH` / `BOUND` 小节。
+相对官方 Claude Code Projects，六批实现计划已全部完成：全局配额、知识挂载、模型优先拆解、六分组概览（`project_overview`）、Library 与 PR 聚合、卡片动作、审批门、Pause/Archive、线程超时、worktree 回收、Usage 统计均已落地。剩下的只有**有意为之的边界**（重启后后台自愈停摆、记忆仍整段进 charter、云端 sandbox 与 GitHub App 的载体差异、Team 协作持平）；唯一的按需项 `GAP-28` 并发偏好也已于 2026-10-30 完成。见 `docs/GAPS.md` 的 `ARCH` / `BOUND` 小节。
 
 完整清单、代码证据、依据来源与验收标准见 **[docs/GAPS.md](./docs/GAPS.md)**，按批次推进。那份文档是判断「某个能力到底有没有」的唯一依据——不要凭本文件的段落推断。
 

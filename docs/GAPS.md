@@ -233,19 +233,21 @@
 ### GAP-03 没有会话投影（sessionProjections）⛔ 已回滚（2026-10-31）
 
 - **依据**：`SPEC` 模块 E「基于 DSH 的 `ctx.projection` 与 `/project` 命令平面」；`OFFICIAL` 的 Overview 面板与线程卡片要求随会话实时更新。
-- **现状**：`sessionProjections.register` **一行都没写**（`grep -rn projection src/index.ts src/host/*.ts` 返回空）。目前只有 `project_overview` 工具与 `/project` 命令这两种**主动拉取**的表面。
+- **现状（2026-10-31）**：投影相关代码已全部删除——没有 `sessionProjections.register` 调用点，也没有任何 `Session.append()`。目前只有 `project_overview` 工具与 `/project` 命令这两种**主动拉取**的表面。
 - **不再被 `GAP-04` 阻塞**（2026-10-28 修正）：原判断「投影的 `stateSchema` 由状态枚举决定，所以必须先定状态模型」**不成立**。`bucketOf`（`src/core/overview.ts:41`）已经是现成的 `state → bucket` 派生函数，投影暴露的是**桶**而不是枚举；后加 `landing`/`idle`/`resolved` 只改 `bucketOf` 的 case，`stateSchema` 不变。**因此 `GAP-03` 与 `GAP-04` 可以同批做，不必串行两批。**
 - **要修的文档**：`README.md` 曾写「Host-only 会话投影保持面板随会话事件更新」，**那句是虚的**，已在文档对齐时改成事实陈述。
-- **做法**：`ProjectionDefinition` 需要 `key` / `stateSchema`（Zod）/ `init(header, inheritedEventCount)` / `apply(state, event)` / `stateVersion`。关键约束：
+- **原设计（已删除，留档）**：`ProjectionDefinition` 需要 `key` / `stateSchema`（Zod）/ `init(header, inheritedEventCount)` / `apply(state, event)` / `stateVersion`。关键约束：
   - `apply` 必须是**纯函数**（不得读文件、不得发命令），它对每个会话事件同步执行。所以投影里只能放「已算好的摘要」，不能在里面查 manifest。
   - 线程状态变化的来源是 `agent` 层 turn 结束与 `healSweep` 的写入，这些要主动 `append` 事件到会话，投影才能看见。**目前这些状态只写进 manifest 文件，没有写进会话事件流** —— 这是本项真正的工作量，不是写个 reducer 就完。
-- **验收标准**：
+- **原验收标准（对应测试已删除）**：
   1. 注册后 `/project init` + `coordinate` 能在会话快照里看到线程摘要，且不需要用户敲命令；
   2. 线程 turn 结束后快照里的状态随之改变；
   3. 插件 dispose 后该 projection key 消失（无残留）；
   4. 单测覆盖 `apply` 的纯函数性质（同事件序列产出同状态）。
 
 - **⚠️ 2026-10-31 回滚：这一项的落地方式被证伪。** `src/core/projectState.ts`、`src/host/projections.ts` 与对应测试已删除，插件也不再发出任何 `Session.append()`。原因：仓库外插件不能写自定义会话事件类型 —— 宿主 `validateStoredEvents` 只接受 `KNOWN_SESSION_EVENT_TYPES` 内的类型，或带 `ignorable: true` 的事件；`Session.append()` 无法设置该标记，注册投影也不会把类型加进白名单。后果是一条 `project-beta/state` 事件就让整个会话在下次启动时读不出来（本次真实发生：会话从侧栏消失，日志无痕迹）。以后真要做面板，快照必须落文件或 Host storage，不能走会话事件流。详见 `docs/INCIDENT-2026-10-31.md`。
+
+- **重做方向（未排期）**：面板要真做，只能是「client bundle 渲染 + 状态来自文件或 Host storage」。本插件没有 client bundle，也没有可写的存储服务，所以这件事的工作量主要在宿主侧能力调研，不在 reducer。重开时另立条目，别再复用会话事件。
 
 - **实际做法（2026-10-29 落地，已被回滚）**：
   1. 新事件类型 `PROJECT_STATE_EVENT = 'project-beta/state'`，载荷 `{ snapshot }`；一次写入一条完整快照（不做增量 diff —— 快照小，diff 会让 reducer 承担合并逻辑，而合并逻辑恰恰是要测的那部分）。
@@ -254,7 +256,7 @@
   4. 写入点收敛在 `updateThread`（所有 descriptor 变更的唯一漏斗）末尾 `void this.publishState()`；`noteCaller(parent)` 在 `coordinate` / `startSuggested` / `manageThread` / `healSweep` / `setMemory` 首行记录协调者会话。发布是 fire-and-forget：面板更新失败绝不能把产生它的写入一起失败。
   5. 快照按桶截断到 `MAX_THREADS_PER_BUCKET = 20` 并把溢出数记在 `truncated` —— 面板显示「19 个线程」而实际有 40 个，比显示 20/40 更糟。
   6. 新依赖 `zod`（Host 自带的在 asar 内，外部插件必须自带）。
-- **验收（全部有测试）**：注册后无需敲命令即可在会话快照里看到线程摘要（`test/unit/projectState.test.ts` 的 `buildProjectState` 组）；turn 结束后状态随之改变（`test/engine.test.ts` 的 `state publishing` 组）；`apply` 纯函数性（同事件序列同状态 + 非本类事件返回同一引用）；dispose 后 key 消失（`src/index.ts` 的 effect 清理；实机探针确认 `registered projection keys` 含 `projectBeta`）。
+- **原验收（测试已删除，仅留档）**：注册后无需敲命令即可在会话快照里看到线程摘要（`test/unit/projectState.test.ts` 的 `buildProjectState` 组）；turn 结束后状态随之改变（`test/engine.test.ts` 的 `state publishing` 组）；`apply` 纯函数性（同事件序列同状态 + 非本类事件返回同一引用）；dispose 后 key 消失（`src/index.ts` 的 effect 清理；实机探针确认 `registered projection keys` 含 `projectBeta`）。
 
 ### GAP-04 Overview 只有五桶，官方是六组 ✅ 已做
 
@@ -427,7 +429,7 @@
   - `Create PR` → `deliver` 覆盖（**恰好是唯一宿主直办的那个，方向对了**）；
   - **`Merge it` → 缺**。⚠️ **必须发消息给线程，不要让宿主代跑 `gh pr merge`。** 理由不是形式，是责任链：线程才知道自己的 PR 现在什么状态、要不要先 rebase、合完要不要清理。照着 `deliver` 的样子写就会做错。
   - **`Resolve conflicts` → 缺**。本质是「把目标分支合进线程分支 + 解冲突 + push」，用现有 `resume` 实现，但需要独立 prompt 模板（`buildHealPrompt` 不能复用 —— 它讲的是 CI 失败与评审意见）。
-  - **`Review PR` → 缺**。要求把 PR URL 传回会话让前端可点；投影（`GAP-03`）做好后才有真正落点。
+  - **`Review PR` → 缺**。要求把 PR URL 传回会话让前端可点；现有落点是 `project_overview` 的 `pr` 字段（面板若做，见 `GAP-03`）。
 - **验收标准**：
   1. `merge` 通过**发消息**给线程执行（断言 `threads.resumes` 收到消息、且宿主没有直接跑 `gh pr merge`）；
   2. `conflicts` 唤醒线程并把冲突文件清单交给它；
@@ -440,7 +442,7 @@
   为什么不让宿主代跑：线程才知道自己那条分支要不要先 rebase、合完该清理什么。宿主代跑会在一个线程仍以为「等评审」的分支上宣告成功，而 `landing` 这个状态就再也回不到真相。
 - **`conflicts`** —— 先把 PR 的 base 分支读出来（`gh pr view <n> --json baseRefName`），再算**两侧各自相对 merge-base 改过的文件**取交集，作为「候选冲突点」交给 `renderConflictRequest`。状态置 `running`。
   候选而不是定论：git 只有在真正尝试 merge 时才知道哪些文件真冲突。交集为空时**只省略文件清单、保留指令** —— 列一个零文件清单会读成「已经查过，没事」。
-- **`review`** —— 返回 PR URL，**不唤醒线程**。官方卡片里 Review PR 是人点开去看，不是给线程下指令；发一条消息会白烧一轮的 token。CLI 里输出即链接，面板里由 `GAP-03` 的投影带出 `pr` 字段。
+- **`review`** —— 返回 PR URL，**不唤醒线程**。官方卡片里 Review PR 是人点开去看，不是给线程下指令；发一条消息会白烧一轮的 token。CLI 里输出即链接，`project_overview` 的 `pr` 字段带出链接（面板若做，见 `GAP-03`）。
 - 三者都在没有 PR 时以 `INVALID_INPUT` 拒绝（`merge` / `conflicts` 还要求线程带分支），而不是静默成功。
 
 **验收（全部有测试）**：✅ `merge` 走消息且宿主没有 `gh pr merge` —— `test/engine.test.ts`「asks the thread to merge instead of merging behind its back」；✅ `conflicts` 把交集交给线程、非交集文件不出现 —— 「hands the thread the likely conflict sites and the base branch」；✅ 交集为空仍发指令 —— 「still asks the thread to fetch and inspect when nothing overlaps」；✅ `review` 返回 URL 且不唤醒 —— 「answers review with the link and spends no thread turn」；✅ 三者的失败路径 —— 三条「refuses ... without a pull request」。
@@ -935,7 +937,7 @@ GAP 原文写「`overviewJson()` 加 `usage`」，落地时改成 `{ includeUsag
 | --- | --- | --- | --- |
 | **第一批 让输出可信** | `GAP-01` 全局配额 ✅ + `GAP-22` 知识 paths-first ✅ | 无 | 2026-10-27 `9c7ef10`：`GAP-01` 关闭，`GAP-22` 的减法做完（确实净减）；2026-10-29：`GAP-22a`（路径锚定项目根）关闭 —— **第一批完成** |
 | **第二批 让拆解可信** | `GAP-26` 模型优先拆解 + Suggested threads ✅ | 无（可与一批并行） | 后者是前者的保险，必须同批。2026-10-29 关闭 —— **第二批完成** |
-| **第三批 让报回可用** | `GAP-03` 投影 ✅ + `GAP-04` 六分组 ✅ + `GAP-05` 终态 ✅ + `GAP-10` Library ✅ + `GAP-11` PR 聚合 ✅ | 03 与 04 **可同批**（原判断的串行约束不成立） | 2026-10-29 全部关闭 —— **第三批完成** |
+| **第三批 让报回可用** | `GAP-03` 投影 ⛔（2026-10-31 回滚） + `GAP-04` 六分组 ✅ + `GAP-05` 终态 ✅ + `GAP-10` Library ✅ + `GAP-11` PR 聚合 ✅ | 03 与 04 **可同批**（原判断的串行约束不成立） | 2026-10-29 全部关闭 —— **第三批完成** |
 | **第四批 让裁定可用** ✅ | ~~`GAP-12` 卡片动作~~ ✅ + ~~`GAP-25` 禁令~~ ✅ + ~~`GAP-19` worktree 回收~~ ✅ + ~~`GAP-18` 审批~~ ✅ + ~~`GAP-14` Pause~~ ✅ | 19 依赖 10（先有清单再删目录）| **整批已于 2026-10-29 完成**。不可逆动作（19）与它的防护（18/25）同批，没有推到最后一刻 |
 | **第五批 减少重复交代** ✅ | ~~`GAP-06` goal~~ ✅ + ~~`GAP-09` 仓库约定~~ ✅ + ~~`GAP-29` 三件套~~ ✅ | 无 | **整批已于 2026-10-29 完成**：goal 进共享前缀、约定按官方三处只读根、近期消息环只给协调者不进线程前缀 |
 | **第六批 卫生** ✅ | ~~`GAP-13` Usage~~ ✅ + ~~`GAP-15` Archive~~ ✅ + ~~`GAP-17` 超时~~ ✅ + ~~`GAP-20` purge~~ ✅ + ~~`GAP-27` 锁重试~~ ✅ | 无 | **整批已于 2026-10-29 完成** |

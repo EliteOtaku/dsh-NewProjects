@@ -241,7 +241,14 @@ export interface HostSessions {
   get(id: string): HostSession | undefined;
 }
 
-/** The subset of a live `Session` this plugin reads. */
+/**
+ * The subset of a live `Session` this plugin reads.
+ *
+ * `append()` is deliberately absent: a session event type declared outside this repository is
+ * not in the Host's persisted catalog, so writing one makes the session unloadable on the
+ * next start (`validateStoredEvents`). There is no supported way to publish from here — see
+ * `docs/INCIDENT-2026-10-31.md`.
+ */
 export interface HostSession {
   readonly id: string;
   /** Every event this session recorded itself, oldest first. */
