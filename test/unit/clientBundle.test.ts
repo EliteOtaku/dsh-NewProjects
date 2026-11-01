@@ -59,7 +59,13 @@ describe('client bundle', () => {
     // The guarded context only exposes services the plugin declares; an
     // undeclared read throws, and the boot audit turns that into a fatal
     // `did not activate` that costs the whole Web UI.
-    assert.ok(source.includes("inject: ['slots'] as const"), 'the plugin must declare the slot service')
+    assert.ok(
+      source.includes("inject: ['slots', 'uiWorkspace'] as const"),
+      'the plugin must declare every service it reads',
+    )
+    // The folder picker is the Host's own dialog; a hand-typed path stays as the
+    // fallback for pages that do not provide `uiWorkspace`.
+    assert.ok(source.includes('pickDirectory()'), 'the panel must open the Host folder picker')
     // React is neither a context service nor a page global: the factory's
     // require is the only source.
     assert.ok(source.includes("requireModule?.('react')"), 'React must come from the loader require')

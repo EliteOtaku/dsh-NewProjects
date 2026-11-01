@@ -53,6 +53,15 @@ interface ClientSlots {
   inject(name: string, callback: () => void): () => void
 }
 
+/**
+ * The Host's directory picker. `pickDirectory` opens the native dialog and
+ * resolves to the chosen folder, or to `null` when the user cancels; the panel
+ * falls back to the text input when the page does not expose this service.
+ */
+interface ClientWorkspace {
+  pickDirectory(): Promise<string | null>
+}
+
 /** The console a client half reports through; the page tags lines by package. */
 interface ClientConsole {
   log?(...args: unknown[]): void
@@ -66,6 +75,7 @@ interface ClientContext {
   readonly React?: ClientReact
   readonly slots?: ClientSlots
   readonly console?: ClientConsole
+  readonly uiWorkspace?: ClientWorkspace
 }
 
 // rc.3 mounts the browser half through `__ModuleLoader__` after wrapping the
@@ -146,8 +156,11 @@ function stat(React: ClientReact, label: string, value: number | undefined): unk
   )
 }
 
-/** The whole page: a root input, a refresh, and the project's totals. */
-function createPanel(React: ClientReact): (props: Record<string, unknown>) => unknown {
+/** The whole page: a folder picker, a refresh, and the project's totals. */
+function createPanel(
+  React: ClientReact,
+  workspace: ClientWorkspace | undefined,
+): (props: Record<string, unknown>) => unknown {
   return function ProjectPanel(): unknown {
     const [root, setRoot] = React.useState<string>(storedRoot())
     const [state, setState] = React.useState<PanelState | null>(null)
@@ -185,6 +198,25 @@ function createPanel(React: ClientReact): (props: Record<string, unknown>) => un
         .finally(() => setBusy(false))
     }
 
+    // The Host's native folder dialog. Cancelling resolves to `null`, which
+    // keeps the current selection, so the button can never clear a working root.
+    const pick = (): void => {
+      if (workspace === undefined) {
+        setError('这个页面没有提供文件夹选择器，请手动填写路径。')
+        return
+      }
+      workspace
+        .pickDirectory()
+        .then((picked) => {
+          if (picked === null) return
+          setRoot(picked)
+          load(picked)
+        })
+        .catch((cause: unknown) => {
+          setError(cause instanceof Error ? cause.message : String(cause))
+        })
+    }
+
     React.useEffect(() => {
       if (root.length > 0) load(root)
     }, [])
@@ -200,6 +232,24 @@ function createPanel(React: ClientReact): (props: Record<string, unknown>) => un
       React.createElement(
         'div',
         { style: { display: 'flex', gap: '8px', margin: '14px 0 16px' } },
+        React.createElement(
+          'button',
+          {
+            type: 'button',
+            disabled: busy,
+            onClick: pick,
+            style: {
+              padding: '7px 14px',
+              borderRadius: '8px',
+              border: '1px solid var(--dsw-alias-border-accent, #2563eb)',
+              background: 'var(--dsw-alias-bg-accent, #2563eb)',
+              color: '#ffffff',
+              fontWeight: '600',
+              cursor: busy ? 'default' : 'pointer',
+            },
+          },
+          '选择文件夹…',
+        ),
         React.createElement('input', {
           value: root,
           spellCheck: false,
@@ -306,6 +356,15 @@ function apply(ctx: ClientContext, react: ClientReact | undefined): () => void {
       log?.log?.('[dsh-newprojects] missing React or slots', String(react), String(slots))
       return () => undefined
     }
+    // `uiWorkspace` is declared in the plugin's `inject` below, so the guarded
+    // context hands it over. A page that does not provide it keeps the manual
+    // path input; the picker button explains itself instead of failing silently.
+    let workspace: ClientWorkspace | undefined
+    try {
+      workspace = ctx.uiWorkspace as ClientWorkspace | undefined
+    } catch {
+      workspace = undefined
+    }
     // `slots.inject` defers the registration until the slot exists. Registering
     // eagerly throws `slot "…" is not declared` when the page mounts a plugin
     // before the owning shell has declared its slot tree, which is exactly what
@@ -323,7 +382,7 @@ function apply(ctx: ClientContext, react: ClientReact | undefined): () => void {
       cleanups.push(
         slots.inject('main', () => {
           cleanups.push(
-            slots.register({ name: 'main', key: PANEL_KEY }, createPanel(react)),
+            slots.register({ name: 'main', key: PANEL_KEY }, createPanel(react, workspace)),
           )
         }),
       )
@@ -347,11 +406,12 @@ window.__ModuleLoader__?.load({
   id: 'dsh-newprojects',
   factory: (requireModule?: (id: string) => unknown) => ({
     /**
-     * Declared services the guarded client context may hand to `apply`. Only
-     * `slots` is read; everything else stays undeclared on purpose, because an
-     * undeclared read throws inside the guarded context.
+     * Declared services the guarded client context may hand to `apply`. The
+     * panel reads `slots` for registration and `uiWorkspace` for the Host's
+     * native folder picker; everything else stays undeclared on purpose,
+     * because an undeclared read throws inside the guarded context.
      */
-    inject: ['slots'] as const,
+    inject: ['slots', 'uiWorkspace'] as const,
     apply: (ctx: ClientContext) => apply(ctx, requireModule?.('react') as ClientReact | undefined),
   }),
 })
