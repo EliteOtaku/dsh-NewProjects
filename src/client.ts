@@ -20,7 +20,7 @@
 /** Where the loader publishes the lazy-CJS registry the page boots from. */
 declare const window: {
   __ModuleLoader__?: {
-    load(entry: { id: string; factory: () => unknown }): void
+    load(entry: { id: string; factory: (requireModule?: (id: string) => unknown) => unknown }): void
   }
   localStorage: {
     getItem(key: string): string | null
@@ -53,14 +53,27 @@ interface ClientSlots {
   inject(name: string, callback: () => void): () => void
 }
 
+/** The console a client half reports through; the page tags lines by package. */
+interface ClientConsole {
+  log?(...args: unknown[]): void
+  error?(...args: unknown[]): void
+}
+
 /** The restricted Cordis context a dynamic client half is given. */
 interface ClientContext {
   /** Services are reached through `get`; a few also appear as properties. */
   get?(name: string): unknown
   readonly React?: ClientReact
   readonly slots?: ClientSlots
+  readonly console?: ClientConsole
 }
 
+// rc.3 mounts the browser half through `__ModuleLoader__` after wrapping the
+// exported plugin in its guarded context, and the guarded context only exposes
+// services the plugin declares. The export therefore carries `inject` (see the
+// plugin object at the bottom); a bare function would have no declaration site,
+// and a top-level `return` is impossible because the same file is also parsed as
+// a classic script.
 /** Keys used by both registrations; the sidebar id addresses the main panel. */
 const PANEL_KEY = 'newprojects'
 
@@ -279,35 +292,66 @@ function createRow(React: ClientReact): (props: PanelIconOwnerProps) => unknown 
   }
 }
 
-/**
- * Read one service the way the restricted context allows: the builtin React
- * runtime and the slot table normally arrive as properties, but `get` is the
- * documented door and costs one fallback here instead of a silent no-panel.
- */
-function serviceOf(ctx: ClientContext, name: string): unknown {
-  return ctx.get === undefined ? undefined : ctx.get(name)
-}
-
-function apply(ctx: ClientContext): () => void {
-  const React = ctx.React ?? (serviceOf(ctx, 'React') as ClientReact | undefined)
-  const slots = ctx.slots ?? (serviceOf(ctx, 'slots') as ClientSlots | undefined)
-  if (React === undefined || slots === undefined) return () => undefined
-  const offPanel = slots.register({ name: 'main', key: PANEL_KEY }, createPanel(React))
-  const offRow = slots.register(
-    { name: 'sidebar.panellist', id: PANEL_KEY, order: 6, label: () => '新项目协作' },
-    createRow(React),
-  )
-  return () => {
-    offRow()
-    offPanel()
+function apply(ctx: ClientContext, react: ClientReact | undefined): () => void {
+  // The guarded client context refuses undeclared services on purpose, so the
+  // plugin declares `slots` below. `React` arrives through the module loader's
+  // `require`, not through the context: a page-global lookup does not exist in
+  // the classic-script bundle the Host serves.
+  const log: ClientConsole | undefined =
+    typeof console === 'undefined' ? undefined : (console as unknown as ClientConsole)
+  log?.log?.('[dsh-newprojects] apply start')
+  try {
+    const slots = ctx.slots as ClientSlots | undefined
+    if (react === undefined || slots === undefined) {
+      log?.log?.('[dsh-newprojects] missing React or slots', String(react), String(slots))
+      return () => undefined
+    }
+    // `slots.inject` defers the registration until the slot exists. Registering
+    // eagerly throws `slot "…" is not declared` when the page mounts a plugin
+    // before the owning shell has declared its slot tree, which is exactly what
+    // the boot audit turns into a fatal `did not activate`.
+    const cleanups: Array<() => void> = []
+    const offRow = slots.inject('sidebar.panellist', () => {
+      cleanups.push(
+        slots.register(
+          { name: 'sidebar.panellist', id: PANEL_KEY, order: 6, label: () => '新项目协作' },
+          createRow(react),
+        ),
+      )
+      // The sidebar entry declares the `main` cell it dispatches, so the panel
+      // registration has to wait for the entry that just got added.
+      cleanups.push(
+        slots.inject('main', () => {
+          cleanups.push(
+            slots.register({ name: 'main', key: PANEL_KEY }, createPanel(react)),
+          )
+        }),
+      )
+    })
+    log?.log?.('[dsh-newprojects] slots registered')
+    return () => {
+      for (const off of cleanups.splice(0)) off()
+      offRow()
+    }
+  } catch (error) {
+    log?.error?.('[dsh-newprojects] apply threw', String(error), (error as Error)?.stack)
+    throw error
   }
 }
 
+// The Host serves this file as a classic script and calls the factory once,
+// mounting whatever plugin it returns. A top-level `return` would therefore be
+// a syntax error (`Illegal return statement`), and `React` is only reachable
+// through the loader's `require` — see the module loader contract.
 window.__ModuleLoader__?.load({
   id: 'dsh-newprojects',
-  factory: () => {
-    const module = { exports: {} as { apply?: (ctx: ClientContext) => () => void } }
-    module.exports.apply = apply
-    return module.exports
-  },
+  factory: (requireModule?: (id: string) => unknown) => ({
+    /**
+     * Declared services the guarded client context may hand to `apply`. Only
+     * `slots` is read; everything else stays undeclared on purpose, because an
+     * undeclared read throws inside the guarded context.
+     */
+    inject: ['slots'] as const,
+    apply: (ctx: ClientContext) => apply(ctx, requireModule?.('react') as ClientReact | undefined),
+  }),
 })
